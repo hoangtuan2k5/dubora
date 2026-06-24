@@ -1,0 +1,5 @@
+deep-translator
+edge-tts
+gTTS
+google-api-python-client
+google-auth

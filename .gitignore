@@ -1,0 +1,8 @@
+work/
+outputs/
+assets/video/*
+assets/srt/*
+!assets/video/.gitkeep
+!assets/srt/.gitkeep
+__pycache__/
+*.pyc
