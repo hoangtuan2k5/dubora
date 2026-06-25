@@ -2,6 +2,7 @@ import re
 import os
 import sys
 import asyncio
+import hashlib
 import subprocess
 import requests
 import edge_tts
@@ -121,7 +122,38 @@ def is_valid_audio_file(path):
     except Exception:
         return False
 
-async def generate_speech_for_segment(index, text, output_path, voice="vi-VN-NamMinhNeural", retries=3):
+def tts_cache_key(provider, text):
+    voice = AZURE_VOICE if provider == "azure" else ""
+    payload = f"{provider}\n{voice}\n{text.strip()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+def tts_cache_key_path(path):
+    return f"{path}.sha256"
+
+def write_tts_cache_key(path, cache_key):
+    if cache_key:
+        with open(tts_cache_key_path(path), "w", encoding="utf-8") as f:
+            f.write(cache_key)
+
+def has_matching_tts_cache_key(path, cache_key):
+    if not cache_key:
+        return True
+    try:
+        with open(tts_cache_key_path(path), "r", encoding="utf-8") as f:
+            return f.read().strip() == cache_key
+    except FileNotFoundError:
+        return False
+
+def is_fresh_audio_file(path, source_path=None, cache_key=None):
+    if not is_valid_audio_file(path):
+        return False
+    if cache_key:
+        return has_matching_tts_cache_key(path, cache_key)
+    if source_path and os.path.exists(source_path):
+        return os.path.getmtime(path) >= os.path.getmtime(source_path)
+    return True
+
+async def generate_speech_for_segment(index, text, output_path, voice="vi-VN-NamMinhNeural", retries=3, cache_key=None):
     if not text.strip():
         return False
 
@@ -136,6 +168,7 @@ async def generate_speech_for_segment(index, text, output_path, voice="vi-VN-Nam
             await asyncio.wait_for(communicate.save(tmp_path), timeout=20.0)
             if is_valid_audio_file(tmp_path):
                 os.replace(tmp_path, output_path)
+                write_tts_cache_key(output_path, cache_key)
                 return True
         except Exception as e:
             print(f"Error at segment {index} (attempt {attempt+1}/{retries}): {type(e).__name__}: {e}")
@@ -146,7 +179,7 @@ async def generate_speech_for_segment(index, text, output_path, voice="vi-VN-Nam
 
     return False
 
-async def generate_speech_with_gtts(index, text, output_path, retries=3):
+async def generate_speech_with_gtts(index, text, output_path, retries=3, cache_key=None):
     if not text.strip():
         return False
 
@@ -164,6 +197,7 @@ async def generate_speech_with_gtts(index, text, output_path, retries=3):
             )
             if is_valid_audio_file(tmp_path):
                 os.replace(tmp_path, output_path)
+                write_tts_cache_key(output_path, cache_key)
                 return True
         except Exception as e:
             print(f"gTTS error at segment {index} (attempt {attempt+1}/{retries}): {e}")
@@ -174,7 +208,7 @@ async def generate_speech_with_gtts(index, text, output_path, retries=3):
 
     return False
 
-async def generate_speech_with_azure(index, text, output_path, retries=3):
+async def generate_speech_with_azure(index, text, output_path, retries=3, cache_key=None):
     if not text.strip():
         return False
 
@@ -227,6 +261,7 @@ async def generate_speech_with_azure(index, text, output_path, retries=3):
                 f.write(response.content)
             if is_valid_audio_file(tmp_path):
                 os.replace(tmp_path, output_path)
+                write_tts_cache_key(output_path, cache_key)
                 return True
         except Exception as e:
             print(f"Azure error at segment {index} (attempt {attempt+1}/{retries}): {type(e).__name__}: {e}")
@@ -237,7 +272,13 @@ async def generate_speech_with_azure(index, text, output_path, retries=3):
 
     return False
 
-async def generate_all_tts(provider="edge", input_srt="/tmp/dubbing/clean_final_vi.srt", output_dir="/tmp/dubbing/tts"):
+async def generate_all_tts(
+    provider="edge",
+    input_srt="/tmp/dubbing/clean_final_vi.srt",
+    output_dir="/tmp/dubbing/tts",
+    freshness_source=None,
+):
+    freshness_source = freshness_source or input_srt
     segs = parse_srt(input_srt)
     print(f"Loaded {len(segs)} segments for TTS generation.")
     
@@ -245,7 +286,11 @@ async def generate_all_tts(provider="edge", input_srt="/tmp/dubbing/clean_final_
     
     missing = [
         s for s in segs
-        if not is_valid_audio_file(os.path.join(output_dir, f"seg_{s['index']}.mp3"))
+        if not is_fresh_audio_file(
+            os.path.join(output_dir, f"seg_{s['index']}.mp3"),
+            freshness_source,
+            tts_cache_key(provider, s["text"]),
+        )
     ]
     print(f"Need to generate {len(missing)} missing or invalid segments.")
 
@@ -258,22 +303,23 @@ async def generate_all_tts(provider="edge", input_srt="/tmp/dubbing/clean_final_
 
     async def worker(s):
         out_file = os.path.join(output_dir, f"seg_{s['index']}.mp3")
+        cache_key = tts_cache_key(provider, s["text"])
         async with semaphore:
             await asyncio.sleep(0.2)
-            if is_valid_audio_file(out_file):
+            if is_fresh_audio_file(out_file, freshness_source, cache_key):
                 return s['index'], True
 
             if provider == "azure":
                 success = await generate_speech_with_azure(
-                    s['index'], s['text'], out_file
+                    s['index'], s['text'], out_file, cache_key=cache_key
                 )
             elif provider == "gtts":
                 success = await generate_speech_with_gtts(
-                    s['index'], s['text'], out_file
+                    s['index'], s['text'], out_file, cache_key=cache_key
                 )
             else:
                 success = await generate_speech_for_segment(
-                    s['index'], s['text'], out_file
+                    s['index'], s['text'], out_file, cache_key=cache_key
                 )
             return s['index'], success
 
@@ -300,7 +346,8 @@ async def generate_all_tts(provider="edge", input_srt="/tmp/dubbing/clean_final_
 if __name__ == "__main__":
     provider = sys.argv[1] if len(sys.argv) > 1 else "azure"
     if provider not in {"azure", "edge", "gtts"}:
-        raise SystemExit("Usage: python3 generate_tts.py [azure|edge|gtts] [INPUT_VI.srt] [OUTPUT_TTS_DIR]")
+        raise SystemExit("Usage: python3 generate_tts.py [azure|edge|gtts] [INPUT_VI.srt] [OUTPUT_TTS_DIR] [FRESHNESS_SOURCE]")
     input_srt = sys.argv[2] if len(sys.argv) > 2 else "/tmp/dubbing/clean_final_vi.srt"
     output_dir = sys.argv[3] if len(sys.argv) > 3 else "/tmp/dubbing/tts"
-    asyncio.run(generate_all_tts(provider, input_srt, output_dir))
+    freshness_source = sys.argv[4] if len(sys.argv) > 4 else input_srt
+    asyncio.run(generate_all_tts(provider, input_srt, output_dir, freshness_source))

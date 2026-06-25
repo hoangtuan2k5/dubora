@@ -6,7 +6,7 @@ from pathlib import Path
 
 from clean_rolling import clean_youtube_rolling_subtitles
 from translate_srt import translate_srt
-from generate_tts import is_valid_audio_file, parse_srt
+from generate_tts import is_fresh_audio_file, parse_srt, tts_cache_key
 
 
 ROOT = Path(__file__).resolve().parent
@@ -88,27 +88,34 @@ def run(cmd):
     subprocess.run([str(part) for part in cmd], check=True)
 
 
-def missing_tts_segments(vi_srt, tts_dir):
+def missing_tts_segments(vi_srt, tts_dir, provider=None, freshness_source=None):
+    freshness_source = freshness_source or vi_srt
     return [
         segment["index"]
         for segment in parse_srt(str(vi_srt))
-        if not is_valid_audio_file(str(tts_dir / f"seg_{segment['index']}.mp3"))
+        if not is_fresh_audio_file(
+            str(tts_dir / f"seg_{segment['index']}.mp3"),
+            str(freshness_source),
+            tts_cache_key(provider, segment["text"]) if provider else None,
+        )
     ]
 
 
-def generate_tts_until_complete(provider, vi_srt, tts_dir, max_runs=8):
+def generate_tts_until_complete(provider, vi_srt, tts_dir, freshness_source=None, max_runs=8):
     for run_index in range(1, max_runs + 1):
-        missing = missing_tts_segments(vi_srt, tts_dir)
+        missing = missing_tts_segments(vi_srt, tts_dir, provider, freshness_source)
         if not missing:
             print("All TTS segments are ready.")
             return
 
         print(f"TTS pass {run_index}/{max_runs}: {len(missing)} missing segment(s): {missing}")
         cmd = ["python3", ROOT / "generate_tts.py", provider, vi_srt, tts_dir]
+        if freshness_source:
+            cmd.append(freshness_source)
         print("+", " ".join(str(part) for part in cmd))
         result = subprocess.run([str(part) for part in cmd])
         if result.returncode != 0:
-            still_missing = missing_tts_segments(vi_srt, tts_dir)
+            still_missing = missing_tts_segments(vi_srt, tts_dir, provider, freshness_source)
             if not still_missing:
                 print("TTS command returned non-zero, but all segments were generated.")
                 return
@@ -116,7 +123,7 @@ def generate_tts_until_complete(provider, vi_srt, tts_dir, max_runs=8):
 
         time.sleep(2)
 
-    missing = missing_tts_segments(vi_srt, tts_dir)
+    missing = missing_tts_segments(vi_srt, tts_dir, provider, freshness_source)
     if missing:
         raise RuntimeError(f"Failed to generate {len(missing)} TTS segment(s) after {max_runs} pass(es): {missing}")
 
@@ -155,7 +162,7 @@ def create_dub_for_video(video_path, provider, force_tts=False, translate=False)
         shutil.copy2(clean_srt, normalized_srt)
         print(f"Using cleaned Vietnamese SRT without translation: {vi_srt}")
 
-    generate_tts_until_complete(provider, vi_srt, tts_dir)
+    generate_tts_until_complete(provider, vi_srt, tts_dir, srt_path)
     run(["python3", ROOT / "build_audio.py", vi_srt, tts_dir, voiceover, job_dir])
     run(["python3", ROOT / "build_video.py", video_path, voiceover, output_video])
 
