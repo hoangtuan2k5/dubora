@@ -1,5 +1,7 @@
 work/
 outputs/
+.env
+.venv/
 assets/video/*
 assets/srt/*
 !assets/video/.gitkeep

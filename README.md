@@ -15,17 +15,57 @@ The pipeline:
 
 ## Setup
 
-Run from the project folder:
+Prerequisites:
+
+- Python 3.10+
+- FFmpeg available in `PATH`
+- FFmpeg must include the `rubberband` audio filter
+
+Verify FFmpeg:
+
+```bash
+ffmpeg -version
+ffmpeg -filters | grep rubberband
+```
+
+On Windows PowerShell, use:
+
+```powershell
+ffmpeg -version
+ffmpeg -filters | findstr rubberband
+```
+
+Install Python dependencies from the project folder.
+
+Ubuntu/macOS:
 
 ```bash
 cd ~/viet-dub
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-Add Azure Speech credentials to `/home/ubuntu/AI_news/.env`:
+Windows PowerShell:
+
+```powershell
+cd viet-dub
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+If PowerShell blocks venv activation, run this in the same terminal first:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+Add Azure Speech credentials to `.env` in the project folder:
 
 ```text
 AZURE_KEY=...
+AZURE_REGION=southeastasia
 ```
 
 The default Azure region is `southeastasia`.

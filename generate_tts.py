@@ -4,15 +4,19 @@ import sys
 import asyncio
 import hashlib
 import subprocess
+from pathlib import Path
 import requests
 import edge_tts
 from gtts import gTTS
 
 AZURE_VOICE = "de-DE-Seraphina:DragonHDLatestNeural"
 AZURE_REGION = "southeastasia"
+ROOT = Path(__file__).resolve().parent
 AZURE_ENV_PATHS = (
-    "/home/ubuntu/AI_news/.env",
-    "/home/ubuntu/viet-dub/.env",
+    ROOT / ".env",
+    Path.cwd() / ".env",
+    Path("/home/ubuntu/AI_news/.env"),
+    Path("/home/ubuntu/viet-dub/.env"),
 )
 
 TTS_PRONUNCIATIONS = (
@@ -60,7 +64,7 @@ def load_azure_config():
     region = os.environ.get("AZURE_REGION", AZURE_REGION)
     if not api_key:
         raise RuntimeError(
-            "Missing AZURE_KEY. Add it to /home/ubuntu/AI_news/.env or export it."
+            "Missing AZURE_KEY. Add it to .env in the project folder or export it."
         )
     return api_key, region
 
