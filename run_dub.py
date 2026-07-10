@@ -141,6 +141,14 @@ def create_dub_for_video(video_path, provider, force_tts=False, translate=False)
     tts_dir = job_dir / "tts"
     output_video = (OUTPUT_DIR / relative_path).with_name(f"{video_path.stem}.vi-dub.mp4")
 
+    if not force_tts and output_video.exists():
+        video_mtime = video_path.stat().st_mtime
+        srt_mtime = srt_path.stat().st_mtime
+        out_mtime = output_video.stat().st_mtime
+        if out_mtime >= video_mtime and out_mtime >= srt_mtime:
+            print(f"Skipping {relative_path}, output video already exists and is up to date.")
+            return output_video
+
     job_dir.mkdir(parents=True, exist_ok=True)
     output_video.parent.mkdir(parents=True, exist_ok=True)
 
