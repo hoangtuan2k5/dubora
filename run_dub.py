@@ -47,22 +47,27 @@ def list_videos():
     )
 
 
-def find_video(name):
+def find_targets(name):
     path = Path(name)
-    if path.is_file():
-        return path.resolve()
+    if path.is_absolute():
+        if path.is_file():
+            return [path.resolve()]
+        if path.is_dir():
+            return sorted(p.resolve() for p in path.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES)
 
     candidate = VIDEO_DIR / name
     if candidate.is_file():
-        return candidate.resolve()
+        return [candidate.resolve()]
+    if candidate.is_dir():
+        return sorted(p.resolve() for p in candidate.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES)
 
     matches = sorted(VIDEO_DIR.glob(f"{name}.*"))
     video_matches = [p for p in matches if p.suffix.lower() in VIDEO_SUFFIXES]
     if len(video_matches) == 1:
-        return video_matches[0].resolve()
+        return [video_matches[0].resolve()]
     if len(video_matches) > 1:
         raise SystemExit(f"Multiple video files match '{name}': {video_matches}")
-    raise SystemExit(f"Video not found: {name}")
+    raise SystemExit(f"Target not found: {name}")
 
 
 def find_matching_srt(video_path):
@@ -128,12 +133,19 @@ def generate_tts_until_complete(provider, vi_srt, tts_dir, freshness_source=None
         raise RuntimeError(f"Failed to generate {len(missing)} TTS segment(s) after {max_runs} pass(es): {missing}")
 
 
-def create_dub(video_name, provider, force_tts=False, translate=False):
-    video_path = find_video(video_name)
-    return create_dub_for_video(video_path, provider, force_tts, translate)
+def create_dubs_for_target(target_name, provider, force=False, force_tts=False, translate=False):
+    video_paths = find_targets(target_name)
+    if not video_paths:
+        raise SystemExit(f"No videos found for target: {target_name}")
+    outputs = []
+    for index, video_path in enumerate(video_paths, 1):
+        relative_path = video_relative_path(video_path)
+        print(f"\n[{index}/{len(video_paths)}] {relative_path}")
+        outputs.append(create_dub_for_video(video_path, provider, force, force_tts, translate))
+    return outputs
 
 
-def create_dub_for_video(video_path, provider, force_tts=False, translate=False):
+def create_dub_for_video(video_path, provider, force=False, force_tts=False, translate=False):
     srt_path = find_matching_srt(video_path)
     relative_path = video_relative_path(video_path)
 
@@ -141,7 +153,7 @@ def create_dub_for_video(video_path, provider, force_tts=False, translate=False)
     tts_dir = job_dir / "tts"
     output_video = (OUTPUT_DIR / relative_path).with_name(f"{video_path.stem}.vi-dub.mp4")
 
-    if not force_tts and output_video.exists():
+    if not force and not force_tts and output_video.exists():
         video_mtime = video_path.stat().st_mtime
         srt_mtime = srt_path.stat().st_mtime
         out_mtime = output_video.stat().st_mtime
@@ -178,7 +190,7 @@ def create_dub_for_video(video_path, provider, force_tts=False, translate=False)
     return output_video
 
 
-def create_all_dubs(provider, force_tts=False, translate=False):
+def create_all_dubs(provider, force=False, force_tts=False, translate=False):
     videos = list_videos()
     if not videos:
         raise SystemExit(f"No video files found in {VIDEO_DIR}")
@@ -188,7 +200,7 @@ def create_all_dubs(provider, force_tts=False, translate=False):
     for index, video_path in enumerate(videos, 1):
         relative_path = video_relative_path(video_path)
         print(f"\n[{index}/{len(videos)}] {relative_path}")
-        outputs.append(create_dub_for_video(video_path, provider, force_tts, translate))
+        outputs.append(create_dub_for_video(video_path, provider, force, force_tts, translate))
     return outputs
 
 
@@ -197,11 +209,16 @@ def main():
         description="Create Vietnamese dubbed videos from matching assets/video and assets/srt files."
     )
     parser.add_argument(
-        "video",
+        "target",
         nargs="?",
-        help="Optional video filename/path under assets/video. If omitted, all videos are processed recursively.",
+        help="Optional video filename, path, or directory under assets/video. If omitted, all videos are processed.",
     )
     parser.add_argument("--provider", choices=["azure", "edge"], default="azure")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force reprocessing of the video even if output exists and is up to date.",
+    )
     parser.add_argument(
         "--force-tts",
         action="store_true",
@@ -213,10 +230,10 @@ def main():
         help="Translate cleaned SRT from English to Vietnamese. By default, SRT is treated as already Vietnamese.",
     )
     args = parser.parse_args()
-    if args.video:
-        create_dub(args.video, args.provider, args.force_tts, args.translate)
+    if args.target:
+        create_dubs_for_target(args.target, args.provider, args.force, args.force_tts, args.translate)
     else:
-        create_all_dubs(args.provider, args.force_tts, args.translate)
+        create_all_dubs(args.provider, args.force, args.force_tts, args.translate)
 
 
 if __name__ == "__main__":
