@@ -10,10 +10,104 @@ The pipeline:
 2. Find the matching `.srt` file in `assets/srt/`.
 3. Clean rolling/duplicated subtitles.
 4. Treat cleaned subtitles as Vietnamese by default.
-5. Generate Vietnamese voiceover with Azure Seraphina Dragon HD Latest.
+5. Generate Vietnamese voiceover with Azure Florian Dragon HD Latest.
 6. Build final MP4 with Vietnamese audio only.
 
-## Setup
+The Rust implementation ships one shared pipeline through:
+
+- `viet-dub`, a Linux CLI in `crates/viet-dub-cli`
+- `viet-dub`, a Windows Tauri 2 desktop app in `apps/desktop`
+- `viet-dub-core`, the library used by both frontends
+
+The Python files remain in the repository as the parity reference.
+
+## Rust CLI (Linux)
+
+Prerequisites:
+
+- Rust 1.85+
+- FFmpeg and FFprobe available in `PATH`
+- FFmpeg must include the `rubberband` audio filter
+
+Build the release binary:
+
+```bash
+cargo build --release -p viet-dub-cli
+```
+
+Run it from a project root or pass `--root` explicitly:
+
+```bash
+export AZURE_KEY=...
+export AZURE_REGION=southeastasia
+
+./target/release/viet-dub
+./target/release/viet-dub "course/part/lesson.mp4"
+./target/release/viet-dub --force "course/part/lesson.mp4"
+./target/release/viet-dub --force-tts "course/part/lesson.mp4"
+./target/release/viet-dub --root /data/courses/my-course
+```
+
+`<root>/.env` is also supported (`AZURE_KEY`, `AZURE_REGION`). Optional overrides:
+
+```bash
+export VIET_DUB_FFMPEG=/usr/bin/ffmpeg
+export VIET_DUB_FFPROBE=/usr/bin/ffprobe
+```
+
+Azure is the Rust MVP provider; Edge TTS and English-to-Vietnamese translation
+remain in the Python reference for now (`--provider edge` / `--translate` error
+with a clear message).
+
+Verify:
+
+```bash
+cargo test -p viet-dub-core
+ffmpeg -filters | grep rubberband
+```
+
+## Windows Desktop
+
+### Build via GitHub Actions (recommended)
+
+Workflow: `.github/workflows/build-windows.yml` (runs on `windows-latest`).
+
+```bash
+# After the repo is on GitHub:
+gh workflow run "Build Windows"
+gh run watch
+# Download artifacts when finished:
+gh run download -n viet-dub-windows
+```
+
+Artifacts include the NSIS installer (`viet-dub_*.exe`) and the raw app binary
+when present.
+
+### Build locally on Windows
+
+```powershell
+.\scripts\prepare-ffmpeg-windows.ps1
+cd apps\desktop
+npm install
+npm run tauri build
+```
+
+The preparation script downloads the pinned Gyan FFmpeg 8.1.2 essentials build,
+verifies its checksum, stages binaries under
+`apps/desktop/src-tauri/resources/ffmpeg/`, and asserts the `rubberband` filter
+exists. See `THIRD_PARTY_NOTICES.md` before distributing an installer.
+
+The desktop app stores project root and Azure settings under the local Tauri
+app config directory. UI copy is Vietnamese; icons use Tabler Icons.
+
+Dev UI only (no native shell) from `apps/desktop`:
+
+```bash
+npm install
+npm run build
+```
+
+## Python Reference Setup
 
 Prerequisites:
 
@@ -160,7 +254,7 @@ outputs/[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introdu
 The default TTS provider is Azure Speech with:
 
 ```text
-de-DE-Seraphina:DragonHDLatestNeural
+de-DE-Florian:DragonHDLatestNeural
 ```
 
 You can still run the old Edge provider if needed:
@@ -171,7 +265,7 @@ python3 run_dub.py --provider edge
 
 ## TTS Pronunciation
 
-Subtitles keep technical terms in English. The default Azure Seraphina provider
+Subtitles keep technical terms in English. The default Azure Florian provider
 reads mixed Vietnamese and English terms directly.
 
 The legacy Edge provider still uses a pronunciation map so Vietnamese voice does

@@ -1,0 +1,24 @@
+[package]
+name = "viet-dub-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "viet_dub_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "viet-dub"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+viet-dub-core = { path = "../../../crates/viet-dub-core" }

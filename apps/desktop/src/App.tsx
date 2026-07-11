@@ -1,0 +1,446 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  IconAdjustmentsHorizontal,
+  IconAlertTriangle,
+  IconArrowRight,
+  IconBrandAzure,
+  IconCheck,
+  IconCircleCheckFilled,
+  IconClock,
+  IconEye,
+  IconEyeOff,
+  IconFolder,
+  IconFolderOpen,
+  IconKey,
+  IconLibrary,
+  IconLoader2,
+  IconMoon,
+  IconPlayerPlayFilled,
+  IconPlayerStopFilled,
+  IconRefresh,
+  IconSearch,
+  IconSettings,
+  IconSun,
+  IconTerminal2,
+  IconVideo,
+  IconWaveSine,
+  IconX,
+} from "@tabler/icons-react";
+import {
+  api,
+  type AppConfig,
+  type DubProgress,
+  type FfmpegStatus,
+  type VideoInfo,
+} from "./tauri";
+
+const DEFAULT_CONFIG: AppConfig = {
+  projectRoot: "",
+  azureKey: "",
+  azureRegion: "southeastasia",
+};
+
+const STAGES = [
+  ["clean", "Làm sạch"],
+  ["tts", "Tạo giọng"],
+  ["audio", "Phối âm"],
+  ["video", "Đóng gói"],
+] as const;
+
+const stagePercent: Record<DubProgress["stage"], number> = {
+  clean: 12,
+  tts: 20,
+  audio: 75,
+  video: 92,
+  done: 100,
+  skip: 100,
+  error: 100,
+};
+
+function describeError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function outputPath(root: string, relativePath?: string) {
+  if (!relativePath) return `${root.replace(/[\\/]$/, "")}/outputs`;
+  const file = relativePath.replace(/\.[^./\\]+$/, ".vi-dub.mp4");
+  return `${root.replace(/[\\/]$/, "")}/outputs/${file}`;
+}
+
+function App() {
+  const [view, setView] = useState<"library" | "settings">("library");
+  const [theme, setTheme] = useState<"dark" | "light">(() =>
+    localStorage.getItem("theme") === "light" ? "light" : "dark",
+  );
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [savedConfig, setSavedConfig] = useState(DEFAULT_CONFIG);
+  const [videos, setVideos] = useState<VideoInfo[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
+  const [force, setForce] = useState(false);
+  const [forceTts, setForceTts] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null);
+  const [progress, setProgress] = useState<DubProgress | null>(null);
+  const [logs, setLogs] = useState<DubProgress[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const projectRootRef = useRef("");
+  const scanRequestRef = useRef(0);
+
+  const scan = async (root = config.projectRoot): Promise<boolean> => {
+    const requestId = ++scanRequestRef.current;
+    if (!root) {
+      setVideos([]);
+      setSelected(new Set());
+      return false;
+    }
+    setScanning(true);
+    setNotice("");
+    try {
+      const found = await api.scanVideos(root);
+      if (requestId !== scanRequestRef.current) return false;
+      setVideos(found);
+      setSelected((current) =>
+        new Set([...current].filter((path) => found.some((video) => video.relativePath === path))),
+      );
+      return true;
+    } catch (error) {
+      if (requestId !== scanRequestRef.current) return false;
+      setVideos([]);
+      setSelected(new Set());
+      setNotice(`Không thể quét thư viện: ${describeError(error)}`);
+      return false;
+    } finally {
+      if (requestId === scanRequestRef.current) setScanning(false);
+    }
+  };
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    projectRootRef.current = savedConfig.projectRoot;
+  }, [savedConfig.projectRoot]);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([api.getConfig(), api.ffmpegStatus()])
+      .then(([saved, status]) => {
+        if (!active) return;
+        const loaded = { ...DEFAULT_CONFIG, ...saved };
+        setConfig(loaded);
+        setSavedConfig(loaded);
+        setFfmpeg(status);
+        void scan(saved.projectRoot);
+      })
+      .catch((error) => active && setNotice(`Không thể khởi tạo ứng dụng: ${describeError(error)}`));
+
+    let unlisten: (() => void) | undefined;
+    void api.onProgress((event) => {
+      setProgress((current) =>
+        event.stage === "tts" && event.current == null && current?.stage === "tts"
+          ? { ...event, current: current.current, total: current.total }
+          : event,
+      );
+      setLogs((current) => [...current.slice(-199), event]);
+      if (event.video === "" && (event.stage === "done" || event.stage === "error")) {
+        setBusy(false);
+        const root = projectRootRef.current;
+        if (root) void scan(root);
+      }
+    })
+      .then((stop) => (active ? (unlisten = stop) : stop()))
+      .catch((error) => setNotice(`Không thể theo dõi tiến độ: ${describeError(error)}`));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+    // Tauri listeners and initial config load once for the app lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), [logs]);
+
+  const visibleVideos = useMemo(() => {
+    const term = query.trim().toLocaleLowerCase("vi");
+    return term
+      ? videos.filter((video) => video.relativePath.toLocaleLowerCase("vi").includes(term))
+      : videos;
+  }, [query, videos]);
+
+  const progressValue = progress
+    ? progress.stage === "tts" && progress.current != null && progress.total
+      ? 20 + Math.round((progress.current / progress.total) * 48)
+      : stagePercent[progress.stage]
+    : 0;
+
+  const save = async () => {
+    setSaving(true);
+    setNotice("");
+    try {
+      await api.saveConfig(config);
+      setSavedConfig(config);
+      const status = await api.ffmpegStatus();
+      setFfmpeg(status);
+      const scanned = await scan(config.projectRoot);
+      if (scanned) setNotice("Đã lưu thiết lập.");
+      setView("library");
+    } catch (error) {
+      setNotice(`Không thể lưu thiết lập: ${describeError(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const browse = async () => {
+    try {
+      const root = await api.pickDirectory();
+      if (typeof root === "string") setConfig((current) => ({ ...current, projectRoot: root }));
+    } catch (error) {
+      setNotice(`Không thể mở hộp thoại: ${describeError(error)}`);
+    }
+  };
+
+  const cancelSettings = () => {
+    setConfig(savedConfig);
+    setView("library");
+  };
+
+  const openPath = (path: string) => {
+    void api.openPath(path).catch((error) => setNotice(`Không thể mở đường dẫn: ${describeError(error)}`));
+  };
+
+  const run = async (targets: string[]) => {
+    if (!targets.length || busy) return;
+    setBusy(true);
+    setLogs([]);
+    setProgress(null);
+    setNotice("");
+    try {
+      await api.startDub(targets, force, forceTts);
+    } catch (error) {
+      setBusy(false);
+      setNotice(`Job thất bại: ${describeError(error)}`);
+    }
+  };
+
+  const cancelJob = async () => {
+    if (!busy) return;
+    try {
+      await api.cancelDub();
+      setNotice("Đã gửi yêu cầu hủy. Job sẽ dừng giữa các video.");
+    } catch (error) {
+      setNotice(`Không thể hủy: ${describeError(error)}`);
+    }
+  };
+
+  const toggleSelected = (path: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      next.has(path) ? next.delete(path) : next.add(path);
+      return next;
+    });
+  };
+
+  const toggleAllVisible = () => {
+    const everyVisibleSelected = visibleVideos.every((video) => selected.has(video.relativePath));
+    setSelected((current) => {
+      const next = new Set(current);
+      visibleVideos.forEach((video) =>
+        everyVisibleSelected ? next.delete(video.relativePath) : next.add(video.relativePath),
+      );
+      return next;
+    });
+  };
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand" aria-label="viet-dub">
+          <div className="brand-mark"><IconWaveSine size={25} stroke={1.7} /></div>
+          <div><strong>VIET//DUB</strong><span>VOICE WORKSTATION</span></div>
+        </div>
+
+        <nav className="nav" aria-label="Điều hướng chính">
+          <button className={view === "library" ? "active" : ""} onClick={cancelSettings}>
+            <IconLibrary size={19} /> Thư viện <span>{videos.length}</span>
+          </button>
+          <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
+            <IconSettings size={19} /> Thiết lập
+          </button>
+        </nav>
+
+        <div className="sidebar-meter" aria-label="Trạng thái hệ thống">
+          <div className="meter-heading"><span>SYSTEM CHECK</span><IconTerminal2 size={16} /></div>
+          <div className={`system-line ${ffmpeg?.ready ? "ok" : "warn"}`}>
+            <span className="status-dot" /> FFmpeg + rubberband
+            <b>{ffmpeg?.ready ? "READY" : "CHECK"}</b>
+          </div>
+          {ffmpeg?.path && <small title={ffmpeg.path}>{ffmpeg.path}</small>}
+        </div>
+
+        <button
+          className="theme-button"
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          aria-label={theme === "dark" ? "Bật giao diện sáng" : "Bật giao diện tối"}
+        >
+          {theme === "dark" ? <IconSun size={18} /> : <IconMoon size={18} />}
+          {theme === "dark" ? "Giao diện sáng" : "Giao diện tối"}
+        </button>
+      </aside>
+
+      <main>
+        <header className="topbar">
+          <div className="breadcrumb"><span>DESKTOP /</span> {view === "library" ? "THƯ VIỆN" : "THIẾT LẬP"}</div>
+          <div className="root-chip" title={config.projectRoot || "Chưa chọn project root"}>
+            <IconFolder size={16} />
+            <span>{config.projectRoot || "Chưa chọn project root"}</span>
+          </div>
+        </header>
+
+        {notice && (
+          <div className="notice" role="status">
+            <IconAlertTriangle size={18} /> <span>{notice}</span>
+            <button onClick={() => setNotice("")} aria-label="Đóng thông báo"><IconX size={16} /></button>
+          </div>
+        )}
+
+        {view === "settings" ? (
+          <section className="settings-page page-enter" aria-labelledby="settings-title">
+            <div className="page-heading">
+              <div><p className="eyebrow">WORKSPACE CONFIGURATION</p><h1 id="settings-title">Thiết lập hệ thống</h1></div>
+              <p>Liên kết thư mục dự án, Azure Speech và bộ công cụ xử lý âm thanh.</p>
+            </div>
+
+            <div className="settings-grid">
+              <article className="panel config-panel">
+                <div className="panel-title"><span className="number">01</span><div><h2>Thư mục dự án</h2><p>Nơi chứa assets, work và outputs.</p></div></div>
+                <label htmlFor="project-root">Project root</label>
+                <div className="input-action">
+                  <div className="input-wrap"><IconFolder size={18} /><input id="project-root" value={config.projectRoot} onChange={(event) => setConfig({ ...config, projectRoot: event.target.value })} placeholder="D:\Courses\viet-dub" /></div>
+                  <button className="secondary-button" onClick={browse}><IconFolderOpen size={18} /> Chọn thư mục</button>
+                </div>
+                <div className="path-preview"><span>INPUT</span> {config.projectRoot ? `${config.projectRoot}/assets/video` : "—"}</div>
+                <div className="path-preview"><span>OUTPUT</span> {config.projectRoot ? `${config.projectRoot}/outputs` : "—"}</div>
+              </article>
+
+              <article className="panel config-panel">
+                <div className="panel-title"><span className="number">02</span><div><h2>Azure Speech</h2><p>Khóa được lưu cục bộ trên máy.</p></div></div>
+                <label htmlFor="azure-key">Azure Speech key</label>
+                <div className="input-wrap"><IconKey size={18} /><input id="azure-key" type={showKey ? "text" : "password"} value={config.azureKey} onChange={(event) => setConfig({ ...config, azureKey: event.target.value })} placeholder="Nhập khóa Azure" autoComplete="off" /><button className="icon-button" onClick={() => setShowKey(!showKey)} aria-label={showKey ? "Ẩn Azure key" : "Hiện Azure key"}>{showKey ? <IconEyeOff size={18} /> : <IconEye size={18} />}</button></div>
+                <label htmlFor="azure-region">Region</label>
+                <div className="input-wrap"><IconBrandAzure size={18} /><input id="azure-region" value={config.azureRegion} onChange={(event) => setConfig({ ...config, azureRegion: event.target.value })} placeholder="southeastasia" /></div>
+              </article>
+
+              <article className="panel status-panel">
+                <div className="panel-title"><span className="number">03</span><div><h2>FFmpeg engine</h2><p>Yêu cầu filter rubberband.</p></div></div>
+                <div className={`engine-status ${ffmpeg?.ready ? "ready" : "missing"}`}>
+                  {ffmpeg?.ready ? <IconCircleCheckFilled size={28} /> : <IconAlertTriangle size={28} />}
+                  <div><strong>{ffmpeg?.ready ? "Sẵn sàng xử lý" : "Chưa sẵn sàng"}</strong><span>{ffmpeg?.message || "Đang kiểm tra…"}</span></div>
+                </div>
+                <button className="secondary-button" onClick={() => void api.ffmpegStatus().then(setFfmpeg)}><IconRefresh size={18} /> Kiểm tra lại</button>
+              </article>
+            </div>
+
+            <div className="settings-actions">
+              <button className="secondary-button" onClick={cancelSettings}>Hủy</button>
+              <button className="primary-button" onClick={save} disabled={saving || !config.projectRoot || !config.azureKey}>
+                {saving ? <IconLoader2 className="spin" size={18} /> : <IconCheck size={18} />} Lưu thiết lập
+              </button>
+            </div>
+          </section>
+        ) : (
+          <section className="library-page page-enter" aria-labelledby="library-title">
+            <div className="page-heading compact">
+              <div><p className="eyebrow">PROJECT LIBRARY</p><h1 id="library-title">Bàn dựng lồng tiếng</h1></div>
+              <div className="heading-actions">
+                <button className="secondary-button" onClick={() => openPath(outputPath(config.projectRoot))} disabled={!config.projectRoot}><IconFolderOpen size={18} /> Mở outputs</button>
+                <button className="secondary-button" onClick={() => void scan()} disabled={scanning || !config.projectRoot}>{scanning ? <IconLoader2 className="spin" size={18} /> : <IconRefresh size={18} />} Quét lại</button>
+              </div>
+            </div>
+
+            <div className="workspace-grid">
+              <article className="panel library-panel">
+                <div className="library-toolbar">
+                  <div className="search"><IconSearch size={18} /><label className="sr-only" htmlFor="video-search">Tìm video</label><input id="video-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm khóa học hoặc video…" /></div>
+                  <div className="library-count"><strong>{selected.size}</strong> đã chọn <span>/</span> {videos.length} video</div>
+                </div>
+
+                {!config.projectRoot ? (
+                  <div className="empty-state"><IconFolder size={38} /><h2>Chọn project root để bắt đầu</h2><p>Kết nối thư mục chứa assets/video và assets/srt.</p><button className="primary-button" onClick={() => setView("settings")}><IconSettings size={18} /> Mở thiết lập</button></div>
+                ) : !videos.length && !scanning ? (
+                  <div className="empty-state"><IconVideo size={38} /><h2>Chưa tìm thấy video</h2><p>Thêm video vào assets/video rồi quét lại thư viện.</p></div>
+                ) : (
+                  <div className="table-scroll">
+                    <table>
+                      <thead><tr><th className="check-cell"><input type="checkbox" aria-label="Chọn tất cả video đang hiển thị" checked={visibleVideos.length > 0 && visibleVideos.every((video) => selected.has(video.relativePath))} onChange={toggleAllVisible} /></th><th>Video / đường dẫn tương đối</th><th>SRT</th><th>Output</th><th><span className="sr-only">Tác vụ</span></th></tr></thead>
+                      <tbody>
+                        {visibleVideos.map((video) => (
+                          <tr key={video.relativePath} className={selected.has(video.relativePath) ? "selected" : ""}>
+                            <td className="check-cell"><input type="checkbox" aria-label={`Chọn ${video.relativePath}`} checked={selected.has(video.relativePath)} onChange={() => toggleSelected(video.relativePath)} /></td>
+                            <td><button className="video-name" onClick={() => toggleSelected(video.relativePath)}><span className="file-icon"><IconVideo size={18} /></span><span><strong>{video.relativePath.split(/[\\/]/).at(-1)}</strong><small>{video.relativePath}</small></span></button></td>
+                            <td><span className={`badge ${video.hasSrt ? "success" : "danger"}`}>{video.hasSrt ? <IconCheck size={14} /> : <IconX size={14} />}{video.hasSrt ? "Có SRT" : "Thiếu"}</span></td>
+                            <td><span className={`badge ${video.hasOutput ? "cyan" : "muted"}`}><span className="mini-dot" />{video.hasOutput ? "Đã dub" : "Chưa có"}</span></td>
+                            <td><button className="icon-button row-action" disabled={!video.hasOutput} onClick={() => openPath(outputPath(config.projectRoot, video.relativePath))} aria-label={`Mở output của ${video.relativePath}`} title="Mở output"><IconFolderOpen size={18} /></button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </article>
+
+              <aside className="runner-column">
+                <article className="panel run-panel">
+                  <div className="panel-title"><span className="live-mark" /><div><h2>Dub control</h2><p>Azure · Florian Dragon HD</p></div><IconAdjustmentsHorizontal size={20} /></div>
+                  <div className="switch-row"><label htmlFor="force"><span><strong>Xử lý lại</strong><small>Dù output đã mới nhất</small></span><input id="force" type="checkbox" role="switch" checked={force} onChange={(event) => setForce(event.target.checked)} /></label></div>
+                  <div className="switch-row"><label htmlFor="force-tts"><span><strong>Sinh lại TTS</strong><small>Xóa cache giọng hiện tại</small></span><input id="force-tts" type="checkbox" role="switch" checked={forceTts} onChange={(event) => setForceTts(event.target.checked)} /></label></div>
+                  <div className="switch-row disabled"><label htmlFor="translate"><span><strong>Dịch EN → VI</strong><small>Coming soon</small></span><input id="translate" type="checkbox" role="switch" disabled /></label></div>
+                  <button className="primary-button run-button" disabled={busy || !selected.size || !ffmpeg?.ready} onClick={() => void run([...selected])}>
+                    {busy ? <IconLoader2 className="spin" size={19} /> : <IconPlayerPlayFilled size={19} />} {busy ? "Đang xử lý…" : `Dub ${selected.size || "video đã chọn"}`} <IconArrowRight size={18} />
+                  </button>
+                  {busy ? (
+                    <button className="secondary-button" onClick={() => void cancelJob()}>
+                      <IconPlayerStopFilled size={18} /> Hủy job
+                    </button>
+                  ) : (
+                    <button className="text-button" disabled={!videos.length || !ffmpeg?.ready} onClick={() => void run(videos.map((video) => video.relativePath))}>
+                      Dub tất cả {videos.length ? `(${videos.length})` : ""}
+                    </button>
+                  )}
+                </article>
+
+                <article className="panel progress-panel" aria-live="polite">
+                  <div className="progress-head"><div><span>JOB MONITOR</span><strong>{busy ? "ĐANG CHẠY" : progress?.stage === "error" ? "LỖI" : progress ? "HOÀN TẤT" : "CHỜ"}</strong></div><span className="job-time"><IconClock size={15} /> LIVE</span></div>
+                  <div className="current-file" title={progress?.video}>{progress?.video || progress?.message || "Chưa có job nào"}</div>
+                  <div className="progress-value"><strong>{progressValue.toString().padStart(2, "0")}</strong><span>%</span><small>{progress?.current != null && progress.total ? `${progress.current} / ${progress.total}` : ""}</small></div>
+                  <div className="progress-track"><span style={{ width: `${progressValue}%` }} /></div>
+                  <div className="stages">
+                    {STAGES.map(([stage, label]) => {
+                      const currentIndex = STAGES.findIndex(([key]) => key === progress?.stage);
+                      const index = STAGES.findIndex(([key]) => key === stage);
+                      const complete = progress?.stage === "done" || progress?.stage === "skip" || index < currentIndex;
+                      return <div key={stage} className={progress?.stage === stage ? "active" : complete ? "complete" : ""}><span>{complete ? <IconCheck size={12} /> : index + 1}</span>{label}</div>;
+                    })}
+                  </div>
+                  <div className="console" aria-label="Nhật ký job" tabIndex={0}>
+                    {logs.length ? logs.map((line, index) => <div key={`${line.jobId}-${index}`} className={line.stage}><span>{String(index + 1).padStart(2, "0")}</span><p>{line.message}</p></div>) : <div className="placeholder"><IconTerminal2 size={17} /><p>Nhật ký xử lý sẽ xuất hiện tại đây.</p></div>}
+                    <div ref={logEndRef} />
+                  </div>
+                </article>
+              </aside>
+            </div>
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}
+
+export default App;

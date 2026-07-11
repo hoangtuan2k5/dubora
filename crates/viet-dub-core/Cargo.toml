@@ -1,0 +1,14 @@
+[package]
+name = "viet-dub-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+

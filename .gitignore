@@ -8,3 +8,11 @@ assets/srt/*
 !assets/srt/.gitkeep
 __pycache__/
 *.pyc
+target/
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/resources/ffmpeg/*
+!apps/desktop/src-tauri/resources/ffmpeg/README.md
+*.vi-dub.mp4
+.DS_Store
