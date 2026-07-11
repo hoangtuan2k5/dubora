@@ -10,6 +10,10 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+authors = ["Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev>"]
+repository = "https://github.com/hoangtuan2k5/viet-dub"
+homepage = "https://github.com/hoangtuan2k5/viet-dub"
+documentation = "https://github.com/hoangtuan2k5/viet-dub"
 
 [workspace.dependencies]
 anyhow = "1"

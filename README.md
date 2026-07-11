@@ -2,7 +2,10 @@
 
 Create Vietnamese dubbed videos from video files and matching SRT subtitles.
 
-Author: hoangtuan2k5
+Author: Hoàng Chiều Nguyễn Tuấn  
+Email: tuan@hoangtuan.dev  
+GitHub: [hoangtuan2k5](https://github.com/hoangtuan2k5)  
+Repository: [hoangtuan2k5/viet-dub](https://github.com/hoangtuan2k5/viet-dub)
 
 The pipeline:
 

@@ -506,9 +506,51 @@ function App() {
                 </button>
               </article>
 
-              <article className="panel guide-card full">
+              <article className="panel guide-card">
                 <div className="panel-title">
                   <span className="number">05</span>
+                  <div>
+                    <h2>Tác giả</h2>
+                    <p className="lead">Thông tin liên hệ và mã nguồn.</p>
+                  </div>
+                </div>
+                <ul>
+                  <li>
+                    <strong>Tác giả:</strong> Hoàng Chiều Nguyễn Tuấn
+                  </li>
+                  <li>
+                    <strong>Email:</strong> <code>tuan@hoangtuan.dev</code>
+                  </li>
+                  <li>
+                    <strong>GitHub:</strong>{" "}
+                    <a
+                      className="guide-link"
+                      href="https://github.com/hoangtuan2k5"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ display: "inline", marginTop: 0 }}
+                    >
+                      hoangtuan2k5 <IconExternalLink size={14} />
+                    </a>
+                  </li>
+                  <li>
+                    <strong>Repo:</strong>{" "}
+                    <a
+                      className="guide-link"
+                      href="https://github.com/hoangtuan2k5/viet-dub"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ display: "inline", marginTop: 0 }}
+                    >
+                      hoangtuan2k5/viet-dub <IconExternalLink size={14} />
+                    </a>
+                  </li>
+                </ul>
+              </article>
+
+              <article className="panel guide-card">
+                <div className="panel-title">
+                  <span className="number">06</span>
                   <div>
                     <h2>Yêu cầu hệ thống &amp; lưu ý</h2>
                     <p className="lead">Những điều cần biết trước khi chạy batch lớn.</p>
@@ -542,6 +584,11 @@ function App() {
                   installer chính thức hoặc kiểm tra lại engine trong Thiết lập.
                 </div>
               </article>
+
+              <p className="guide-footer">
+                viet-dub v0.1.0 · © 2026 Hoàng Chiều Nguyễn Tuấn · tuan@hoangtuan.dev ·{" "}
+                github.com/hoangtuan2k5
+              </p>
             </div>
           </section>
         ) : view === "settings" ? (

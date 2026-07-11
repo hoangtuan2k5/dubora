@@ -26,7 +26,9 @@ impl From<ProviderArg> for Provider {
 #[derive(Debug, Parser)]
 #[command(
     name = "viet-dub",
-    about = "Create Vietnamese dubbed videos from matching video and SRT files"
+    about = "Create Vietnamese dubbed videos from matching video and SRT files",
+    author = "Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev>",
+    long_about = "viet-dub — Vietnamese video dubbing CLI.\nAuthor: Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev>\nGitHub: https://github.com/hoangtuan2k5/viet-dub"
 )]
 struct Args {
     /// Video filename, path, or directory under assets/video; omit to process all.

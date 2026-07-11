@@ -3,6 +3,10 @@ name = "viet-dub-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Windows desktop UI for viet-dub — Vietnamese video dubbing"
 
 [lib]
 name = "viet_dub_app"

@@ -3,6 +3,10 @@ name = "viet-dub-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared pipeline for Vietnamese video dubbing"
 
 [dependencies]
 anyhow.workspace = true

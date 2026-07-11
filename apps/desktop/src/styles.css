@@ -1394,6 +1394,17 @@ button.guide-link:hover {
   font-weight: 600;
 }
 
+.guide-footer {
+  grid-column: 1 / -1;
+  margin: 8px 0 0;
+  padding-top: 8px;
+  color: var(--quiet);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  text-align: center;
+}
+
 @media (max-width: 1160px) {
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr) 305px;
