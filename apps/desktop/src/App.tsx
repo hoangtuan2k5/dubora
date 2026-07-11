@@ -9,6 +9,8 @@ import {
   IconClock,
   IconEye,
   IconEyeOff,
+  IconBook,
+  IconExternalLink,
   IconFolder,
   IconFolderOpen,
   IconKey,
@@ -68,7 +70,7 @@ function outputPath(root: string, relativePath?: string) {
 }
 
 function App() {
-  const [view, setView] = useState<"library" | "settings">("library");
+  const [view, setView] = useState<"library" | "settings" | "guide">("library");
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     localStorage.getItem("theme") === "light" ? "light" : "dark",
   );
@@ -268,11 +270,20 @@ function App() {
         </div>
 
         <nav className="nav" aria-label="Điều hướng chính">
-          <button className={view === "library" ? "active" : ""} onClick={cancelSettings}>
+          <button
+            className={view === "library" ? "active" : ""}
+            onClick={() => {
+              setConfig(savedConfig);
+              setView("library");
+            }}
+          >
             <IconLibrary size={19} /> Thư viện <span>{videos.length}</span>
           </button>
           <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
             <IconSettings size={19} /> Thiết lập
+          </button>
+          <button className={view === "guide" ? "active" : ""} onClick={() => setView("guide")}>
+            <IconBook size={19} /> Hướng dẫn
           </button>
         </nav>
 
@@ -297,7 +308,10 @@ function App() {
 
       <main>
         <header className="topbar">
-          <div className="breadcrumb"><span>DESKTOP /</span> {view === "library" ? "THƯ VIỆN" : "THIẾT LẬP"}</div>
+          <div className="breadcrumb">
+            <span>DESKTOP /</span>{" "}
+            {view === "library" ? "THƯ VIỆN" : view === "settings" ? "THIẾT LẬP" : "HƯỚNG DẪN"}
+          </div>
           <div className="root-chip" title={config.projectRoot || "Chưa chọn project root"}>
             <IconFolder size={16} />
             <span>{config.projectRoot || "Chưa chọn project root"}</span>
@@ -311,7 +325,226 @@ function App() {
           </div>
         )}
 
-        {view === "settings" ? (
+        {view === "guide" ? (
+          <section className="guide-page page-enter" aria-labelledby="guide-title">
+            <div className="page-heading">
+              <div>
+                <p className="eyebrow">USER GUIDE</p>
+                <h1 id="guide-title">Hướng dẫn sử dụng</h1>
+              </div>
+              <p>
+                Viet-dub tạo video lồng tiếng Việt từ file video + phụ đề SRT khớp nhau, dùng giọng
+                Azure Speech (Florian Dragon HD).
+              </p>
+            </div>
+
+            <div className="guide-grid">
+              <article className="panel guide-card full">
+                <div className="panel-title">
+                  <span className="number">01</span>
+                  <div>
+                    <h2>Quy trình nhanh</h2>
+                    <p className="lead">Làm theo thứ tự để dub được video đầu tiên.</p>
+                  </div>
+                </div>
+                <ol className="guide-steps">
+                  <li>
+                    <div>
+                      <strong>Chuẩn bị thư mục dự án</strong>
+                      <span>
+                        Tạo một folder bất kỳ (ví dụ <code>D:\Courses\my-course</code>) với cấu trúc
+                        assets/video và assets/srt bên dưới.
+                      </span>
+                    </div>
+                  </li>
+                  <li>
+                    <div>
+                      <strong>Lấy Azure Speech key</strong>
+                      <span>
+                        Tạo resource Azure Speech trên portal Microsoft, copy Key và Region vào
+                        Thiết lập.
+                      </span>
+                    </div>
+                  </li>
+                  <li>
+                    <div>
+                      <strong>Mở Thiết lập trong app</strong>
+                      <span>
+                        Chọn project root, dán Azure key + region (mặc định{" "}
+                        <code>southeastasia</code>), bấm Lưu.
+                      </span>
+                    </div>
+                  </li>
+                  <li>
+                    <div>
+                      <strong>Quét thư viện và Dub</strong>
+                      <span>
+                        Vào Thư viện → chọn video đã có SRT → bật tùy chọn nếu cần → bấm{" "}
+                        <strong>Dub</strong>. Kết quả nằm trong <code>outputs/</code>.
+                      </span>
+                    </div>
+                  </li>
+                </ol>
+                <button type="button" className="guide-link" onClick={() => setView("settings")}>
+                  Đi tới Thiết lập <IconArrowRight size={16} />
+                </button>
+              </article>
+
+              <article className="panel guide-card full">
+                <div className="panel-title">
+                  <span className="number">02</span>
+                  <div>
+                    <h2>Cấu trúc thư mục (bắt buộc)</h2>
+                    <p className="lead">
+                      Video và SRT phải cùng đường dẫn tương đối (basename giống nhau, khác phần
+                      mở rộng).
+                    </p>
+                  </div>
+                </div>
+                <pre className="tree-block">{`project-root/
+  assets/
+    video/
+      Khoa-hoc/
+        part1/
+          01. Bai hoc.mp4
+    srt/
+      Khoa-hoc/
+        part1/
+          01. Bai hoc.srt
+      # hoặc fallback: CC-Khoa-hoc/part1/01. Bai hoc.srt
+  work/          # file tạm (app tự tạo)
+  outputs/       # video lồng tiếng (app tự tạo)
+    Khoa-hoc/
+      part1/
+        01. Bai hoc.vi-dub.mp4`}</pre>
+                <div className="guide-tip">
+                  <strong>Khớp SRT:</strong> app thử{" "}
+                  <code>assets/srt/&lt;đường-dẫn-giống-video&gt;.srt</code> trước; nếu không có thì
+                  thử prefix <code>CC-</code> ở tên khóa học (ví dụ{" "}
+                  <code>CC-Khoa-hoc/...</code>). Định dạng video hỗ trợ:{" "}
+                  <code>.mp4</code>, <code>.mov</code>, <code>.mkv</code>, <code>.webm</code>.
+                </div>
+              </article>
+
+              <article className="panel guide-card">
+                <div className="panel-title">
+                  <span className="number">03</span>
+                  <div>
+                    <h2>Lấy Azure Speech key</h2>
+                    <p className="lead">Key dùng để sinh giọng nói từng câu phụ đề.</p>
+                  </div>
+                </div>
+                <ol>
+                  <li>
+                    Đăng nhập{" "}
+                    <a
+                      className="guide-link"
+                      href="https://portal.azure.com"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ display: "inline", marginTop: 0 }}
+                    >
+                      Azure Portal <IconExternalLink size={14} />
+                    </a>
+                    .
+                  </li>
+                  <li>
+                    Tạo resource <strong>Speech</strong> (hoặc Cognitive Services / AI Services có
+                    Speech).
+                  </li>
+                  <li>
+                    Vào resource → <strong>Keys and Endpoint</strong> → copy <strong>KEY 1</strong>{" "}
+                    và <strong>Location/Region</strong> (ví dụ <code>southeastasia</code>,{" "}
+                    <code>eastasia</code>).
+                  </li>
+                  <li>
+                    Dán vào app: menu <strong>Thiết lập</strong> → Azure Speech key + Region →{" "}
+                    <strong>Lưu thiết lập</strong>.
+                  </li>
+                </ol>
+                <div className="guide-tip">
+                  <strong>Bảo mật:</strong> key chỉ lưu cục bộ trên máy bạn (thư mục config app).
+                  Không chia sẻ key hay commit lên Git.
+                </div>
+              </article>
+
+              <article className="panel guide-card">
+                <div className="panel-title">
+                  <span className="number">04</span>
+                  <div>
+                    <h2>Dùng màn Thư viện</h2>
+                    <p className="lead">Theo dõi video, SRT và output; chạy job dub.</p>
+                  </div>
+                </div>
+                <ul>
+                  <li>
+                    <strong>Quét lại</strong> — làm mới danh sách sau khi thêm file.
+                  </li>
+                  <li>
+                    Cột <strong>SRT</strong> / <strong>Output</strong> — biết file nào sẵn sàng
+                    dub / đã có bản lồng tiếng.
+                  </li>
+                  <li>
+                    Chọn một hoặc nhiều video → <strong>Dub</strong>.
+                  </li>
+                  <li>
+                    <strong>Xử lý lại</strong> — force dù output đã mới hơn nguồn.
+                  </li>
+                  <li>
+                    <strong>Sinh lại TTS</strong> — xóa cache giọng và gọi Azure lại (tốn quota).
+                  </li>
+                  <li>
+                    <strong>Mở outputs</strong> — mở folder chứa file{" "}
+                    <code>*.vi-dub.mp4</code>.
+                  </li>
+                  <li>
+                    Job monitor bên phải — theo dõi clean → TTS → phối âm → đóng gói.
+                  </li>
+                </ul>
+                <button type="button" className="guide-link" onClick={() => setView("library")}>
+                  Mở Thư viện <IconArrowRight size={16} />
+                </button>
+              </article>
+
+              <article className="panel guide-card full">
+                <div className="panel-title">
+                  <span className="number">05</span>
+                  <div>
+                    <h2>Yêu cầu hệ thống &amp; lưu ý</h2>
+                    <p className="lead">Những điều cần biết trước khi chạy batch lớn.</p>
+                  </div>
+                </div>
+                <ul>
+                  <li>
+                    <strong>FFmpeg + rubberband:</strong> bản cài Windows bundle sẵn. Sidebar hiển
+                    thị READY khi engine ổn.
+                  </li>
+                  <li>
+                    <strong>Phụ đề mặc định là tiếng Việt.</strong> Dịch EN→VI chưa có trên desktop
+                    (Coming soon). Hãy dùng SRT đã dịch sẵn.
+                  </li>
+                  <li>
+                    <strong>Cache TTS:</strong> segment đã sinh sẽ được tái dùng nếu text/giọng
+                    không đổi — re-run course thường nhanh hơn lần đầu.
+                  </li>
+                  <li>
+                    <strong>Hủy job:</strong> khi đang chạy, bấm <strong>Hủy job</strong> — app dừng
+                    giữa các video (không cắt ngang giữa segment TTS đang gọi API).
+                  </li>
+                  <li>
+                    <strong>Tên folder đặc biệt:</strong> hỗ trợ khoảng trắng và dấu{" "}
+                    <code>[ ]</code> (kiểu tên khóa Udemy).
+                  </li>
+                </ul>
+                <div className="guide-tip">
+                  <strong>Lỗi thường gặp:</strong> “Thiếu SRT” → kiểm tra đường dẫn khớp video;
+                  “Missing AZURE_KEY” → lưu key trong Thiết lập; FFmpeg CHECK → cài lại bằng
+                  installer chính thức hoặc kiểm tra lại engine trong Thiết lập.
+                </div>
+              </article>
+            </div>
+          </section>
+        ) : view === "settings" ? (
           <section className="settings-page page-enter" aria-labelledby="settings-title">
             <div className="page-heading">
               <div><p className="eyebrow">WORKSPACE CONFIGURATION</p><h1 id="settings-title">Thiết lập hệ thống</h1></div>

@@ -1,5 +1,5 @@
 :root {
-  font-family: Bahnschrift, Aptos, "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-family: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", sans-serif;
   color: #e8edf3;
   background: #080d14;
   font-synthesis: none;
@@ -1222,6 +1222,178 @@ input[type="checkbox"] {
   border: 0;
 }
 
+/* —— Guide page —— */
+.guide-page {
+  padding: 28px 28px 40px;
+  overflow: auto;
+  max-height: calc(100vh - 56px);
+}
+
+.guide-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 8px;
+}
+
+.guide-card {
+  padding: 20px 20px 18px;
+}
+
+.guide-card.full {
+  grid-column: 1 / -1;
+}
+
+.guide-card h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.guide-card .lead {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  font-weight: 400;
+}
+
+.guide-card ol,
+.guide-card ul {
+  margin: 0;
+  padding-left: 1.15rem;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.65;
+  font-weight: 400;
+}
+
+.guide-card li + li {
+  margin-top: 6px;
+}
+
+.guide-card li strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.guide-card code {
+  font-family: "Be Vietnam Pro", system-ui, sans-serif;
+  font-size: 12px;
+}
+
+.tree-block {
+  font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.guide-card code {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--line-soft);
+  color: var(--cyan);
+  font-weight: 500;
+}
+
+.tree-block {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: var(--ink);
+  color: var(--muted);
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+  font-weight: 400;
+}
+
+.guide-card a.guide-link,
+button.guide-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  color: var(--cyan);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.guide-card a.guide-link:hover,
+button.guide-link:hover {
+  color: var(--amber-strong);
+}
+
+.guide-steps {
+  display: grid;
+  gap: 10px;
+  counter-reset: guide-step;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.guide-steps li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 12px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: var(--panel-raised);
+  margin-top: 0 !important;
+}
+
+.guide-steps li::before {
+  counter-increment: guide-step;
+  content: counter(guide-step);
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--amber-soft);
+  color: var(--amber-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.guide-steps li > div strong {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 13px;
+}
+
+.guide-steps li > div span {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+  font-weight: 400;
+}
+
+.guide-tip {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-left: 3px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.55;
+  font-weight: 400;
+}
+
+.guide-tip strong {
+  font-weight: 600;
+}
+
 @media (max-width: 1160px) {
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr) 305px;
@@ -1319,8 +1491,17 @@ input[type="checkbox"] {
   }
 
   .library-page,
-  .settings-page {
+  .settings-page,
+  .guide-page {
     padding: 25px 16px 30px;
+  }
+
+  .guide-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .guide-card.full {
+    grid-column: auto;
   }
 
   .page-heading,
