@@ -29,9 +29,13 @@ export type DubProgress = {
   message: string;
 };
 
+export type SaveConfigResult = {
+  createdDirs: string[];
+};
+
 export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
-  saveConfig: (config: AppConfig) => invoke<void>("save_config", { config }),
+  saveConfig: (config: AppConfig) => invoke<SaveConfigResult>("save_config", { config }),
   scanVideos: (root: string) => invoke<VideoInfo[]>("scan_videos", { root }),
   startDub: (targets: string[], force: boolean, forceTts: boolean) =>
     invoke<string>("start_dub", {

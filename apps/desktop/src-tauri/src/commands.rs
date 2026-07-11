@@ -62,9 +62,22 @@ pub fn get_config(app: AppHandle) -> Result<AppConfig, String> {
     read_config(&config_path(&app)?)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveConfigResult {
+    pub created_dirs: Vec<String>,
+}
+
 #[tauri::command]
-pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
-    write_config(&config_path(&app)?, &config)
+pub fn save_config(app: AppHandle, config: AppConfig) -> Result<SaveConfigResult, String> {
+    let root = config.project_root.trim();
+    if root.is_empty() {
+        return Err("Chưa chọn thư mục dự án".to_owned());
+    }
+    let created_dirs = viet_dub_core::ensure_project_layout(Path::new(root))
+        .map_err(|error| format!("{error:#}"))?;
+    write_config(&config_path(&app)?, &config)?;
+    Ok(SaveConfigResult { created_dirs })
 }
 
 #[tauri::command]
@@ -72,7 +85,9 @@ pub async fn scan_videos(root: String) -> Result<Vec<VideoInfo>, String> {
     if root.trim().is_empty() {
         return Err("Chưa chọn thư mục dự án".to_owned());
     }
-    viet_dub_core::scan_videos(Path::new(&root)).map_err(|error| format!("{error:#}"))
+    let path = Path::new(root.trim());
+    viet_dub_core::ensure_project_layout(path).map_err(|error| format!("{error:#}"))?;
+    viet_dub_core::scan_videos(path).map_err(|error| format!("{error:#}"))
 }
 
 #[tauri::command]
@@ -82,11 +97,14 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
         return Err("Chưa chọn thư mục dự án".to_owned());
     }
 
+    let root = PathBuf::from(saved.project_root.trim());
+    viet_dub_core::ensure_project_layout(&root).map_err(|error| format!("{error:#}"))?;
+
     let azure = AzureConfig::new(saved.azure_key, saved.azure_region)
         .map_err(|error| format!("{error:#}"))?;
     let resource_dir = app.path().resource_dir().ok();
     let config = DubConfig {
-        root: PathBuf::from(saved.project_root),
+        root,
         provider: Provider::Azure,
         azure: Some(azure),
         ffmpeg: FfmpegPaths::resolve(resource_dir.as_deref()),

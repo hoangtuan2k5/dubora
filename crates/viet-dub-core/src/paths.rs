@@ -6,6 +6,47 @@ use anyhow::{Context, Result, bail};
 
 const VIDEO_EXTENSIONS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
 
+/// Relative directories every project root must have for the desktop app / pipeline.
+pub const PROJECT_LAYOUT_DIRS: [&str; 4] = [
+    "assets/video",
+    "assets/srt",
+    "work",
+    "outputs",
+];
+
+/// Create the standard layout under `root` if missing.
+///
+/// Returns the relative paths that were newly created (empty if all existed).
+pub fn ensure_project_layout(root: &Path) -> Result<Vec<String>> {
+    if root.as_os_str().is_empty() {
+        bail!("Project root path is empty");
+    }
+    if root.exists() && !root.is_dir() {
+        bail!(
+            "Project root exists but is not a directory: {}",
+            root.display()
+        );
+    }
+
+    let mut created = Vec::new();
+    for relative in PROJECT_LAYOUT_DIRS {
+        let path = root.join(relative);
+        if path.is_dir() {
+            continue;
+        }
+        if path.exists() {
+            bail!(
+                "Expected a directory at {} but found a file",
+                path.display()
+            );
+        }
+        fs::create_dir_all(&path)
+            .with_context(|| format!("Failed to create {}", path.display()))?;
+        created.push(relative.to_owned());
+    }
+    Ok(created)
+}
+
 pub fn list_videos(root: &Path) -> Result<Vec<PathBuf>> {
     let mut videos = Vec::new();
     collect_videos(&root.join("assets/video"), &mut videos)?;
@@ -219,6 +260,32 @@ mod tests {
         assert_eq!(list_videos(&root)?, vec![video.canonicalize()?]);
         assert_eq!(find_matching_srt(&root, &video)?, srt.canonicalize()?);
         assert!(find_targets(&root, Some(Path::new("Course/Part/Lesson")))?[0].is_absolute());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_project_layout_creates_missing_dirs_once() -> Result<()> {
+        let root = temp_root();
+        assert!(!root.exists());
+
+        let first = ensure_project_layout(&root)?;
+        assert_eq!(
+            first,
+            vec![
+                "assets/video".to_owned(),
+                "assets/srt".to_owned(),
+                "work".to_owned(),
+                "outputs".to_owned(),
+            ]
+        );
+        for relative in PROJECT_LAYOUT_DIRS {
+            assert!(root.join(relative).is_dir());
+        }
+
+        let second = ensure_project_layout(&root)?;
+        assert!(second.is_empty());
 
         fs::remove_dir_all(root)?;
         Ok(())

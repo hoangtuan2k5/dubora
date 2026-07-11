@@ -12,4 +12,5 @@ pub mod tts_cache;
 
 pub use config::{AzureConfig, DubConfig, DubOptions, Provider};
 pub use orchestrator::{VideoInfo, create_dubs, scan_videos};
+pub use paths::{PROJECT_LAYOUT_DIRS, ensure_project_layout};
 pub use progress::{ProgressEvent, ProgressReporter, Stage};

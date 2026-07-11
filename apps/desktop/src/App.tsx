@@ -350,12 +350,19 @@ function App() {
     setSaving(true);
     setNotice("");
     try {
-      await api.saveConfig(config);
+      const result = await api.saveConfig(config);
       setSavedConfig(config);
       const status = await api.ffmpegStatus();
       setFfmpeg(status);
       const scanned = await scan(config.projectRoot);
-      if (scanned) setNotice("Đã lưu thiết lập.");
+      if (scanned) {
+        const created = result.createdDirs ?? [];
+        setNotice(
+          created.length
+            ? `Đã lưu thiết lập và tạo thư mục: ${created.join(", ")}.`
+            : "Đã lưu thiết lập. Cấu trúc assets/video, assets/srt, work, outputs đã sẵn sàng.",
+        );
+      }
       setView("library");
     } catch (error) {
       setNotice(`Không thể lưu thiết lập: ${describeError(error)}`);
@@ -516,8 +523,9 @@ function App() {
                     <div>
                       <strong>Chuẩn bị thư mục dự án</strong>
                       <span>
-                        Tạo một folder bất kỳ (ví dụ <code>D:\Courses\my-course</code>) với cấu trúc
-                        assets/video và assets/srt bên dưới.
+                        Chọn một folder bất kỳ (ví dụ <code>D:\Courses\my-course</code>). Khi lưu
+                        Thiết lập, app tự tạo <code>assets/video</code>, <code>assets/srt</code>,{" "}
+                        <code>work</code>, <code>outputs</code> nếu chưa có.
                       </span>
                     </div>
                   </li>
@@ -802,9 +810,9 @@ function App() {
                 </div>
 
                 {!config.projectRoot ? (
-                  <div className="empty-state"><IconFolder size={38} /><h2>Chọn project root để bắt đầu</h2><p>Kết nối thư mục chứa assets/video và assets/srt.</p><button className="primary-button" onClick={() => setView("settings")}><IconSettings size={18} /> Mở thiết lập</button></div>
+                  <div className="empty-state"><IconFolder size={38} /><h2>Chọn project root để bắt đầu</h2><p>Trong Thiết lập, chọn folder dự án — app sẽ tự tạo assets/video, assets/srt, outputs.</p><button className="primary-button" onClick={() => setView("settings")}><IconSettings size={18} /> Mở thiết lập</button></div>
                 ) : !videos.length && !scanning ? (
-                  <div className="empty-state"><IconVideo size={38} /><h2>Chưa tìm thấy video</h2><p>Thêm video vào assets/video rồi quét lại thư viện.</p></div>
+                  <div className="empty-state"><IconVideo size={38} /><h2>Chưa tìm thấy video</h2><p>Bỏ file vào assets/video (và SRT khớp trong assets/srt), rồi quét lại.</p></div>
                 ) : (
                   <div className="table-scroll">
                     <table>
