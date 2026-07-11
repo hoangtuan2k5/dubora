@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export type AppConfig = {
   projectRoot: string;
@@ -44,6 +45,8 @@ export const api = {
   cancelDub: () => invoke<void>("cancel_dub"),
   ffmpegStatus: () => invoke<FfmpegStatus>("get_ffmpeg_status"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  /** Open http(s) links in the system default browser (not the Tauri webview). */
+  openUrl: (url: string) => openUrl(url),
   pickDirectory: () => open({ directory: true, multiple: false }),
   onProgress: (handler: (progress: DubProgress) => void): Promise<UnlistenFn> =>
     listen<DubProgress>("dub-progress", ({ payload }) => handler(payload)),

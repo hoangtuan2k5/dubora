@@ -198,6 +198,31 @@ function FolderTreeNode({ node, depth = 0 }: { node: TreeNode; depth?: number })
   );
 }
 
+/** Open https links in the OS default browser (Tauri webview blocks normal anchors). */
+function ExternalLink({
+  href,
+  children,
+  className = "guide-link",
+}: {
+  href: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`${className} inline-link`}
+      onClick={() => {
+        void api.openUrl(href).catch((error) => {
+          console.error("Failed to open URL", href, error);
+        });
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function ProjectStructureDiagram() {
   return (
     <div className="structure-diagram" aria-label="Sơ đồ cấu trúc thư mục project">
@@ -594,15 +619,9 @@ function App() {
                 <ol>
                   <li>
                     Đăng nhập{" "}
-                    <a
-                      className="guide-link"
-                      href="https://portal.azure.com"
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ display: "inline", marginTop: 0 }}
-                    >
+                    <ExternalLink href="https://portal.azure.com">
                       Azure Portal <IconExternalLink size={14} />
-                    </a>
+                    </ExternalLink>
                     .
                   </li>
                   <li>
@@ -680,27 +699,15 @@ function App() {
                   </li>
                   <li>
                     <strong>GitHub:</strong>{" "}
-                    <a
-                      className="guide-link"
-                      href="https://github.com/hoangtuan2k5"
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ display: "inline", marginTop: 0 }}
-                    >
+                    <ExternalLink href="https://github.com/hoangtuan2k5">
                       hoangtuan2k5 <IconExternalLink size={14} />
-                    </a>
+                    </ExternalLink>
                   </li>
                   <li>
                     <strong>Repo:</strong>{" "}
-                    <a
-                      className="guide-link"
-                      href="https://github.com/hoangtuan2k5/viet-dub"
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ display: "inline", marginTop: 0 }}
-                    >
+                    <ExternalLink href="https://github.com/hoangtuan2k5/viet-dub">
                       hoangtuan2k5/viet-dub <IconExternalLink size={14} />
-                    </a>
+                    </ExternalLink>
                   </li>
                 </ul>
               </article>

@@ -25,6 +25,7 @@
     "@tabler/icons-react": "^3.34.0",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },

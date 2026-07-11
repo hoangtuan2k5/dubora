@@ -1516,7 +1516,6 @@ input[type="checkbox"] {
   font-weight: 600;
 }
 
-.guide-card a.guide-link,
 button.guide-link {
   display: inline-flex;
   align-items: center;
@@ -1532,7 +1531,13 @@ button.guide-link {
   cursor: pointer;
 }
 
-.guide-card a.guide-link:hover,
+button.guide-link.inline-link {
+  margin-top: 0;
+  vertical-align: baseline;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 button.guide-link:hover {
   color: var(--amber-strong);
 }
