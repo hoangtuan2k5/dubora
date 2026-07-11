@@ -11,12 +11,14 @@ import {
   IconEyeOff,
   IconBook,
   IconExternalLink,
+  IconFileText,
   IconFolder,
   IconFolderOpen,
   IconKey,
   IconLibrary,
   IconLoader2,
   IconMoon,
+  IconMovie,
   IconPlayerPlayFilled,
   IconPlayerStopFilled,
   IconRefresh,
@@ -67,6 +69,168 @@ function outputPath(root: string, relativePath?: string) {
   if (!relativePath) return `${root.replace(/[\\/]$/, "")}/outputs`;
   const file = relativePath.replace(/\.[^./\\]+$/, ".vi-dub.mp4");
   return `${root.replace(/[\\/]$/, "")}/outputs/${file}`;
+}
+
+type TreeKind = "root" | "folder" | "video" | "srt" | "output" | "note";
+
+type TreeNode = {
+  name: string;
+  kind: TreeKind;
+  tag?: string;
+  children?: TreeNode[];
+};
+
+const PROJECT_TREE: TreeNode = {
+  name: "project-root",
+  kind: "root",
+  tag: "Bạn chọn trong Thiết lập",
+  children: [
+    {
+      name: "assets",
+      kind: "folder",
+      tag: "Bạn chuẩn bị",
+      children: [
+        {
+          name: "video",
+          kind: "folder",
+          tag: "Input video",
+          children: [
+            {
+              name: "Khoa-hoc",
+              kind: "folder",
+              children: [
+                {
+                  name: "part1",
+                  kind: "folder",
+                  children: [{ name: "01. Bai hoc.mp4", kind: "video" }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          name: "srt",
+          kind: "folder",
+          tag: "Phụ đề khớp path",
+          children: [
+            {
+              name: "Khoa-hoc",
+              kind: "folder",
+              children: [
+                {
+                  name: "part1",
+                  kind: "folder",
+                  children: [{ name: "01. Bai hoc.srt", kind: "srt" }],
+                },
+              ],
+            },
+            {
+              name: "CC-Khoa-hoc / … (tuỳ chọn)",
+              kind: "note",
+              tag: "Fallback nếu không có path chuẩn",
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "work",
+      kind: "folder",
+      tag: "App tự tạo · file tạm",
+    },
+    {
+      name: "outputs",
+      kind: "folder",
+      tag: "App tự tạo · kết quả",
+      children: [
+        {
+          name: "Khoa-hoc",
+          kind: "folder",
+          children: [
+            {
+              name: "part1",
+              kind: "folder",
+              children: [{ name: "01. Bai hoc.vi-dub.mp4", kind: "output" }],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+function treeIcon(kind: TreeKind) {
+  const size = 18;
+  switch (kind) {
+    case "root":
+      return <IconFolderOpen size={size} stroke={1.7} />;
+    case "video":
+      return <IconMovie size={size} stroke={1.7} />;
+    case "srt":
+      return <IconFileText size={size} stroke={1.7} />;
+    case "output":
+      return <IconVideo size={size} stroke={1.7} />;
+    case "note":
+      return <IconFileText size={size} stroke={1.6} />;
+    default:
+      return <IconFolder size={size} stroke={1.7} />;
+  }
+}
+
+function FolderTreeNode({ node, depth = 0 }: { node: TreeNode; depth?: number }) {
+  return (
+    <li className={`tree-node kind-${node.kind}`} style={{ ["--depth" as string]: depth }}>
+      <div className="tree-row">
+        <span className="tree-icon" aria-hidden>
+          {treeIcon(node.kind)}
+        </span>
+        <span className="tree-name">{node.name}</span>
+        {node.tag ? <span className="tree-tag">{node.tag}</span> : null}
+      </div>
+      {node.children?.length ? (
+        <ul className="tree-children">
+          {node.children.map((child) => (
+            <FolderTreeNode key={`${node.name}/${child.name}`} node={child} depth={depth + 1} />
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+function ProjectStructureDiagram() {
+  return (
+    <div className="structure-diagram" aria-label="Sơ đồ cấu trúc thư mục project">
+      <div className="structure-legend" aria-hidden>
+        <span className="leg video">
+          <IconMovie size={14} /> Video
+        </span>
+        <span className="leg srt">
+          <IconFileText size={14} /> SRT
+        </span>
+        <span className="leg output">
+          <IconVideo size={14} /> Output
+        </span>
+        <span className="leg folder">
+          <IconFolder size={14} /> Thư mục
+        </span>
+      </div>
+      <div className="structure-flow">
+        <div className="flow-chip in">INPUT</div>
+        <IconArrowRight size={16} className="flow-arrow" />
+        <div className="flow-chip mid">viet-dub</div>
+        <IconArrowRight size={16} className="flow-arrow" />
+        <div className="flow-chip out">OUTPUT</div>
+      </div>
+      <ul className="folder-tree">
+        <FolderTreeNode node={PROJECT_TREE} />
+      </ul>
+      <p className="structure-caption">
+        Path tương đối của video và SRT phải <strong>khớp nhau</strong> (cùng folder lồng nhau, cùng
+        tên file, khác đuôi <code>.mp4</code> / <code>.srt</code>).
+      </p>
+    </div>
+  );
 }
 
 function App() {
@@ -397,26 +561,11 @@ function App() {
                     <h2>Cấu trúc thư mục (bắt buộc)</h2>
                     <p className="lead">
                       Video và SRT phải cùng đường dẫn tương đối (basename giống nhau, khác phần
-                      mở rộng).
+                      mở rộng). Sơ đồ dưới đây là layout chuẩn app hiểu được.
                     </p>
                   </div>
                 </div>
-                <pre className="tree-block">{`project-root/
-  assets/
-    video/
-      Khoa-hoc/
-        part1/
-          01. Bai hoc.mp4
-    srt/
-      Khoa-hoc/
-        part1/
-          01. Bai hoc.srt
-      # hoặc fallback: CC-Khoa-hoc/part1/01. Bai hoc.srt
-  work/          # file tạm (app tự tạo)
-  outputs/       # video lồng tiếng (app tự tạo)
-    Khoa-hoc/
-      part1/
-        01. Bai hoc.vi-dub.mp4`}</pre>
+                <ProjectStructureDiagram />
                 <div className="guide-tip">
                   <strong>Khớp SRT:</strong> app thử{" "}
                   <code>assets/srt/&lt;đường-dẫn-giống-video&gt;.srt</code> trước; nếu không có thì
