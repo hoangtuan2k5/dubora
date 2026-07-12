@@ -107,10 +107,25 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Join project paths using the separator style of `root` (Windows-friendly). */
+function joinPath(...parts: string[]) {
+  const usesWin = parts.some((part) => part.includes("\\"));
+  const sep = usesWin ? "\\" : "/";
+  const segments = parts
+    .filter(Boolean)
+    .flatMap((part) => part.replace(/[/\\]+/g, "/").split("/"))
+    .filter((segment) => segment.length > 0);
+  if (usesWin && segments[0]?.endsWith(":")) {
+    return `${segments[0]}${sep}${segments.slice(1).join(sep)}`;
+  }
+  return segments.join(sep);
+}
+
+/** Project output path for a video (file), or the outputs root when relativePath is omitted. */
 function outputPath(root: string, relativePath?: string) {
-  if (!relativePath) return `${root.replace(/[\\/]$/, "")}/outputs`;
+  if (!relativePath) return joinPath(root, "outputs");
   const file = relativePath.replace(/\.[^./\\]+$/, ".vi-dub.mp4");
-  return `${root.replace(/[\\/]$/, "")}/outputs/${file}`;
+  return joinPath(root, "outputs", file);
 }
 
 const TIP_DELAY_MS = 500;

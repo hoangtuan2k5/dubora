@@ -276,23 +276,81 @@ pub async fn get_ffmpeg_status(app: AppHandle) -> FfmpegStatus {
 
 #[tauri::command]
 pub fn open_path(path: PathBuf) -> Result<(), String> {
+    // Normalize mixed / and \ from the webview so exists()/Explorer see a real path.
+    let path = normalize_user_path(&path);
     if !path.exists() {
         return Err(format!("Không tìm thấy đường dẫn: {}", path.display()));
     }
 
     #[cfg(windows)]
     {
-        std::process::Command::new("explorer.exe")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("Không thể mở Explorer: {error}"))
+        open_in_explorer(&path)
     }
     #[cfg(not(windows))]
     {
-        let _ = path;
-        Err("Ứng dụng desktop chỉ hỗ trợ Windows".to_owned())
+        open_path_unix(&path)
     }
+}
+
+/// Collapse mixed separators from the UI into a clean OS path.
+fn normalize_user_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    // Keep Windows drive prefix (D:) intact; rewrite all separators via Path components.
+    let unified = raw.replace('\\', "/");
+    let mut normalized = PathBuf::new();
+    for component in Path::new(&unified).components() {
+        normalized.push(component.as_os_str());
+    }
+    if normalized.exists() {
+        normalized.canonicalize().unwrap_or(normalized)
+    } else {
+        normalized
+    }
+}
+
+#[cfg(windows)]
+fn open_in_explorer(path: &Path) -> Result<(), String> {
+    // Prefer absolute Windows path with backslashes for Explorer.
+    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let display = absolute.to_string_lossy().replace('/', "\\");
+    // Strip UNC long-path prefix \\?\ if present — Explorer dislikes it.
+    let display = display
+        .strip_prefix(r"\\?\")
+        .unwrap_or(display.as_str())
+        .to_owned();
+
+    let mut command = std::process::Command::new("explorer.exe");
+    if absolute.is_file() {
+        // Open the parent folder and select the output file.
+        // Two-arg form is more reliable with spaces than `/select,path` as one string.
+        command.arg("/select,").arg(&display);
+    } else {
+        command.arg(&display);
+    }
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Không thể mở Explorer: {error}"))
+}
+
+#[cfg(not(windows))]
+fn open_path_unix(path: &Path) -> Result<(), String> {
+    // Dev/fallback: open the folder (or parent of a file).
+    let target = if path.is_file() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Không thể mở đường dẫn: {error}"))
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
