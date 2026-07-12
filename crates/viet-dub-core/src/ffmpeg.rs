@@ -31,8 +31,8 @@ impl FfmpegPaths {
     }
 
     pub fn verify_rubberband(&self) -> Result<()> {
-        let output = command(&self.ffmpeg)
-            .arg("-filters")
+        let output = base_command(&self.ffmpeg)
+            .args(["-hide_banner", "-filters"])
             .output()
             .with_context(|| format!("Failed to run {}", self.ffmpeg.display()))?;
         ensure_success(&output, "ffmpeg -filters")?;
@@ -47,7 +47,7 @@ impl FfmpegPaths {
 
     pub fn verify(&self) -> Result<()> {
         self.verify_rubberband()?;
-        let output = command(&self.ffprobe)
+        let output = base_command(&self.ffprobe)
             .arg("-version")
             .output()
             .with_context(|| format!("Failed to run {}", self.ffprobe.display()))?;
@@ -55,7 +55,7 @@ impl FfmpegPaths {
     }
 
     pub fn audio_duration(&self, path: &Path) -> Result<f64> {
-        let output = command(&self.ffprobe)
+        let output = base_command(&self.ffprobe)
             .args([
                 OsString::from("-v"),
                 OsString::from("error"),
@@ -82,7 +82,8 @@ impl FfmpegPaths {
     }
 
     pub fn create_silence(&self, output: &Path) -> Result<()> {
-        let result = command(&self.ffmpeg)
+        let result = self
+            .ffmpeg_command()
             .args([
                 "-y",
                 "-f",
@@ -109,18 +110,28 @@ impl FfmpegPaths {
         ensure_success(&output, label)
     }
 
+    /// FFmpeg process for encode/filter work (CPU only on Windows NVIDIA hybrid).
     pub(crate) fn ffmpeg_command(&self) -> Command {
-        command(&self.ffmpeg)
+        let mut command = base_command(&self.ffmpeg);
+        // Force software path: no D3D11/CUDA hwaccel fighting WebView2 on dGPU.
+        command.args(["-hide_banner", "-nostdin", "-hwaccel", "none"]);
+        command
     }
 }
 
-fn command(program: &Path) -> Command {
+fn base_command(program: &Path) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
 
         let mut command = Command::new(program);
+        // Hide console flashes that can disrupt WebView2 composition.
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        // Keep child tools off the discrete NVIDIA GPU when possible. Hybrid
+        // laptops (RTX 2050 + Intel iGPU) often black-out Tauri/WebView2 if
+        // FFmpeg also binds the dGPU. Pipeline is CPU audio + stream-copy.
+        command.env("CUDA_VISIBLE_DEVICES", "-1");
+        command.env_remove("CUDA_DEVICE_ORDER");
         command
     }
     #[cfg(not(windows))]
