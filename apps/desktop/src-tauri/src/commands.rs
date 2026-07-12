@@ -117,69 +117,108 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
 
     let job_id = format!("job-{}", NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed));
     let task_job_id = job_id.clone();
-    tauri::async_runtime::spawn(async move {
-        let progress_app = app.clone();
-        let progress_job_id = task_job_id.clone();
-        struct JobProgress {
-            app: AppHandle,
-            job_id: String,
-        }
-        impl ProgressReporter for JobProgress {
-            fn event(&self, event: ProgressEvent) {
-                let _ = self.app.emit(
-                    "dub-progress",
-                    DubProgressEvent {
-                        job_id: self.job_id.clone(),
-                        event,
-                    },
-                );
-            }
-            fn is_cancelled(&self) -> bool {
-                DUB_CANCEL.load(Ordering::Acquire)
-            }
-        }
-        let reporter = JobProgress {
-            app: progress_app,
-            job_id: progress_job_id,
-        };
-        let options = DubOptions {
-            force: request.force,
-            force_tts: request.force_tts,
-            translate: request.translate,
-        };
 
-        let result = if request.targets.is_empty() {
-            create_dubs(&config, None, options, &reporter)
-                .await
-                .map(|_| ())
-        } else {
-            let mut result = Ok(());
-            for target in request.targets {
-                if reporter.is_cancelled() {
-                    result = Err(anyhow::anyhow!("Dub job cancelled"));
-                    break;
+    // Run the full pipeline on a dedicated OS thread + private Tokio runtime so
+    // heavy FFmpeg / ffprobe work never starves the Tauri/WebView2 event loop
+    // (that starvation often shows up as a solid black window on Windows).
+    let spawn_result = std::thread::Builder::new()
+        .name("viet-dub-job".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .thread_name("viet-dub-worker")
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    DUB_RUNNING.store(false, Ordering::Release);
+                    DUB_CANCEL.store(false, Ordering::Release);
+                    let _ = app.emit(
+                        "dub-progress",
+                        DubProgressEvent {
+                            job_id: task_job_id,
+                            event: ProgressEvent::new(
+                                Stage::Error,
+                                "",
+                                format!("Không tạo được runtime xử lý: {error}"),
+                            ),
+                        },
+                    );
+                    return;
                 }
-                if let Err(error) =
-                    create_dubs(&config, Some(Path::new(&target)), options, &reporter).await
-                {
-                    result = Err(error);
-                    break;
-                }
-            }
-            result
-        };
+            };
 
-        let event = match result {
-            Ok(()) => ProgressEvent::new(Stage::Done, "", "Tác vụ lồng tiếng đã hoàn tất"),
-            Err(error) if format!("{error:#}").contains("cancelled") => {
-                ProgressEvent::new(Stage::Error, "", "Đã hủy tác vụ lồng tiếng".to_owned())
-            }
-            Err(error) => ProgressEvent::new(Stage::Error, "", format!("{error:#}")),
-        };
+            runtime.block_on(async move {
+                struct JobProgress {
+                    app: AppHandle,
+                    job_id: String,
+                }
+                impl ProgressReporter for JobProgress {
+                    fn event(&self, event: ProgressEvent) {
+                        let _ = self.app.emit(
+                            "dub-progress",
+                            DubProgressEvent {
+                                job_id: self.job_id.clone(),
+                                event,
+                            },
+                        );
+                    }
+                    fn is_cancelled(&self) -> bool {
+                        DUB_CANCEL.load(Ordering::Acquire)
+                    }
+                }
+
+                let reporter = JobProgress {
+                    app: app.clone(),
+                    job_id: task_job_id.clone(),
+                };
+                let options = DubOptions {
+                    force: request.force,
+                    force_tts: request.force_tts,
+                    translate: request.translate,
+                };
+
+                let result = if request.targets.is_empty() {
+                    create_dubs(&config, None, options, &reporter)
+                        .await
+                        .map(|_| ())
+                } else {
+                    let mut result = Ok(());
+                    for target in request.targets {
+                        if reporter.is_cancelled() {
+                            result = Err(anyhow::anyhow!("Dub job cancelled"));
+                            break;
+                        }
+                        if let Err(error) =
+                            create_dubs(&config, Some(Path::new(&target)), options, &reporter)
+                                .await
+                        {
+                            result = Err(error);
+                            break;
+                        }
+                    }
+                    result
+                };
+
+                let event = match result {
+                    Ok(()) => ProgressEvent::new(Stage::Done, "", "Tác vụ lồng tiếng đã hoàn tất"),
+                    Err(error) if format!("{error:#}").contains("cancelled") => {
+                        ProgressEvent::new(Stage::Error, "", "Đã hủy tác vụ lồng tiếng".to_owned())
+                    }
+                    Err(error) => ProgressEvent::new(Stage::Error, "", format!("{error:#}")),
+                };
+                DUB_RUNNING.store(false, Ordering::Release);
+                DUB_CANCEL.store(false, Ordering::Release);
+                reporter.event(event);
+            });
+        });
+
+    if let Err(error) = spawn_result {
         DUB_RUNNING.store(false, Ordering::Release);
         DUB_CANCEL.store(false, Ordering::Release);
-        reporter.event(event);
-    });
+        return Err(format!("Không khởi chạy được job dub: {error}"));
+    }
 
     Ok(job_id)
 }

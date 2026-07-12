@@ -22,7 +22,7 @@
         "maximizable": true,
         "resizable": true,
         "center": true,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
+        "backgroundColor": "#080d14"
       }
     ],
     "security": {

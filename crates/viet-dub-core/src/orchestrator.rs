@@ -116,7 +116,10 @@ async fn create_dub_for_video(
     }
 
     if !*ffmpeg_verified {
-        config.ffmpeg.verify()?;
+        let ffmpeg = config.ffmpeg.clone();
+        tokio::task::spawn_blocking(move || ffmpeg.verify())
+            .await
+            .context("ffmpeg verify task failed")??;
         *ffmpeg_verified = true;
     }
 
@@ -128,38 +131,56 @@ async fn create_dub_for_video(
     let vi_srt = job_dir.join("clean_final_vi.srt");
     let voiceover = job_dir.join("vietnamese_voiceover.mp3");
 
-    fs::create_dir_all(&job_dir)
-        .with_context(|| format!("Failed to create {}", job_dir.display()))?;
-    fs::create_dir_all(output.parent().context("Output path has no parent")?)?;
-    if options.force_tts && tts_dir.exists() {
-        fs::remove_dir_all(&tts_dir)
-            .with_context(|| format!("Failed to remove {}", tts_dir.display()))?;
+    {
+        let srt = srt.clone();
+        let input_srt = input_srt.clone();
+        let clean_srt = clean_srt.clone();
+        let normalized_srt = normalized_srt.clone();
+        let vi_srt = vi_srt.clone();
+        let job_dir = job_dir.clone();
+        let tts_dir = tts_dir.clone();
+        let output = output.clone();
+        let force_tts = options.force_tts;
+        let label_for_clean = label.clone();
+
+        progress.event(ProgressEvent::new(
+            Stage::Clean,
+            &label,
+            format!("Cleaning subtitles for {label}"),
+        ));
+
+        let stats = tokio::task::spawn_blocking(move || {
+            fs::create_dir_all(&job_dir)
+                .with_context(|| format!("Failed to create {}", job_dir.display()))?;
+            fs::create_dir_all(output.parent().context("Output path has no parent")?)?;
+            if force_tts && tts_dir.exists() {
+                fs::remove_dir_all(&tts_dir)
+                    .with_context(|| format!("Failed to remove {}", tts_dir.display()))?;
+            }
+            fs::copy(&srt, &input_srt).with_context(|| {
+                format!(
+                    "Failed to copy {} to {}",
+                    srt.display(),
+                    input_srt.display()
+                )
+            })?;
+            let stats = clean_youtube_rolling_subtitles(&input_srt, &clean_srt)?;
+            fs::copy(&clean_srt, &vi_srt)?;
+            fs::copy(&clean_srt, &normalized_srt)?;
+            Ok::<_, anyhow::Error>(stats)
+        })
+        .await
+        .with_context(|| format!("Clean task failed for {label_for_clean}"))??;
+
+        progress.event(ProgressEvent::new(
+            Stage::Clean,
+            &label,
+            format!(
+                "Cleaned {} raw -> {} linear -> {} final segments.",
+                stats.raw, stats.linear, stats.final_segments
+            ),
+        ));
     }
-
-    fs::copy(&srt, &input_srt).with_context(|| {
-        format!(
-            "Failed to copy {} to {}",
-            srt.display(),
-            input_srt.display()
-        )
-    })?;
-    progress.event(ProgressEvent::new(
-        Stage::Clean,
-        &label,
-        format!("Cleaning subtitles for {label}"),
-    ));
-    let stats = clean_youtube_rolling_subtitles(&input_srt, &clean_srt)?;
-    progress.event(ProgressEvent::new(
-        Stage::Clean,
-        &label,
-        format!(
-            "Cleaned {} raw -> {} linear -> {} final segments.",
-            stats.raw, stats.linear, stats.final_segments
-        ),
-    ));
-
-    fs::copy(&clean_srt, &vi_srt)?;
-    fs::copy(&clean_srt, &normalized_srt)?;
 
     let azure = config
         .azure
@@ -172,14 +193,37 @@ async fn create_dub_for_video(
         &label,
         format!("Building voiceover for {label}"),
     ));
-    build_voiceover_track(&config.ffmpeg, &vi_srt, &tts_dir, &voiceover, &job_dir)?;
+    {
+        let ffmpeg = config.ffmpeg.clone();
+        let vi_srt = vi_srt.clone();
+        let tts_dir = tts_dir.clone();
+        let voiceover = voiceover.clone();
+        let job_dir = job_dir.clone();
+        let label_audio = label.clone();
+        tokio::task::spawn_blocking(move || {
+            build_voiceover_track(&ffmpeg, &vi_srt, &tts_dir, &voiceover, &job_dir)
+        })
+        .await
+        .with_context(|| format!("Voiceover task failed for {label_audio}"))??;
+    }
 
     progress.event(ProgressEvent::new(
         Stage::Video,
         &label,
         format!("Building dubbed video for {label}"),
     ));
-    build_dubbed_video(&config.ffmpeg, video, &voiceover, &output)?;
+    {
+        let ffmpeg = config.ffmpeg.clone();
+        let video = video.to_path_buf();
+        let voiceover = voiceover.clone();
+        let output = output.clone();
+        let label_video = label.clone();
+        tokio::task::spawn_blocking(move || {
+            build_dubbed_video(&ffmpeg, &video, &voiceover, &output)
+        })
+        .await
+        .with_context(|| format!("Mux task failed for {label_video}"))??;
+    }
 
     progress.event(ProgressEvent::new(
         Stage::Done,

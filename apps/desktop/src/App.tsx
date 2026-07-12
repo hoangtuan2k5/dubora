@@ -333,30 +333,82 @@ function App() {
       .catch((error) => active && setNotice(`Không thể khởi tạo ứng dụng: ${describeError(error)}`));
 
     let unlisten: (() => void) | undefined;
-    void api.onProgress((event) => {
+    // Throttle UI updates so rapid TTS progress events cannot freeze/black WebView2.
+    let logBuffer: DubProgress[] = [];
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let latestProgress: DubProgress | null = null;
+    let progressTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushLogs = () => {
+      flushTimer = null;
+      if (!logBuffer.length) return;
+      const batch = logBuffer;
+      logBuffer = [];
+      setLogs((current) => [...current, ...batch].slice(-120));
+    };
+
+    const flushProgress = () => {
+      progressTimer = null;
+      if (!latestProgress) return;
+      const event = latestProgress;
+      latestProgress = null;
       setProgress((current) =>
         event.stage === "tts" && event.current == null && current?.stage === "tts"
           ? { ...event, current: current.current, total: current.total }
           : event,
       );
-      setLogs((current) => [...current.slice(-199), event]);
-      if (event.video === "" && (event.stage === "done" || event.stage === "error")) {
-        setBusy(false);
-        const root = projectRootRef.current;
-        if (root) void scan(root);
-      }
-    })
+    };
+
+    void api
+      .onProgress((event) => {
+        if (!active) return;
+        const terminal =
+          event.video === "" && (event.stage === "done" || event.stage === "error");
+
+        latestProgress = event;
+        if (terminal) {
+          if (progressTimer) {
+            clearTimeout(progressTimer);
+            progressTimer = null;
+          }
+          flushProgress();
+        } else if (!progressTimer) {
+          progressTimer = setTimeout(flushProgress, 120);
+        }
+
+        logBuffer.push(event);
+        if (terminal) {
+          if (flushTimer) {
+            clearTimeout(flushTimer);
+            flushTimer = null;
+          }
+          flushLogs();
+        } else if (!flushTimer) {
+          flushTimer = setTimeout(flushLogs, 200);
+        }
+
+        if (terminal) {
+          setBusy(false);
+          const root = projectRootRef.current;
+          if (root) void scan(root);
+        }
+      })
       .then((stop) => (active ? (unlisten = stop) : stop()))
       .catch((error) => setNotice(`Không thể theo dõi tiến độ: ${describeError(error)}`));
     return () => {
       active = false;
+      if (flushTimer) clearTimeout(flushTimer);
+      if (progressTimer) clearTimeout(progressTimer);
       unlisten?.();
     };
     // Tauri listeners and initial config load once for the app lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), [logs]);
+  useEffect(() => {
+    // Avoid smooth scrolling on every batch — can contribute to WebView jank.
+    logEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [logs]);
 
   const visibleVideos = useMemo(() => {
     const term = query.trim().toLocaleLowerCase("vi");
