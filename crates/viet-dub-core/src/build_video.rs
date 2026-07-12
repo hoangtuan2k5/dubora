@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -20,7 +19,7 @@ pub fn build_dubbed_video(
 
     let temporary_video = output_video.with_extension("tmp.mp4");
     let _ = fs::remove_file(&temporary_video);
-    let mut command = Command::new(&ffmpeg.ffmpeg);
+    let mut command = ffmpeg.ffmpeg_command();
     command
         .arg("-y")
         .arg("-i")

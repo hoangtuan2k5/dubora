@@ -31,7 +31,7 @@ impl FfmpegPaths {
     }
 
     pub fn verify_rubberband(&self) -> Result<()> {
-        let output = Command::new(&self.ffmpeg)
+        let output = command(&self.ffmpeg)
             .arg("-filters")
             .output()
             .with_context(|| format!("Failed to run {}", self.ffmpeg.display()))?;
@@ -47,7 +47,7 @@ impl FfmpegPaths {
 
     pub fn verify(&self) -> Result<()> {
         self.verify_rubberband()?;
-        let output = Command::new(&self.ffprobe)
+        let output = command(&self.ffprobe)
             .arg("-version")
             .output()
             .with_context(|| format!("Failed to run {}", self.ffprobe.display()))?;
@@ -55,7 +55,7 @@ impl FfmpegPaths {
     }
 
     pub fn audio_duration(&self, path: &Path) -> Result<f64> {
-        let output = Command::new(&self.ffprobe)
+        let output = command(&self.ffprobe)
             .args([
                 OsString::from("-v"),
                 OsString::from("error"),
@@ -82,7 +82,7 @@ impl FfmpegPaths {
     }
 
     pub fn create_silence(&self, output: &Path) -> Result<()> {
-        let result = Command::new(&self.ffmpeg)
+        let result = command(&self.ffmpeg)
             .args([
                 "-y",
                 "-f",
@@ -107,6 +107,25 @@ impl FfmpegPaths {
             .output()
             .with_context(|| format!("Failed to run {}", self.ffmpeg.display()))?;
         ensure_success(&output, label)
+    }
+
+    pub(crate) fn ffmpeg_command(&self) -> Command {
+        command(&self.ffmpeg)
+    }
+}
+
+fn command(program: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let mut command = Command::new(program);
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
     }
 }
 

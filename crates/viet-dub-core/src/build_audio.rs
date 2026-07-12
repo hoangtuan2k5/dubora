@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -66,7 +65,7 @@ pub fn build_voiceover_track(
     let filter_path = work_dir.join("filter_complex.txt");
     fs::write(&filter_path, filters.join(";"))?;
 
-    let mut command = Command::new(&ffmpeg.ffmpeg);
+    let mut command = ffmpeg.ffmpeg_command();
     command.arg("-y");
     for input in &inputs {
         command.arg("-i").arg(input);
