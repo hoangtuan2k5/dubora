@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use viet_dub_core::ffmpeg::FfmpegPaths;
 use viet_dub_core::{
-    AzureConfig, DubConfig, DubOptions, ProgressEvent, ProgressReporter, Provider, Stage,
-    VideoInfo, create_dubs,
+    AzureConfig, AzureVoice, DubConfig, DubOptions, ProgressEvent, ProgressReporter, Provider,
+    Stage, VideoInfo, AZURE_VOICE, create_dubs, list_azure_voices,
 };
 
 static DUB_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub project_root: String,
     pub azure_key: String,
     pub azure_region: String,
+    /// Azure TTS ShortName; empty or missing falls back to Florian Dragon HD.
+    pub azure_voice: String,
 }
 
 impl Default for AppConfig {
@@ -28,6 +30,7 @@ impl Default for AppConfig {
             project_root: String::new(),
             azure_key: String::new(),
             azure_region: viet_dub_core::config::DEFAULT_AZURE_REGION.to_owned(),
+            azure_voice: AZURE_VOICE.to_owned(),
         }
     }
 }
@@ -90,6 +93,25 @@ pub async fn scan_videos(root: String) -> Result<Vec<VideoInfo>, String> {
     viet_dub_core::scan_videos(path).map_err(|error| format!("{error:#}"))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListVoicesRequest {
+    pub azure_key: String,
+    pub azure_region: String,
+}
+
+#[tauri::command]
+pub async fn list_voices(request: ListVoicesRequest) -> Result<Vec<AzureVoice>, String> {
+    list_azure_voices(&request.azure_key, &request.azure_region)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+pub fn default_azure_voice() -> String {
+    AZURE_VOICE.to_owned()
+}
+
 #[tauri::command]
 pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, String> {
     let saved = read_config(&config_path(&app)?)?;
@@ -101,6 +123,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
     viet_dub_core::ensure_project_layout(&root).map_err(|error| format!("{error:#}"))?;
 
     let azure = AzureConfig::new(saved.azure_key, saved.azure_region)
+        .and_then(|config| config.with_voice(saved.azure_voice))
         .map_err(|error| format!("{error:#}"))?;
     let resource_dir = app.path().resource_dir().ok();
     let config = DubConfig {
@@ -316,9 +339,17 @@ mod tests {
             project_root: "C:\\Videos".to_owned(),
             azure_key: "secret".to_owned(),
             azure_region: "southeastasia".to_owned(),
+            azure_voice: AZURE_VOICE.to_owned(),
         };
         write_config(&path, &config).unwrap();
         assert_eq!(read_config(&path).unwrap(), config);
+
+        // Old configs without azureVoice still deserialize and get the default.
+        let legacy = br#"{"projectRoot":"D:\\x","azureKey":"k","azureRegion":"eastus"}"#;
+        let legacy_path = directory.join("legacy.json");
+        fs::write(&legacy_path, legacy).unwrap();
+        let loaded = read_config(&legacy_path).unwrap();
+        assert_eq!(loaded.azure_voice, AZURE_VOICE);
         fs::remove_dir_all(directory).unwrap();
     }
 }

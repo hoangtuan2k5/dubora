@@ -18,6 +18,8 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::scan_videos,
+            commands::list_voices,
+            commands::default_azure_voice,
             commands::start_dub,
             commands::cancel_dub,
             commands::get_ffmpeg_status,

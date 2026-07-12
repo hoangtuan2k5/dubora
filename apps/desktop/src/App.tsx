@@ -31,7 +31,9 @@ import {
 } from "@tabler/icons-react";
 import {
   api,
+  DEFAULT_AZURE_VOICE,
   type AppConfig,
+  type AzureVoice,
   type DubProgress,
   type FfmpegStatus,
   type VideoInfo,
@@ -41,6 +43,7 @@ const DEFAULT_CONFIG: AppConfig = {
   projectRoot: "",
   azureKey: "",
   azureRegion: "southeastasia",
+  azureVoice: DEFAULT_AZURE_VOICE,
 };
 
 const STAGES = [
@@ -347,6 +350,9 @@ function App() {
   const [scanning, setScanning] = useState(false);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
+  const [voices, setVoices] = useState<AzureVoice[]>([]);
+  const [loadingVoices, setLoadingVoices] = useState(false);
+  const [voiceFilter, setVoiceFilter] = useState("");
   const logEndRef = useRef<HTMLDivElement>(null);
   const projectRootRef = useRef("");
   const scanRequestRef = useRef(0);
@@ -531,6 +537,55 @@ function App() {
     setView("library");
   };
 
+  const loadVoices = async () => {
+    if (!config.azureKey.trim()) {
+      setNotice("Nhập Azure Speech key trước khi tải danh sách giọng.");
+      return;
+    }
+    setLoadingVoices(true);
+    setNotice("");
+    try {
+      const list = await api.listVoices(config.azureKey, config.azureRegion);
+      setVoices(list);
+      const selected = config.azureVoice.trim() || DEFAULT_AZURE_VOICE;
+      if (!list.some((voice) => voice.shortName === selected) && list.length) {
+        // Keep user's ShortName even if not in list (e.g. region lag); just inform.
+        setNotice(
+          `Đã tải ${list.length} giọng. Giọng đang chọn (${selected}) có thể không có trong region này — kiểm tra lại trước khi dub.`,
+        );
+      } else {
+        setNotice(`Đã tải ${list.length} giọng Azure.`);
+      }
+      if (!config.azureVoice.trim()) {
+        setConfig((current) => ({ ...current, azureVoice: DEFAULT_AZURE_VOICE }));
+      }
+    } catch (error) {
+      setNotice(`Không tải được danh sách giọng: ${describeError(error)}`);
+    } finally {
+      setLoadingVoices(false);
+    }
+  };
+
+  const filteredVoices = useMemo(() => {
+    const q = voiceFilter.trim().toLowerCase();
+    if (!q) return voices;
+    return voices.filter((voice) => {
+      const hay = [
+        voice.shortName,
+        voice.displayName,
+        voice.localName,
+        voice.gender,
+        voice.locale,
+        voice.localeName,
+        voice.status,
+        voice.voiceType,
+      ]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [voices, voiceFilter]);
+
   const openPath = (path: string) => {
     void api.openPath(path).catch((error) => setNotice(`Không thể mở đường dẫn: ${describeError(error)}`));
   };
@@ -651,7 +706,7 @@ function App() {
               </div>
               <p>
                 Viet-dub tạo video lồng tiếng Việt từ file video + phụ đề SRT khớp nhau, dùng giọng
-                Azure Speech (Florian Dragon HD).
+                Azure Speech · giọng mặc định Florian Dragon HD (có thể đổi trong Thiết lập).
               </p>
             </div>
 
@@ -901,6 +956,85 @@ function App() {
                 <div className="input-wrap"><IconKey size={18} /><input id="azure-key" type={showKey ? "text" : "password"} value={config.azureKey} onChange={(event) => setConfig({ ...config, azureKey: event.target.value })} placeholder="Nhập khóa Azure" autoComplete="off" /><button className="icon-button" onClick={() => setShowKey(!showKey)} aria-label={showKey ? "Ẩn Azure key" : "Hiện Azure key"}>{showKey ? <IconEyeOff size={18} /> : <IconEye size={18} />}</button></div>
                 <label htmlFor="azure-region">Region</label>
                 <div className="input-wrap"><IconBrandAzure size={18} /><input id="azure-region" value={config.azureRegion} onChange={(event) => setConfig({ ...config, azureRegion: event.target.value })} placeholder="southeastasia" /></div>
+
+                <label htmlFor="azure-voice">Giọng lồng tiếng</label>
+                <div className="voice-toolbar">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => void loadVoices()}
+                    disabled={loadingVoices || !config.azureKey.trim()}
+                  >
+                    {loadingVoices ? <IconLoader2 className="spin" size={18} /> : <IconRefresh size={18} />}
+                    Tải danh sách giọng
+                  </button>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => setConfig((current) => ({ ...current, azureVoice: DEFAULT_AZURE_VOICE }))}
+                  >
+                    Mặc định Florian HD
+                  </button>
+                </div>
+                {voices.length > 0 ? (
+                  <>
+                    <div className="input-wrap voice-filter">
+                      <IconSearch size={18} />
+                      <input
+                        id="voice-filter"
+                        type="search"
+                        value={voiceFilter}
+                        onChange={(event) => setVoiceFilter(event.target.value)}
+                        placeholder="Lọc: vi-VN, Female, Florian…"
+                      />
+                    </div>
+                    <div className="input-wrap select-wrap">
+                      <IconWaveSine size={18} />
+                      <select
+                        id="azure-voice"
+                        value={config.azureVoice || DEFAULT_AZURE_VOICE}
+                        onChange={(event) =>
+                          setConfig((current) => ({ ...current, azureVoice: event.target.value }))
+                        }
+                      >
+                        {/* Keep current selection even if filter hides it */}
+                        {!filteredVoices.some((v) => v.shortName === (config.azureVoice || DEFAULT_AZURE_VOICE)) && (
+                          <option value={config.azureVoice || DEFAULT_AZURE_VOICE}>
+                            {config.azureVoice || DEFAULT_AZURE_VOICE} (đang chọn)
+                          </option>
+                        )}
+                        {filteredVoices.map((voice) => (
+                          <option key={voice.shortName} value={voice.shortName}>
+                            {voice.localName || voice.displayName} · {voice.gender} · {voice.locale}
+                            {voice.status && voice.status !== "GA" ? ` · ${voice.status}` : ""} — {voice.shortName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <p className="field-hint">
+                      {filteredVoices.length}/{voices.length} giọng · ShortName:{" "}
+                      <code>{config.azureVoice || DEFAULT_AZURE_VOICE}</code>
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="input-wrap">
+                      <IconWaveSine size={18} />
+                      <input
+                        id="azure-voice"
+                        value={config.azureVoice || DEFAULT_AZURE_VOICE}
+                        onChange={(event) =>
+                          setConfig((current) => ({ ...current, azureVoice: event.target.value }))
+                        }
+                        placeholder={DEFAULT_AZURE_VOICE}
+                        spellCheck={false}
+                      />
+                    </div>
+                    <p className="field-hint">
+                      Mặc định: <code>{DEFAULT_AZURE_VOICE}</code>. Bấm “Tải danh sách giọng” để chọn từ Azure.
+                    </p>
+                  </>
+                )}
               </article>
 
               <article className="panel status-panel">

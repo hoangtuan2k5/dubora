@@ -7,7 +7,22 @@ export type AppConfig = {
   projectRoot: string;
   azureKey: string;
   azureRegion: string;
+  /** Azure TTS ShortName; default Florian Dragon HD. */
+  azureVoice: string;
 };
+
+export type AzureVoice = {
+  shortName: string;
+  displayName: string;
+  localName: string;
+  gender: string;
+  locale: string;
+  localeName: string;
+  status: string;
+  voiceType: string;
+};
+
+export const DEFAULT_AZURE_VOICE = "de-DE-Florian:DragonHDLatestNeural";
 
 export type VideoInfo = {
   relativePath: string;
@@ -38,6 +53,9 @@ export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (config: AppConfig) => invoke<SaveConfigResult>("save_config", { config }),
   scanVideos: (root: string) => invoke<VideoInfo[]>("scan_videos", { root }),
+  listVoices: (azureKey: string, azureRegion: string) =>
+    invoke<AzureVoice[]>("list_voices", { request: { azureKey, azureRegion } }),
+  defaultAzureVoice: () => invoke<string>("default_azure_voice"),
   startDub: (targets: string[], force: boolean, forceTts: boolean) =>
     invoke<string>("start_dub", {
       request: { targets, force, forceTts, translate: false },

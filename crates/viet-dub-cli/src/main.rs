@@ -52,6 +52,10 @@ struct Args {
     /// Translate English SRT to Vietnamese (not available in the Rust MVP).
     #[arg(long)]
     translate: bool,
+
+    /// Azure TTS voice ShortName (default: de-DE-Florian:DragonHDLatestNeural).
+    #[arg(long)]
+    voice: Option<String>,
 }
 
 struct StdoutProgress;
@@ -80,8 +84,11 @@ async fn main() -> Result<()> {
         anyhow::bail!("English-to-Vietnamese translation is not available in the Rust MVP");
     }
 
-    let azure = load_azure_config(&root)?
+    let mut azure = load_azure_config(&root)?
         .ok_or_else(|| anyhow::anyhow!("Missing AZURE_KEY. Add it to <root>/.env or export it"))?;
+    if let Some(voice) = args.voice.as_deref() {
+        azure = azure.with_voice(voice)?;
+    }
     let config = DubConfig {
         root,
         provider,
@@ -101,6 +108,7 @@ async fn main() -> Result<()> {
 fn load_azure_config(root: &std::path::Path) -> Result<Option<AzureConfig>> {
     let mut key = std::env::var("AZURE_KEY").ok();
     let mut region = std::env::var("AZURE_REGION").ok();
+    let mut voice = std::env::var("AZURE_VOICE").ok();
 
     if let Ok(contents) = std::fs::read_to_string(root.join(".env")) {
         for line in contents.lines() {
@@ -115,11 +123,18 @@ fn load_azure_config(root: &std::path::Path) -> Result<Option<AzureConfig>> {
             match name.trim() {
                 "AZURE_KEY" if key.is_none() => key = Some(value),
                 "AZURE_REGION" if region.is_none() => region = Some(value),
+                "AZURE_VOICE" if voice.is_none() => voice = Some(value),
                 _ => {}
             }
         }
     }
 
-    key.map(|key| AzureConfig::new(key, region.unwrap_or_default()))
-        .transpose()
+    key.map(|key| {
+        let config = AzureConfig::new(key, region.unwrap_or_default())?;
+        match voice {
+            Some(voice) => config.with_voice(voice),
+            None => Ok(config),
+        }
+    })
+    .transpose()
 }

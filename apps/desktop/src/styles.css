@@ -584,6 +584,50 @@ h1 {
   text-transform: uppercase;
 }
 
+.voice-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.voice-filter {
+  margin-bottom: 8px;
+}
+
+.select-wrap select {
+  width: 100%;
+  min-width: 0;
+  height: 42px;
+  padding: 0 12px 0 4px;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.select-wrap select option {
+  color: #17212b;
+  background: #fff;
+}
+
+.field-hint {
+  margin: 8px 0 0;
+  color: var(--quiet);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.field-hint code {
+  color: var(--cyan);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 11px;
+}
+
 .input-action {
   display: flex;
   gap: 9px;

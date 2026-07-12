@@ -1,3 +1,4 @@
+pub mod azure_voices;
 pub mod build_audio;
 pub mod build_video;
 pub mod clean_rolling;
@@ -10,7 +11,8 @@ pub mod srt;
 pub mod tts_azure;
 pub mod tts_cache;
 
-pub use config::{AzureConfig, DubConfig, DubOptions, Provider};
+pub use azure_voices::{AzureVoice, list_azure_voices};
+pub use config::{AzureConfig, DubConfig, DubOptions, Provider, AZURE_VOICE};
 pub use orchestrator::{VideoInfo, create_dubs, scan_videos};
 pub use paths::{PROJECT_LAYOUT_DIRS, ensure_project_layout};
 pub use progress::{ProgressEvent, ProgressReporter, Stage};

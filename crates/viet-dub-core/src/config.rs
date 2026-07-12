@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::FfmpegPaths;
 
+/// Default Azure TTS voice for Vietnamese course dubbing (Florian Dragon HD).
 pub const AZURE_VOICE: &str = "de-DE-Florian:DragonHDLatestNeural";
 pub const DEFAULT_AZURE_REGION: &str = "southeastasia";
 
@@ -49,6 +50,36 @@ impl AzureConfig {
             voice: AZURE_VOICE.to_owned(),
         })
     }
+
+    /// Override TTS voice. Empty / whitespace keeps the default Florian Dragon HD voice.
+    pub fn with_voice(mut self, voice: impl Into<String>) -> Result<Self> {
+        let voice = voice.into();
+        let voice = voice.trim();
+        if voice.is_empty() {
+            self.voice = AZURE_VOICE.to_owned();
+            return Ok(self);
+        }
+        validate_azure_voice(voice)?;
+        self.voice = voice.to_owned();
+        Ok(self)
+    }
+}
+
+/// Azure ShortName-safe characters (e.g. `de-DE-Florian:DragonHDLatestNeural`).
+pub fn validate_azure_voice(voice: &str) -> Result<()> {
+    if voice.is_empty() {
+        bail!("Azure voice cannot be empty");
+    }
+    if voice.len() > 128 {
+        bail!("Azure voice name is too long");
+    }
+    if !voice
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+    {
+        bail!("Invalid Azure voice name: use letters, digits, '-', '_', ':', '.' only");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -76,5 +107,42 @@ mod tests {
         assert!(AzureConfig::new("key", "westus2").is_ok());
         assert!(AzureConfig::new("key", "attacker.example#").is_err());
         assert!(AzureConfig::new("key", "evil@host").is_err());
+    }
+
+    #[test]
+    fn default_voice_is_florian_dragon_hd() {
+        let config = AzureConfig::new("key", "southeastasia").unwrap();
+        assert_eq!(config.voice, AZURE_VOICE);
+        assert_eq!(config.voice, "de-DE-Florian:DragonHDLatestNeural");
+    }
+
+    #[test]
+    fn empty_voice_keeps_default() {
+        let config = AzureConfig::new("key", "southeastasia")
+            .unwrap()
+            .with_voice("  ")
+            .unwrap();
+        assert_eq!(config.voice, AZURE_VOICE);
+    }
+
+    #[test]
+    fn accepts_hd_voice_short_names() {
+        let config = AzureConfig::new("key", "southeastasia")
+            .unwrap()
+            .with_voice("vi-VN-HoaiMyNeural")
+            .unwrap();
+        assert_eq!(config.voice, "vi-VN-HoaiMyNeural");
+        assert!(
+            AzureConfig::new("key", "southeastasia")
+                .unwrap()
+                .with_voice("de-DE-Florian:DragonHDLatestNeural")
+                .is_ok()
+        );
+        assert!(
+            AzureConfig::new("key", "southeastasia")
+                .unwrap()
+                .with_voice("bad voice!")
+                .is_err()
+        );
     }
 }

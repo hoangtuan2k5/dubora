@@ -88,8 +88,8 @@ pub async fn generate_all_tts(
             )
         } else {
             format!(
-                "Generated {completed}/{total} with Azure Florian: segment {}",
-                result.index
+                "Generated {completed}/{total} with Azure ({}): segment {}",
+                config.voice, result.index
             )
         };
         progress.event(ProgressEvent::new(Stage::Tts, video, message).progress(completed, total));
