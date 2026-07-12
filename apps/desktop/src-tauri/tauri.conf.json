@@ -32,12 +32,14 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "publisher": "Hoàng Chiều Nguyễn Tuấn",
-    "copyright": "Copyright © 2026 Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev>",
+    "publisher": "Hoàng Tuấn",
+    "copyright": "Copyright © 2026 Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev> — https://hoangtuan.dev",
     "homepage": "https://github.com/hoangtuan2k5/viet-dub",
+    "license": "MIT",
+    "licenseFile": "installer/license.txt",
     "category": "Video",
-    "shortDescription": "Vietnamese video dubbing workstation",
-    "longDescription": "viet-dub creates Vietnamese dubbed videos from matching video files and SRT subtitles using Azure Speech. Author: Hoàng Chiều Nguyễn Tuấn (tuan@hoangtuan.dev) — https://github.com/hoangtuan2k5",
+    "shortDescription": "Lồng tiếng Việt cho video — Hoàng Tuấn (tuan@hoangtuan.dev)",
+    "longDescription": "viet-dub — workstation lồng tiếng Việt từ video + SRT (Azure Speech, FFmpeg rubberband).\n\nNhà phát triển: Hoàng Chiều Nguyễn Tuấn\nEmail: tuan@hoangtuan.dev\nGitHub: https://github.com/hoangtuan2k5/viet-dub\nWebsite: https://hoangtuan.dev\nGiấy phép: MIT",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -46,7 +48,8 @@
     ],
     "resources": {
       "resources/ffmpeg/*": "ffmpeg/",
-      "../../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+      "../../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../../../LICENSE": "LICENSE"
     },
     "windows": {
       "nsis": {
