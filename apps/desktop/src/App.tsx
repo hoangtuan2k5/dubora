@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  IconAdjustmentsHorizontal,
   IconAlertTriangle,
   IconArrowRight,
   IconBrandAzure,
@@ -69,6 +68,76 @@ function outputPath(root: string, relativePath?: string) {
   if (!relativePath) return `${root.replace(/[\\/]$/, "")}/outputs`;
   const file = relativePath.replace(/\.[^./\\]+$/, ".vi-dub.mp4");
   return `${root.replace(/[\\/]$/, "")}/outputs/${file}`;
+}
+
+const TIP_DELAY_MS = 500;
+
+type OptionChipProps = {
+  id: string;
+  label: string;
+  title: string;
+  body: string;
+  hint: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange?: (checked: boolean) => void;
+};
+
+function OptionChip({ id, label, title, body, hint, checked, disabled, onChange }: OptionChipProps) {
+  const [showTip, setShowTip] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearTimer = () => {
+    if (timerRef.current != null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const scheduleShow = () => {
+    clearTimer();
+    timerRef.current = setTimeout(() => setShowTip(true), TIP_DELAY_MS);
+  };
+
+  const hide = () => {
+    clearTimer();
+    setShowTip(false);
+  };
+
+  useEffect(
+    () => () => {
+      if (timerRef.current != null) clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  return (
+    <button
+      type="button"
+      id={id}
+      role="switch"
+      aria-checked={checked}
+      aria-describedby={`${id}-tip`}
+      disabled={disabled}
+      className={`option-chip${checked ? " on" : ""}${showTip ? " show-tip" : ""}${disabled ? " is-disabled" : ""}`}
+      onPointerEnter={scheduleShow}
+      onPointerLeave={hide}
+      onFocus={scheduleShow}
+      onBlur={hide}
+      onClick={() => {
+        if (disabled || !onChange) return;
+        onChange(!checked);
+      }}
+    >
+      <span className="option-chip-label">{label}</span>
+      <span className="option-chip-toggle" aria-hidden="true" />
+      <span className="option-chip-tip" id={`${id}-tip`} role="tooltip">
+        <strong>{title}</strong>
+        {body}
+        <em>{hint}</em>
+      </span>
+    </button>
+  );
 }
 
 type TreeKind = "root" | "folder" | "video" | "srt" | "output" | "note";
@@ -861,13 +930,80 @@ function App() {
               </div>
             </div>
 
-            <div className="workspace-grid">
-              <article className="panel library-panel">
-                <div className="library-toolbar">
-                  <div className="search"><IconSearch size={18} /><label className="sr-only" htmlFor="video-search">Tìm video</label><input id="video-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm khóa học hoặc video…" /></div>
-                  <div className="library-count"><strong>{selected.size}</strong> đã chọn <span>/</span> {videos.length} video</div>
+            <div className="library-layout">
+              <div className="panel control-bar">
+                <div className="search">
+                  <IconSearch size={18} />
+                  <label className="sr-only" htmlFor="video-search">Tìm video</label>
+                  <input
+                    id="video-search"
+                    type="search"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="Tìm khóa học hoặc video…"
+                  />
                 </div>
+                <div className="library-count">
+                  <strong>{selected.size}</strong> đã chọn <span>/</span> {videos.length} video
+                </div>
+                <div className="option-chips" role="group" aria-label="Tùy chọn dub">
+                  <OptionChip
+                    id="force"
+                    label="Xử lý lại"
+                    title="Xử lý lại video đã xong?"
+                    body="Bật khi bạn muốn làm lại từ đầu dù file lồng tiếng đã có sẵn."
+                    hint="Tắt = bỏ qua video đã xong, tiết kiệm thời gian."
+                    checked={force}
+                    onChange={setForce}
+                  />
+                  <OptionChip
+                    id="force-tts"
+                    label="Sinh lại TTS"
+                    title="Tạo lại giọng nói?"
+                    body="Bật khi muốn Azure đọc lại phụ đề (đổi giọng, sửa SRT, hoặc giọng cũ bị lỗi)."
+                    hint="Tắt = dùng lại giọng đã tạo trước đó (nhanh, ít tốn API)."
+                    checked={forceTts}
+                    onChange={setForceTts}
+                  />
+                  <OptionChip
+                    id="translate"
+                    label="Dịch EN→VI"
+                    title="Tự dịch phụ đề sang tiếng Việt"
+                    body="Sắp có: app sẽ dịch phụ đề tiếng Anh sang Việt trước khi tạo giọng."
+                    hint="Hiện chưa bật — hãy dùng SRT tiếng Việt sẵn."
+                    checked={false}
+                    disabled
+                  />
+                </div>
+                <div className="control-bar-actions">
+                  {busy ? (
+                    <button type="button" className="secondary-button" onClick={() => void cancelJob()}>
+                      <IconPlayerStopFilled size={18} /> Hủy job
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="text-button"
+                      disabled={!videos.length || !ffmpeg?.ready}
+                      onClick={() => void run(videos.map((video) => video.relativePath))}
+                    >
+                      Dub tất cả {videos.length ? `(${videos.length})` : ""}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="primary-button run-button"
+                    disabled={busy || !selected.size || !ffmpeg?.ready}
+                    onClick={() => void run([...selected])}
+                  >
+                    {busy ? <IconLoader2 className="spin" size={19} /> : <IconPlayerPlayFilled size={19} />}
+                    {busy ? "Đang xử lý…" : `Dub ${selected.size || 0}`}
+                    <IconArrowRight size={18} />
+                  </button>
+                </div>
+              </div>
 
+              <article className="panel library-panel">
                 {!config.projectRoot ? (
                   <div className="empty-state"><IconFolder size={38} /><h2>Chọn project root để bắt đầu</h2><p>Trong Thiết lập, chọn folder dự án — app sẽ tự tạo assets/video, assets/srt, outputs.</p><button className="primary-button" onClick={() => setView("settings")}><IconSettings size={18} /> Mở thiết lập</button></div>
                 ) : !videos.length && !scanning ? (
@@ -892,45 +1028,69 @@ function App() {
                 )}
               </article>
 
-              <aside className="runner-column">
-                <article className="panel run-panel">
-                  <div className="panel-title"><span className="live-mark" /><div><h2>Dub control</h2><p>Azure · Florian Dragon HD</p></div><IconAdjustmentsHorizontal size={20} /></div>
-                  <div className="switch-row"><label htmlFor="force"><span><strong>Xử lý lại</strong><small>Dù output đã mới nhất</small></span><input id="force" type="checkbox" role="switch" checked={force} onChange={(event) => setForce(event.target.checked)} /></label></div>
-                  <div className="switch-row"><label htmlFor="force-tts"><span><strong>Sinh lại TTS</strong><small>Xóa cache giọng hiện tại</small></span><input id="force-tts" type="checkbox" role="switch" checked={forceTts} onChange={(event) => setForceTts(event.target.checked)} /></label></div>
-                  <div className="switch-row disabled"><label htmlFor="translate"><span><strong>Dịch EN → VI</strong><small>Coming soon</small></span><input id="translate" type="checkbox" role="switch" disabled /></label></div>
-                  <button className="primary-button run-button" disabled={busy || !selected.size || !ffmpeg?.ready} onClick={() => void run([...selected])}>
-                    {busy ? <IconLoader2 className="spin" size={19} /> : <IconPlayerPlayFilled size={19} />} {busy ? "Đang xử lý…" : `Dub ${selected.size || "video đã chọn"}`} <IconArrowRight size={18} />
-                  </button>
-                  {busy ? (
-                    <button className="secondary-button" onClick={() => void cancelJob()}>
-                      <IconPlayerStopFilled size={18} /> Hủy job
-                    </button>
-                  ) : (
-                    <button className="text-button" disabled={!videos.length || !ffmpeg?.ready} onClick={() => void run(videos.map((video) => video.relativePath))}>
-                      Dub tất cả {videos.length ? `(${videos.length})` : ""}
-                    </button>
-                  )}
-                </article>
-
-                <article className="panel progress-panel" aria-live="polite">
-                  <div className="progress-head"><div><span>JOB MONITOR</span><strong>{busy ? "ĐANG CHẠY" : progress?.stage === "error" ? "LỖI" : progress ? "HOÀN TẤT" : "CHỜ"}</strong></div><span className="job-time"><IconClock size={15} /> LIVE</span></div>
-                  <div className="current-file" title={progress?.video}>{progress?.video || progress?.message || "Chưa có job nào"}</div>
-                  <div className="progress-value"><strong>{progressValue.toString().padStart(2, "0")}</strong><span>%</span><small>{progress?.current != null && progress.total ? `${progress.current} / ${progress.total}` : ""}</small></div>
+              <article className="panel progress-panel job-monitor" aria-live="polite">
+                <div className="job-col job-col-status">
+                  <div className="progress-head">
+                    <div>
+                      <span>JOB MONITOR</span>
+                      <strong>
+                        {busy ? "ĐANG CHẠY" : progress?.stage === "error" ? "LỖI" : progress ? "HOÀN TẤT" : "CHỜ"}
+                      </strong>
+                    </div>
+                    <span className="job-time"><IconClock size={15} /> LIVE</span>
+                  </div>
+                  <div className="current-file" title={progress?.video}>
+                    {progress?.video || progress?.message || "Chưa có job nào"}
+                  </div>
+                  <div className="progress-value">
+                    <strong>{progressValue.toString().padStart(2, "0")}</strong>
+                    <span>%</span>
+                    <small>
+                      {progress?.current != null && progress.total ? `${progress.current} / ${progress.total}` : ""}
+                    </small>
+                  </div>
                   <div className="progress-track"><span style={{ width: `${progressValue}%` }} /></div>
+                </div>
+                <div className="job-col job-col-stages">
+                  <div className="job-col-label">STAGES</div>
                   <div className="stages">
                     {STAGES.map(([stage, label]) => {
                       const currentIndex = STAGES.findIndex(([key]) => key === progress?.stage);
                       const index = STAGES.findIndex(([key]) => key === stage);
-                      const complete = progress?.stage === "done" || progress?.stage === "skip" || index < currentIndex;
-                      return <div key={stage} className={progress?.stage === stage ? "active" : complete ? "complete" : ""}><span>{complete ? <IconCheck size={12} /> : index + 1}</span>{label}</div>;
+                      const complete =
+                        progress?.stage === "done" || progress?.stage === "skip" || index < currentIndex;
+                      return (
+                        <div
+                          key={stage}
+                          className={progress?.stage === stage ? "active" : complete ? "complete" : ""}
+                        >
+                          <span>{complete ? <IconCheck size={12} /> : index + 1}</span>
+                          {label}
+                        </div>
+                      );
                     })}
                   </div>
+                </div>
+                <div className="job-col job-col-console">
+                  <div className="job-col-label">CONSOLE</div>
                   <div className="console" aria-label="Nhật ký job" tabIndex={0}>
-                    {logs.length ? logs.map((line, index) => <div key={`${line.jobId}-${index}`} className={line.stage}><span>{String(index + 1).padStart(2, "0")}</span><p>{line.message}</p></div>) : <div className="placeholder"><IconTerminal2 size={17} /><p>Nhật ký xử lý sẽ xuất hiện tại đây.</p></div>}
+                    {logs.length ? (
+                      logs.map((line, index) => (
+                        <div key={`${line.jobId}-${index}`} className={line.stage}>
+                          <span>{String(index + 1).padStart(2, "0")}</span>
+                          <p>{line.message}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="placeholder">
+                        <IconTerminal2 size={17} />
+                        <p>Nhật ký xử lý sẽ xuất hiện tại đây.</p>
+                      </div>
+                    )}
                     <div ref={logEndRef} />
                   </div>
-                </article>
-              </aside>
+                </div>
+              </article>
             </div>
           </section>
         )}
