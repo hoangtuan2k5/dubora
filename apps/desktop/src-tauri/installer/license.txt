@@ -2,14 +2,14 @@ MIT License — viet-dub
 
 Copyright (c) 2026 Hoàng Chiều Nguyễn Tuấn
 
-Nhà phát triển / Author: Hoàng Chiều Nguyễn Tuấn
+Author: Hoàng Chiều Nguyễn Tuấn
 Email: tuan@hoangtuan.dev
 GitHub: https://github.com/hoangtuan2k5
 Website: https://hoangtuan.dev
 Repository: https://github.com/hoangtuan2k5/viet-dub
 
 Ứng dụng lồng tiếng Việt cho video (Azure Speech + FFmpeg).
-Liên hệ hỗ trợ: tuan@hoangtuan.dev
+Liên hệ: tuan@hoangtuan.dev
 
 ---
 
