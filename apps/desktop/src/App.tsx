@@ -11,6 +11,7 @@ import {
   IconBook,
   IconExternalLink,
   IconFileText,
+  IconFilter,
   IconFolder,
   IconFolderOpen,
   IconKey,
@@ -23,6 +24,8 @@ import {
   IconRefresh,
   IconSearch,
   IconSettings,
+  IconSortAscendingLetters,
+  IconSortDescendingLetters,
   IconSun,
   IconTerminal2,
   IconVideo,
@@ -45,6 +48,43 @@ const DEFAULT_CONFIG: AppConfig = {
   azureRegion: "southeastasia",
   azureVoice: DEFAULT_AZURE_VOICE,
 };
+
+const POPULAR_LOCALES = ["vi-VN", "en-US", "de-DE", "zh-CN", "ja-JP", "ko-KR", "fr-FR", "en-GB"] as const;
+
+type VoiceSortKey = "name" | "locale" | "gender";
+type VoiceSortDir = "asc" | "desc";
+
+type VoiceFeatureFilter = {
+  multilingual: boolean;
+  hd: boolean;
+  female: boolean;
+  male: boolean;
+  gaOnly: boolean;
+};
+
+const EMPTY_VOICE_FEATURES: VoiceFeatureFilter = {
+  multilingual: false,
+  hd: false,
+  female: false,
+  male: false,
+  gaOnly: false,
+};
+
+function isMultilingualVoice(voice: AzureVoice) {
+  const blob = `${voice.shortName} ${voice.displayName} ${voice.localName}`.toLowerCase();
+  return blob.includes("multilingual") || blob.includes("multi");
+}
+
+function isHdVoice(voice: AzureVoice) {
+  const blob = voice.shortName.toLowerCase();
+  return blob.includes("hd") || blob.includes("dragon");
+}
+
+function voiceSortLabel(key: VoiceSortKey) {
+  if (key === "locale") return "Ngôn ngữ";
+  if (key === "gender") return "Giới tính";
+  return "Tên";
+}
 
 const STAGES = [
   ["clean", "Làm sạch"],
@@ -352,7 +392,15 @@ function App() {
   const [notice, setNotice] = useState("");
   const [voices, setVoices] = useState<AzureVoice[]>([]);
   const [loadingVoices, setLoadingVoices] = useState(false);
-  const [voiceFilter, setVoiceFilter] = useState("");
+  const [voiceQuery, setVoiceQuery] = useState("");
+  const [voiceLocale, setVoiceLocale] = useState<string | "all">("all");
+  const [voiceFeatures, setVoiceFeatures] = useState<VoiceFeatureFilter>(EMPTY_VOICE_FEATURES);
+  const [voiceSortKey, setVoiceSortKey] = useState<VoiceSortKey>("name");
+  const [voiceSortDir, setVoiceSortDir] = useState<VoiceSortDir>("asc");
+  const [voiceFilterOpen, setVoiceFilterOpen] = useState(false);
+  const [voiceSortOpen, setVoiceSortOpen] = useState(false);
+  const voiceFilterRef = useRef<HTMLDivElement>(null);
+  const voiceSortRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const projectRootRef = useRef("");
   const scanRequestRef = useRef(0);
@@ -566,10 +614,42 @@ function App() {
     }
   };
 
+  const voiceLocales = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const voice of voices) {
+      if (!voice.locale) continue;
+      counts.set(voice.locale, (counts.get(voice.locale) ?? 0) + 1);
+    }
+    const fromData = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([locale]) => locale);
+    const preferred = POPULAR_LOCALES.filter((locale) => counts.has(locale));
+    const preferredSet = new Set<string>(preferred);
+    const rest = fromData.filter((locale) => !preferredSet.has(locale));
+    return [...preferred, ...rest];
+  }, [voices]);
+
+  const activeVoiceFilterCount = useMemo(() => {
+    let count = 0;
+    if (voiceLocale !== "all") count += 1;
+    if (voiceFeatures.multilingual) count += 1;
+    if (voiceFeatures.hd) count += 1;
+    if (voiceFeatures.female) count += 1;
+    if (voiceFeatures.male) count += 1;
+    if (voiceFeatures.gaOnly) count += 1;
+    return count;
+  }, [voiceLocale, voiceFeatures]);
+
   const filteredVoices = useMemo(() => {
-    const q = voiceFilter.trim().toLowerCase();
-    if (!q) return voices;
-    return voices.filter((voice) => {
+    const q = voiceQuery.trim().toLowerCase();
+    let list = voices.filter((voice) => {
+      if (voiceLocale !== "all" && voice.locale !== voiceLocale) return false;
+      if (voiceFeatures.multilingual && !isMultilingualVoice(voice)) return false;
+      if (voiceFeatures.hd && !isHdVoice(voice)) return false;
+      if (voiceFeatures.female && voice.gender.toLowerCase() !== "female") return false;
+      if (voiceFeatures.male && voice.gender.toLowerCase() !== "male") return false;
+      if (voiceFeatures.gaOnly && voice.status && voice.status.toUpperCase() !== "GA") return false;
+      if (!q) return true;
       const hay = [
         voice.shortName,
         voice.displayName,
@@ -584,7 +664,72 @@ function App() {
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [voices, voiceFilter]);
+
+    const dir = voiceSortDir === "asc" ? 1 : -1;
+    list = [...list].sort((a, b) => {
+      const nameA = (a.localName || a.displayName || a.shortName).toLocaleLowerCase("vi");
+      const nameB = (b.localName || b.displayName || b.shortName).toLocaleLowerCase("vi");
+      if (voiceSortKey === "locale") {
+        return (
+          a.locale.localeCompare(b.locale, "vi") * dir ||
+          nameA.localeCompare(nameB, "vi") * dir
+        );
+      }
+      if (voiceSortKey === "gender") {
+        return (
+          a.gender.localeCompare(b.gender, "vi") * dir ||
+          nameA.localeCompare(nameB, "vi") * dir
+        );
+      }
+      return nameA.localeCompare(nameB, "vi") * dir || a.shortName.localeCompare(b.shortName) * dir;
+    });
+    return list;
+  }, [voices, voiceQuery, voiceLocale, voiceFeatures, voiceSortKey, voiceSortDir]);
+
+  useEffect(() => {
+    if (!voiceFilterOpen && !voiceSortOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (voiceFilterOpen && voiceFilterRef.current && !voiceFilterRef.current.contains(target)) {
+        setVoiceFilterOpen(false);
+      }
+      if (voiceSortOpen && voiceSortRef.current && !voiceSortRef.current.contains(target)) {
+        setVoiceSortOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setVoiceFilterOpen(false);
+        setVoiceSortOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [voiceFilterOpen, voiceSortOpen]);
+
+  const clearVoiceFilters = () => {
+    setVoiceLocale("all");
+    setVoiceFeatures(EMPTY_VOICE_FEATURES);
+    setVoiceQuery("");
+  };
+
+  const toggleVoiceFeature = (key: keyof VoiceFeatureFilter) => {
+    setVoiceFeatures((current) => {
+      const next = { ...current, [key]: !current[key] };
+      // Female/Male exclusive when both would be on.
+      if (key === "female" && next.female) next.male = false;
+      if (key === "male" && next.male) next.female = false;
+      return next;
+    });
+  };
+
+  const cycleVoiceSortDir = () => {
+    setVoiceSortDir((current) => (current === "asc" ? "desc" : "asc"));
+  };
 
   const openPath = (path: string) => {
     void api.openPath(path).catch((error) => setNotice(`Không thể mở đường dẫn: ${describeError(error)}`));
@@ -966,16 +1111,216 @@ function App() {
                 </div>
                 {voices.length > 0 ? (
                   <>
-                    <div className="input-wrap voice-filter">
-                      <IconSearch size={18} />
-                      <input
-                        id="voice-filter"
-                        type="search"
-                        value={voiceFilter}
-                        onChange={(event) => setVoiceFilter(event.target.value)}
-                        placeholder="Lọc: vi-VN, Female, Florian…"
-                      />
+                    <div className="voice-tools">
+                      <div className="input-wrap voice-search">
+                        <IconSearch size={18} />
+                        <input
+                          id="voice-filter"
+                          type="search"
+                          value={voiceQuery}
+                          onChange={(event) => setVoiceQuery(event.target.value)}
+                          placeholder="Tìm tên giọng…"
+                          aria-label="Tìm giọng"
+                        />
+                      </div>
+
+                      <div className="voice-menu" ref={voiceFilterRef}>
+                        <button
+                          type="button"
+                          className={`tool-button${voiceFilterOpen || activeVoiceFilterCount ? " active" : ""}`}
+                          aria-expanded={voiceFilterOpen}
+                          aria-haspopup="dialog"
+                          onClick={() => {
+                            setVoiceFilterOpen((open) => !open);
+                            setVoiceSortOpen(false);
+                          }}
+                        >
+                          <IconFilter size={17} />
+                          Lọc
+                          {activeVoiceFilterCount > 0 && (
+                            <span className="tool-badge">{activeVoiceFilterCount}</span>
+                          )}
+                        </button>
+                        {voiceFilterOpen && (
+                          <div className="voice-popover" role="dialog" aria-label="Bộ lọc giọng">
+                            <div className="voice-popover-head">
+                              <strong>Bộ lọc</strong>
+                              <button type="button" className="text-button" onClick={clearVoiceFilters}>
+                                Xóa lọc
+                              </button>
+                            </div>
+
+                            <p className="voice-popover-label">Ngôn ngữ</p>
+                            <div className="filter-chips">
+                              <button
+                                type="button"
+                                className={`filter-chip${voiceLocale === "all" ? " on" : ""}`}
+                                onClick={() => setVoiceLocale("all")}
+                              >
+                                Tất cả
+                              </button>
+                              {voiceLocales.slice(0, 12).map((locale) => (
+                                <button
+                                  key={locale}
+                                  type="button"
+                                  className={`filter-chip${voiceLocale === locale ? " on" : ""}`}
+                                  onClick={() => setVoiceLocale(locale)}
+                                >
+                                  {locale}
+                                </button>
+                              ))}
+                            </div>
+
+                            <p className="voice-popover-label">Tính năng</p>
+                            <div className="filter-chips">
+                              <button
+                                type="button"
+                                className={`filter-chip${voiceFeatures.multilingual ? " on" : ""}`}
+                                onClick={() => toggleVoiceFeature("multilingual")}
+                              >
+                                Multilingual
+                              </button>
+                              <button
+                                type="button"
+                                className={`filter-chip${voiceFeatures.hd ? " on" : ""}`}
+                                onClick={() => toggleVoiceFeature("hd")}
+                              >
+                                HD / Dragon
+                              </button>
+                              <button
+                                type="button"
+                                className={`filter-chip${voiceFeatures.female ? " on" : ""}`}
+                                onClick={() => toggleVoiceFeature("female")}
+                              >
+                                Nữ
+                              </button>
+                              <button
+                                type="button"
+                                className={`filter-chip${voiceFeatures.male ? " on" : ""}`}
+                                onClick={() => toggleVoiceFeature("male")}
+                              >
+                                Nam
+                              </button>
+                              <button
+                                type="button"
+                                className={`filter-chip${voiceFeatures.gaOnly ? " on" : ""}`}
+                                onClick={() => toggleVoiceFeature("gaOnly")}
+                              >
+                                Chỉ GA
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="voice-menu" ref={voiceSortRef}>
+                        <button
+                          type="button"
+                          className={`tool-button${voiceSortOpen ? " active" : ""}`}
+                          aria-expanded={voiceSortOpen}
+                          aria-haspopup="menu"
+                          title="Sắp xếp — bấm mũi tên để đảo tăng/giảm"
+                          onClick={() => {
+                            setVoiceSortOpen((open) => !open);
+                            setVoiceFilterOpen(false);
+                          }}
+                        >
+                          {voiceSortDir === "asc" ? (
+                            <IconSortAscendingLetters size={17} />
+                          ) : (
+                            <IconSortDescendingLetters size={17} />
+                          )}
+                          {voiceSortLabel(voiceSortKey)}
+                          <span className="sort-dir">{voiceSortDir === "asc" ? "A→Z" : "Z→A"}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-button icon-only"
+                          aria-label={
+                            voiceSortDir === "asc" ? "Đảo sang giảm dần" : "Đảo sang tăng dần"
+                          }
+                          title="Đảo tăng/giảm dần"
+                          onClick={cycleVoiceSortDir}
+                        >
+                          {voiceSortDir === "asc" ? (
+                            <IconSortAscendingLetters size={17} />
+                          ) : (
+                            <IconSortDescendingLetters size={17} />
+                          )}
+                        </button>
+                        {voiceSortOpen && (
+                          <div className="voice-popover sort-popover" role="menu" aria-label="Sắp xếp giọng">
+                            <p className="voice-popover-label">Xếp theo</p>
+                            {([
+                              ["name", "Tên (A–Z)"],
+                              ["locale", "Ngôn ngữ"],
+                              ["gender", "Giới tính"],
+                            ] as const).map(([key, label]) => (
+                              <button
+                                key={key}
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked={voiceSortKey === key}
+                                className={`sort-option${voiceSortKey === key ? " on" : ""}`}
+                                onClick={() => {
+                                  if (voiceSortKey === key) {
+                                    cycleVoiceSortDir();
+                                  } else {
+                                    setVoiceSortKey(key);
+                                    setVoiceSortDir("asc");
+                                  }
+                                  setVoiceSortOpen(false);
+                                }}
+                              >
+                                <span>{label}</span>
+                                {voiceSortKey === key && (
+                                  <em>{voiceSortDir === "asc" ? "Tăng dần" : "Giảm dần"}</em>
+                                )}
+                              </button>
+                            ))}
+                            <p className="voice-popover-note">
+                              Bấm lại cùng tiêu chí hoặc nút mũi tên để đảo tăng ↔ giảm.
+                            </p>
+                          </div>
+                        )}
+                      </div>
                     </div>
+
+                    {activeVoiceFilterCount > 0 && (
+                      <div className="active-filters" aria-label="Bộ lọc đang bật">
+                        {voiceLocale !== "all" && (
+                          <button type="button" className="active-chip" onClick={() => setVoiceLocale("all")}>
+                            {voiceLocale} <IconX size={13} />
+                          </button>
+                        )}
+                        {voiceFeatures.multilingual && (
+                          <button type="button" className="active-chip" onClick={() => toggleVoiceFeature("multilingual")}>
+                            Multilingual <IconX size={13} />
+                          </button>
+                        )}
+                        {voiceFeatures.hd && (
+                          <button type="button" className="active-chip" onClick={() => toggleVoiceFeature("hd")}>
+                            HD <IconX size={13} />
+                          </button>
+                        )}
+                        {voiceFeatures.female && (
+                          <button type="button" className="active-chip" onClick={() => toggleVoiceFeature("female")}>
+                            Nữ <IconX size={13} />
+                          </button>
+                        )}
+                        {voiceFeatures.male && (
+                          <button type="button" className="active-chip" onClick={() => toggleVoiceFeature("male")}>
+                            Nam <IconX size={13} />
+                          </button>
+                        )}
+                        {voiceFeatures.gaOnly && (
+                          <button type="button" className="active-chip" onClick={() => toggleVoiceFeature("gaOnly")}>
+                            GA <IconX size={13} />
+                          </button>
+                        )}
+                      </div>
+                    )}
+
                     <div className="input-wrap select-wrap">
                       <IconWaveSine size={18} />
                       <select
@@ -985,7 +1330,6 @@ function App() {
                           setConfig((current) => ({ ...current, azureVoice: event.target.value }))
                         }
                       >
-                        {/* Keep current selection even if filter hides it */}
                         {!filteredVoices.some((v) => v.shortName === (config.azureVoice || DEFAULT_AZURE_VOICE)) && (
                           <option value={config.azureVoice || DEFAULT_AZURE_VOICE}>
                             {config.azureVoice || DEFAULT_AZURE_VOICE} (đang chọn)
@@ -994,6 +1338,8 @@ function App() {
                         {filteredVoices.map((voice) => (
                           <option key={voice.shortName} value={voice.shortName}>
                             {voice.localName || voice.displayName} · {voice.gender} · {voice.locale}
+                            {isMultilingualVoice(voice) ? " · Multi" : ""}
+                            {isHdVoice(voice) ? " · HD" : ""}
                             {voice.status && voice.status !== "GA" ? ` · ${voice.status}` : ""} — {voice.shortName}
                           </option>
                         ))}
