@@ -638,7 +638,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand" aria-label="viet-dub">
           <div className="brand-mark"><IconWaveSine size={25} stroke={1.7} /></div>
-          <div><strong>VIET//DUB</strong><span>VOICE WORKSTATION</span></div>
+          <div><strong>VIET//DUB</strong><span>Lồng tiếng Việt</span></div>
         </div>
 
         <nav className="nav" aria-label="Điều hướng chính">
@@ -660,10 +660,10 @@ function App() {
         </nav>
 
         <div className="sidebar-meter" aria-label="Trạng thái hệ thống">
-          <div className="meter-heading"><span>SYSTEM CHECK</span><IconTerminal2 size={16} /></div>
+          <div className="meter-heading"><span>Hệ thống</span><IconTerminal2 size={16} /></div>
           <div className={`system-line ${ffmpeg?.ready ? "ok" : "warn"}`}>
             <span className="status-dot" /> FFmpeg + rubberband
-            <b>{ffmpeg?.ready ? "READY" : "CHECK"}</b>
+            <b>{ffmpeg?.ready ? "OK" : "LỖI"}</b>
           </div>
           {ffmpeg?.path && <small title={ffmpeg.path}>{ffmpeg.path}</small>}
         </div>
@@ -680,9 +680,8 @@ function App() {
 
       <main>
         <header className="topbar">
-          <div className="breadcrumb">
-            <span>DESKTOP /</span>{" "}
-            {view === "library" ? "THƯ VIỆN" : view === "settings" ? "THIẾT LẬP" : "HƯỚNG DẪN"}
+          <div className="breadcrumb" aria-live="polite">
+            {view === "library" ? "Thư viện" : view === "settings" ? "Thiết lập" : "Hướng dẫn"}
           </div>
           <div className="root-chip" title={config.projectRoot || "Chưa chọn project root"}>
             <IconFolder size={16} />
@@ -698,17 +697,11 @@ function App() {
         )}
 
         {view === "guide" ? (
-          <section className="guide-page page-enter" aria-labelledby="guide-title">
-            <div className="page-heading">
-              <div>
-                <p className="eyebrow">USER GUIDE</p>
-                <h1 id="guide-title">Hướng dẫn sử dụng</h1>
-              </div>
-              <p>
-                Viet-dub tạo video lồng tiếng Việt từ file video + phụ đề SRT khớp nhau, dùng giọng
-                Azure Speech · giọng mặc định Florian Dragon HD (có thể đổi trong Thiết lập).
-              </p>
-            </div>
+          <section className="guide-page page-enter" aria-label="Hướng dẫn">
+            <p className="page-lead">
+              Tạo video lồng tiếng Việt từ file video + phụ đề SRT khớp nhau. Giọng mặc định:
+              Florian Dragon HD (đổi trong Thiết lập).
+            </p>
 
             <div className="guide-grid">
               <article className="panel guide-card full">
@@ -932,12 +925,7 @@ function App() {
             </div>
           </section>
         ) : view === "settings" ? (
-          <section className="settings-page page-enter" aria-labelledby="settings-title">
-            <div className="page-heading">
-              <div><p className="eyebrow">WORKSPACE CONFIGURATION</p><h1 id="settings-title">Thiết lập hệ thống</h1></div>
-              <p>Liên kết thư mục dự án, Azure Speech và bộ công cụ xử lý âm thanh.</p>
-            </div>
-
+          <section className="settings-page page-enter" aria-label="Thiết lập">
             <div className="settings-grid">
               <article className="panel config-panel">
                 <div className="panel-title"><span className="number">01</span><div><h2>Thư mục dự án</h2><p>Nơi chứa assets, work và outputs.</p></div></div>
@@ -1055,15 +1043,7 @@ function App() {
             </div>
           </section>
         ) : (
-          <section className="library-page page-enter" aria-labelledby="library-title">
-            <div className="page-heading compact">
-              <div><p className="eyebrow">PROJECT LIBRARY</p><h1 id="library-title">Bàn dựng lồng tiếng</h1></div>
-              <div className="heading-actions">
-                <button className="secondary-button" onClick={() => openPath(outputPath(config.projectRoot))} disabled={!config.projectRoot}><IconFolderOpen size={18} /> Mở outputs</button>
-                <button className="secondary-button" onClick={() => void scan()} disabled={scanning || !config.projectRoot}>{scanning ? <IconLoader2 className="spin" size={18} /> : <IconRefresh size={18} />} Quét lại</button>
-              </div>
-            </div>
-
+          <section className="library-page page-enter" aria-label="Thư viện">
             <div className="library-layout">
               <div className="panel control-bar">
                 <div className="search">
@@ -1110,6 +1090,23 @@ function App() {
                   />
                 </div>
                 <div className="control-bar-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => openPath(outputPath(config.projectRoot))}
+                    disabled={!config.projectRoot}
+                  >
+                    <IconFolderOpen size={18} /> Outputs
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => void scan()}
+                    disabled={scanning || !config.projectRoot}
+                  >
+                    {scanning ? <IconLoader2 className="spin" size={18} /> : <IconRefresh size={18} />}
+                    Quét lại
+                  </button>
                   {busy ? (
                     <button type="button" className="secondary-button" onClick={() => void cancelJob()}>
                       <IconPlayerStopFilled size={18} /> Hủy job
@@ -1166,12 +1163,12 @@ function App() {
                 <div className="job-col job-col-status">
                   <div className="progress-head">
                     <div>
-                      <span>JOB MONITOR</span>
+                      <span>Tiến độ</span>
                       <strong>
                         {busy ? "ĐANG CHẠY" : progress?.stage === "error" ? "LỖI" : progress ? "HOÀN TẤT" : "CHỜ"}
                       </strong>
                     </div>
-                    <span className="job-time"><IconClock size={15} /> LIVE</span>
+                    <span className="job-time"><IconClock size={15} /> Trực tiếp</span>
                   </div>
                   <div className="current-file" title={progress?.video}>
                     {progress?.video || progress?.message || "Chưa có job nào"}
@@ -1186,7 +1183,7 @@ function App() {
                   <div className="progress-track"><span style={{ width: `${progressValue}%` }} /></div>
                 </div>
                 <div className="job-col job-col-stages">
-                  <div className="job-col-label">STAGES</div>
+                  <div className="job-col-label">Giai đoạn</div>
                   <div className="stages">
                     {STAGES.map(([stage, label]) => {
                       const currentIndex = STAGES.findIndex(([key]) => key === progress?.stage);
@@ -1206,7 +1203,7 @@ function App() {
                   </div>
                 </div>
                 <div className="job-col job-col-console">
-                  <div className="job-col-label">CONSOLE</div>
+                  <div className="job-col-label">Nhật ký</div>
                   <div className="console" aria-label="Nhật ký job" tabIndex={0}>
                     {logs.length ? (
                       logs.map((line, index) => (
