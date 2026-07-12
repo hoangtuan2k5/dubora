@@ -26,4 +26,5 @@ serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 viet-dub-core = { path = "../../../crates/viet-dub-core" }
