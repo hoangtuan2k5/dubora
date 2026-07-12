@@ -665,15 +665,19 @@ h1 {
 
 .voice-popover {
   position: absolute;
-  top: calc(100% + 8px);
+  /* Open upward so settings near the bottom of the panel don't force scroll. */
+  bottom: calc(100% + 8px);
+  top: auto;
   left: 0;
   z-index: 40;
   width: min(340px, 86vw);
+  max-height: min(360px, 50vh);
+  overflow: auto;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel-raised);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.4);
 }
 
 .voice-popover.sort-popover {
