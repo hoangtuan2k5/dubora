@@ -10,7 +10,8 @@ use crate::build_video::build_dubbed_video;
 use crate::clean_rolling::clean_youtube_rolling_subtitles;
 use crate::config::{DubConfig, DubOptions, Provider};
 use crate::paths::{
-    find_matching_srt, find_targets, output_path, safe_work_path, video_relative_path,
+    companion_output_srt, find_matching_srt, find_targets, output_path, safe_work_path,
+    video_relative_path,
 };
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
 use crate::tts_azure::generate_all_tts;
@@ -107,6 +108,22 @@ async fn create_dub_for_video(
     let label = relative.display().to_string();
 
     if skip_allowed(options) && output.exists() && output_is_up_to_date(&output, video, &srt)? {
+        // Backfill companion SRT for older runs that only produced the video.
+        let output_srt = companion_output_srt(&output);
+        if !output_srt.exists() {
+            if let Some(parent) = output_srt.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(error) = fs::copy(&srt, &output_srt) {
+                progress.event(ProgressEvent::new(
+                    Stage::Skip,
+                    &label,
+                    format!(
+                        "Skipping {label}, but failed to copy companion SRT: {error}"
+                    ),
+                ));
+            }
+        }
         progress.event(ProgressEvent::new(
             Stage::Skip,
             &label,
@@ -225,10 +242,41 @@ async fn create_dub_for_video(
         .with_context(|| format!("Mux task failed for {label_video}"))??;
     }
 
+    // Same basename as the dubbed video so VLC (and similar players) auto-detect subtitles.
+    let output_srt = companion_output_srt(&output);
+    {
+        let vi_srt = vi_srt.clone();
+        let output_srt = output_srt.clone();
+        let label_srt = label.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = output_srt.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create {}", parent.display()))?;
+            }
+            fs::copy(&vi_srt, &output_srt).with_context(|| {
+                format!(
+                    "Failed to copy companion SRT {} -> {}",
+                    vi_srt.display(),
+                    output_srt.display()
+                )
+            })?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .with_context(|| format!("Companion SRT task failed for {label_srt}"))??;
+    }
+
     progress.event(ProgressEvent::new(
         Stage::Done,
         &label,
-        format!("Done: {}", output.display()),
+        format!(
+            "Done: {} (+ {})",
+            output.display(),
+            output_srt
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "companion.srt".to_owned())
+        ),
     ));
     Ok(output)
 }

@@ -201,6 +201,13 @@ pub fn output_path(root: &Path, video: &Path, relative_video: &Path) -> Result<P
         .with_file_name(format!("{stem}.vi-dub.mp4")))
 }
 
+/// Companion SRT next to a dubbed video so players (e.g. VLC) auto-load it.
+///
+/// `lesson.vi-dub.mp4` → `lesson.vi-dub.srt`
+pub fn companion_output_srt(output_video: &Path) -> PathBuf {
+    output_video.with_extension("srt")
+}
+
 fn collect_videos(directory: &Path, videos: &mut Vec<PathBuf>) -> Result<()> {
     if !directory.is_dir() {
         return Ok(());
@@ -263,6 +270,15 @@ mod tests {
 
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn companion_srt_matches_vlc_naming() {
+        let video = Path::new("/project/outputs/Course/Part/Lesson.vi-dub.mp4");
+        assert_eq!(
+            companion_output_srt(video),
+            Path::new("/project/outputs/Course/Part/Lesson.vi-dub.srt")
+        );
     }
 
     #[test]
