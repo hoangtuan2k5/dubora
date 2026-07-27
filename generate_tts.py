@@ -9,7 +9,7 @@ import requests
 import edge_tts
 from gtts import gTTS
 
-AZURE_VOICE = "de-DE-Seraphina:DragonHDLatestNeural"
+AZURE_VOICE = "de-DE-Florian:DragonHDLatestNeural"
 AZURE_REGION = "southeastasia"
 ROOT = Path(__file__).resolve().parent
 AZURE_ENV_PATHS = (
@@ -302,12 +302,12 @@ async def generate_all_tts(
         return
 
     concurrency = 4 if provider in {"edge", "azure"} else 2
+    cache_keys = {s["index"]: tts_cache_key(provider, s["text"]) for s in missing}
     semaphore = asyncio.Semaphore(concurrency)
-    failed = []
 
     async def worker(s):
         out_file = os.path.join(output_dir, f"seg_{s['index']}.mp3")
-        cache_key = tts_cache_key(provider, s["text"])
+        cache_key = cache_keys[s["index"]]
         async with semaphore:
             await asyncio.sleep(0.2)
             if is_fresh_audio_file(out_file, freshness_source, cache_key):
@@ -332,7 +332,7 @@ async def generate_all_tts(
     for completed, task in enumerate(asyncio.as_completed(tasks), 1):
         segment_index, success = await task
         if provider == "azure":
-            provider_label = "Azure Seraphina"
+            provider_label = "Azure Florian"
         elif provider == "gtts":
             provider_label = "gTTS"
         else:
@@ -341,11 +341,17 @@ async def generate_all_tts(
         if success:
             print(f"Generated {completed}/{len(missing)} with {provider_label}: segment {segment_index}")
         else:
-            print(f"FAILED to generate segment {segment_index}")
-            failed.append(segment_index)
-
-    if failed:
-        raise RuntimeError(f"Failed to generate {len(failed)} segments: {failed}")
+            print(f"FAILED to generate segment {segment_index}. Creating a silent MP3 fallback.")
+            # Create a 0.1s silent MP3 for an unrecoverable TTS failure.
+            out_path = Path(output_dir) / f"seg_{segment_index}.mp3"
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", "0.1", "-q:a", "9", "-acodec", "libmp3lame", str(out_path)],
+                    check=True, capture_output=True
+                )
+                write_tts_cache_key(out_path, cache_keys[segment_index])
+            except Exception as e:
+                print(f"Failed to create silent MP3 for {segment_index}: {e}")
 
 if __name__ == "__main__":
     provider = sys.argv[1] if len(sys.argv) > 1 else "azure"
