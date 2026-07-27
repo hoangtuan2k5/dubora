@@ -24,6 +24,17 @@ pub struct AzureConfig {
     pub voice: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct GeminiConfig { pub keys: Vec<String> }
+
+impl GeminiConfig {
+    pub fn new(keys: Vec<String>) -> Result<Self> {
+        let keys: Vec<_> = keys.into_iter().map(|key| key.trim().to_owned()).filter(|key| !key.is_empty()).collect();
+        if keys.is_empty() { bail!("Missing GEMINI_API_KEYS. Add one or more Gemini API keys"); }
+        Ok(Self { keys })
+    }
+}
+
 impl AzureConfig {
     pub fn new(key: impl Into<String>, region: impl Into<String>) -> Result<Self> {
         let key = key.into();
@@ -87,6 +98,7 @@ pub struct DubConfig {
     pub root: PathBuf,
     pub provider: Provider,
     pub azure: Option<AzureConfig>,
+    pub gemini: Option<GeminiConfig>,
     pub ffmpeg: FfmpegPaths,
 }
 

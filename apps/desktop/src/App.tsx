@@ -47,6 +47,7 @@ const DEFAULT_CONFIG: AppConfig = {
   azureKey: "",
   azureRegion: "southeastasia",
   azureVoice: DEFAULT_AZURE_VOICE,
+  geminiKeys: "",
 };
 
 const POPULAR_LOCALES = ["vi-VN", "en-US", "de-DE", "zh-CN", "ja-JP", "ko-KR", "fr-FR", "en-GB"] as const;
@@ -143,6 +144,7 @@ type OptionChipProps = {
 
 function OptionChip({ id, label, title, body, hint, checked, disabled, onChange }: OptionChipProps) {
   const [showTip, setShowTip] = useState(false);
+  const [tipBelow, setTipBelow] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearTimer = () => {
@@ -152,8 +154,10 @@ function OptionChip({ id, label, title, body, hint, checked, disabled, onChange 
     }
   };
 
-  const scheduleShow = () => {
+  const scheduleShow = (target: HTMLElement) => {
     clearTimer();
+    const box = target.getBoundingClientRect();
+    setTipBelow(box.top + box.height / 2 < window.innerHeight / 2);
     timerRef.current = setTimeout(() => setShowTip(true), TIP_DELAY_MS);
   };
 
@@ -177,10 +181,10 @@ function OptionChip({ id, label, title, body, hint, checked, disabled, onChange 
       aria-checked={checked}
       aria-describedby={`${id}-tip`}
       disabled={disabled}
-      className={`option-chip${checked ? " on" : ""}${showTip ? " show-tip" : ""}${disabled ? " is-disabled" : ""}`}
-      onPointerEnter={scheduleShow}
+      className={`option-chip${checked ? " on" : ""}${showTip ? " show-tip" : ""}${tipBelow ? " tip-below" : ""}${disabled ? " is-disabled" : ""}`}
+      onPointerEnter={(event) => scheduleShow(event.currentTarget)}
       onPointerLeave={hide}
-      onFocus={scheduleShow}
+      onFocus={(event) => scheduleShow(event.currentTarget)}
       onBlur={hide}
       onClick={() => {
         if (disabled || !onChange) return;
@@ -397,6 +401,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [force, setForce] = useState(false);
   const [forceTts, setForceTts] = useState(false);
+  const [translate, setTranslate] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null);
   const [progress, setProgress] = useState<DubProgress | null>(null);
@@ -452,6 +457,17 @@ function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    const setTooltipSide = (event: PointerEvent) => {
+      const target = (event.target as HTMLElement).closest<HTMLElement>("[data-tooltip]");
+      if (!target) return;
+      const box = target.getBoundingClientRect();
+      target.dataset.tooltipSide = box.top + box.height / 2 < window.innerHeight / 2 ? "below" : "above";
+    };
+    document.addEventListener("pointerover", setTooltipSide);
+    return () => document.removeEventListener("pointerover", setTooltipSide);
+  }, []);
 
   useEffect(() => {
     projectRootRef.current = savedConfig.projectRoot;
@@ -757,7 +773,7 @@ function App() {
     setProgress(null);
     setNotice("");
     try {
-      await api.startDub(targets, force, forceTts);
+      await api.startDub(targets, force, forceTts, translate);
     } catch (error) {
       setBusy(false);
       setNotice(`Job thất bại: ${describeError(error)}`);
@@ -825,7 +841,7 @@ function App() {
             <span className="status-dot" /> FFmpeg + rubberband
             <b>{ffmpeg?.ready ? "OK" : "LỖI"}</b>
           </div>
-          {ffmpeg?.path && <small title={ffmpeg.path}>{ffmpeg.path}</small>}
+          {ffmpeg?.path && <small data-tooltip={ffmpeg.path}>{ffmpeg.path}</small>}
         </div>
 
         <button
@@ -843,7 +859,7 @@ function App() {
           <div className="breadcrumb" aria-live="polite">
             {view === "library" ? "Thư viện" : view === "settings" ? "Thiết lập" : "Hướng dẫn"}
           </div>
-          <div className="root-chip" title={config.projectRoot || "Chưa chọn project root"}>
+          <div className="root-chip" data-tooltip={config.projectRoot || "Chưa chọn project root"}>
             <IconFolder size={16} />
             <span>{config.projectRoot || "Chưa chọn project root"}</span>
           </div>
@@ -1234,7 +1250,7 @@ function App() {
                           className={`tool-button${voiceSortOpen ? " active" : ""}`}
                           aria-expanded={voiceSortOpen}
                           aria-haspopup="menu"
-                          title="Sắp xếp — bấm mũi tên để đảo tăng/giảm"
+                          data-tooltip="Sắp xếp — bấm mũi tên để đảo tăng/giảm"
                           onClick={() => {
                             setVoiceSortOpen((open) => !open);
                             setVoiceFilterOpen(false);
@@ -1254,7 +1270,7 @@ function App() {
                           aria-label={
                             voiceSortDir === "asc" ? "Đảo sang giảm dần" : "Đảo sang tăng dần"
                           }
-                          title="Đảo tăng/giảm dần"
+                          data-tooltip="Đảo tăng/giảm dần"
                           onClick={cycleVoiceSortDir}
                         >
                           {voiceSortDir === "asc" ? (
@@ -1386,8 +1402,22 @@ function App() {
                 )}
               </article>
 
+              <article className="panel config-panel">
+                <div className="panel-title"><span className="number">03</span><div><h2>Google AI Studio</h2><p>Chỉ cần khi bật dịch phụ đề bằng Gemini.</p></div></div>
+                <label htmlFor="gemini-keys">Gemini API keys</label>
+                <textarea
+                  id="gemini-keys"
+                  value={config.geminiKeys}
+                  onChange={(event) => setConfig({ ...config, geminiKeys: event.target.value })}
+                  placeholder="Một key mỗi dòng, hoặc phân cách bằng dấu phẩy"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <p className="field-hint">Dùng <code>gemini-3.5-flash-lite</code>; các key được xoay theo từng batch dịch.</p>
+              </article>
+
               <article className="panel status-panel">
-                <div className="panel-title"><span className="number">03</span><div><h2>FFmpeg engine</h2><p>Yêu cầu filter rubberband.</p></div></div>
+                <div className="panel-title"><span className="number">04</span><div><h2>FFmpeg engine</h2><p>Yêu cầu filter rubberband.</p></div></div>
                 <div className={`engine-status ${ffmpeg?.ready ? "ready" : "missing"}`}>
                   {ffmpeg?.ready ? <IconCircleCheckFilled size={28} /> : <IconAlertTriangle size={28} />}
                   <div><strong>{ffmpeg?.ready ? "Sẵn sàng xử lý" : "Chưa sẵn sàng"}</strong><span>{ffmpeg?.message || "Đang kiểm tra…"}</span></div>
@@ -1442,12 +1472,13 @@ function App() {
                   />
                   <OptionChip
                     id="translate"
-                    label="Dịch EN→VI"
+                    label="Dịch bằng Gemini"
                     title="Tự dịch phụ đề sang tiếng Việt"
-                    body="Sắp có: app sẽ dịch phụ đề tiếng Anh sang Việt trước khi tạo giọng."
-                    hint="Hiện chưa bật — hãy dùng SRT tiếng Việt sẵn."
-                    checked={false}
-                    disabled
+                    body="Gemini dịch và chỉnh câu sau bước clean subtitle, trước khi tạo giọng."
+                    hint="Cần nhập ít nhất một Gemini API key trong Thiết lập."
+                    checked={translate}
+                    disabled={!config.geminiKeys.trim()}
+                    onChange={setTranslate}
                   />
                 </div>
                 <div className="control-bar-actions">
@@ -1511,7 +1542,7 @@ function App() {
                             <td><button className="video-name" onClick={() => toggleSelected(video.relativePath)}><span className="file-icon"><IconVideo size={18} /></span><span><strong>{video.relativePath.split(/[\\/]/).at(-1)}</strong><small>{video.relativePath}</small></span></button></td>
                             <td><span className={`badge ${video.hasSrt ? "success" : "danger"}`}>{video.hasSrt ? <IconCheck size={14} /> : <IconX size={14} />}{video.hasSrt ? "Có SRT" : "Thiếu"}</span></td>
                             <td><span className={`badge ${video.hasOutput ? "cyan" : "muted"}`}><span className="mini-dot" />{video.hasOutput ? "Đã dub" : "Chưa có"}</span></td>
-                            <td><button className="icon-button row-action" disabled={!video.hasOutput} onClick={() => openPath(outputPath(config.projectRoot, video.relativePath))} aria-label={`Mở output của ${video.relativePath}`} title="Mở output"><IconFolderOpen size={18} /></button></td>
+                            <td><button className="icon-button row-action" disabled={!video.hasOutput} onClick={() => openPath(outputPath(config.projectRoot, video.relativePath))} aria-label={`Mở output của ${video.relativePath}`} data-tooltip="Mở output"><IconFolderOpen size={18} /></button></td>
                           </tr>
                         ))}
                       </tbody>
@@ -1531,7 +1562,7 @@ function App() {
                     </div>
                     <span className="job-time"><IconClock size={15} /> Trực tiếp</span>
                   </div>
-                  <div className="current-file" title={progress?.video}>
+                  <div className="current-file" data-tooltip={progress?.video}>
                     {progress?.video || progress?.message || "Chưa có job nào"}
                   </div>
                   <div className="progress-value">

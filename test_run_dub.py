@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ from unittest.mock import patch
 
 import generate_tts
 import run_dub
+import translate_srt
 
 
 class OutputSubtitleTest(unittest.TestCase):
@@ -66,6 +68,40 @@ class OutputSubtitleTest(unittest.TestCase):
                 Path(f"{output}.sha256").read_text(encoding="utf-8"),
                 generate_tts.tts_cache_key("edge", "text"),
             )
+
+    def test_gemini_translation_rotates_keys_per_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.srt"
+            output = root / "output.srt"
+            source.write_text(
+                "\n".join(
+                    f"{index}\n00:00:{index:02},000 --> 00:01:{index:02},000\nText {index}\n"
+                    for index in range(1, 22)
+                ),
+                encoding="utf-8",
+            )
+            used_keys = []
+
+            class Response:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"steps": [{"type": "model_output", "content": [{"type": "text", "text": self.text}]}]}
+
+            def fake_post(*args, **kwargs):
+                used_keys.append(kwargs["headers"]["x-goog-api-key"])
+                segments = json.loads(kwargs["json"]["input"].split("Input JSON: ", 1)[1])
+                response = Response()
+                response.text = json.dumps({"segments": segments})
+                return response
+
+            with patch.object(translate_srt.requests, "post", side_effect=fake_post):
+                translate_srt.translate_srt(source, output, api_keys=["key-1", "key-2"])
+
+            self.assertEqual(used_keys, ["key-1", "key-2"])
+            self.assertEqual(len(translate_srt.parse_srt(output)), 21)
 
 
 if __name__ == "__main__":

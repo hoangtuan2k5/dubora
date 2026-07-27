@@ -44,6 +44,7 @@ Run it from a project root or pass `--root` explicitly:
 ```bash
 export AZURE_KEY=...
 export AZURE_REGION=southeastasia
+export GEMINI_API_KEYS=key_1,key_2
 
 ./target/release/viet-dub
 ./target/release/viet-dub "course/part/lesson.mp4"
@@ -52,16 +53,16 @@ export AZURE_REGION=southeastasia
 ./target/release/viet-dub --root /data/courses/my-course
 ```
 
-`<root>/.env` is also supported (`AZURE_KEY`, `AZURE_REGION`). Optional overrides:
+`<root>/.env` is also supported (`AZURE_KEY`, `AZURE_REGION`, `GEMINI_API_KEYS`). Use
+`--translate` to translate and polish English SRT files with Gemini 3.5 Flash-Lite. Multiple
+Gemini keys are used round-robin once per subtitle batch.
 
 ```bash
 export VIET_DUB_FFMPEG=/usr/bin/ffmpeg
 export VIET_DUB_FFPROBE=/usr/bin/ffprobe
 ```
 
-Azure is the Rust MVP provider; Edge TTS and English-to-Vietnamese translation
-remain in the Python reference for now (`--provider edge` / `--translate` error
-with a clear message).
+Azure is the Rust provider; Edge TTS remains in the Python reference.
 
 Verify:
 
@@ -164,9 +165,14 @@ Add Azure Speech credentials to `.env` in the project folder:
 ```text
 AZURE_KEY=...
 AZURE_REGION=southeastasia
+GEMINI_API_KEYS=key_1,key_2
 ```
 
 The default Azure region is `southeastasia`.
+
+To create a Gemini key, open [Google AI Studio API Keys](https://aistudio.google.com/app/apikey),
+select **Create API key**, then add it to `GEMINI_API_KEYS`. Keep keys out of source control.
+The desktop app accepts the same list in **Thiết lập → Google AI Studio**.
 
 ## Folder Layout
 

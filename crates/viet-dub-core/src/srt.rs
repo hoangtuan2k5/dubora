@@ -18,6 +18,13 @@ pub fn parse_srt(path: &Path) -> Result<Vec<SrtSegment>> {
     parse_srt_content(&content)
 }
 
+pub fn write_srt(path: &Path, segments: &[SrtSegment]) -> Result<()> {
+    let content = segments.iter().enumerate().map(|(index, segment)| {
+        format!("{}\n{} --> {}\n{}\n", index + 1, segment.start, segment.end, segment.text)
+    }).collect::<Vec<_>>().join("\n");
+    fs::write(path, content).with_context(|| format!("Failed to write SRT {}", path.display()))
+}
+
 pub fn time_to_seconds(time: &str) -> Result<f64> {
     let parts: Vec<_> = time.split(':').collect();
     if parts.len() != 3 {

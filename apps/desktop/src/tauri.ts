@@ -9,6 +9,7 @@ export type AppConfig = {
   azureRegion: string;
   /** Azure TTS ShortName; default Florian Dragon HD. */
   azureVoice: string;
+  geminiKeys: string;
 };
 
 export type AzureVoice = {
@@ -56,9 +57,9 @@ export const api = {
   listVoices: (azureKey: string, azureRegion: string) =>
     invoke<AzureVoice[]>("list_voices", { request: { azureKey, azureRegion } }),
   defaultAzureVoice: () => invoke<string>("default_azure_voice"),
-  startDub: (targets: string[], force: boolean, forceTts: boolean) =>
+  startDub: (targets: string[], force: boolean, forceTts: boolean, translate: boolean) =>
     invoke<string>("start_dub", {
-      request: { targets, force, forceTts, translate: false },
+      request: { targets, force, forceTts, translate },
     }),
   cancelDub: () => invoke<void>("cancel_dub"),
   ffmpegStatus: () => invoke<FfmpegStatus>("get_ffmpeg_status"),

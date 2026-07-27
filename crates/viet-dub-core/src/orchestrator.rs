@@ -15,6 +15,7 @@ use crate::paths::{
 };
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
 use crate::tts_azure::generate_all_tts;
+use crate::translate_gemini::translate_srt;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,9 +45,6 @@ pub async fn create_dubs(
     options: DubOptions,
     progress: &dyn ProgressReporter,
 ) -> Result<Vec<PathBuf>> {
-    if options.translate {
-        bail!("English-to-Vietnamese translation is not available in the Rust MVP");
-    }
     if config.provider == Provider::Edge {
         bail!("Edge TTS is not available in the Rust MVP; use --provider azure");
     }
@@ -153,7 +151,6 @@ async fn create_dub_for_video(
         let input_srt = input_srt.clone();
         let clean_srt = clean_srt.clone();
         let normalized_srt = normalized_srt.clone();
-        let vi_srt = vi_srt.clone();
         let job_dir = job_dir.clone();
         let tts_dir = tts_dir.clone();
         let output = output.clone();
@@ -182,7 +179,6 @@ async fn create_dub_for_video(
                 )
             })?;
             let stats = clean_youtube_rolling_subtitles(&input_srt, &clean_srt)?;
-            fs::copy(&clean_srt, &vi_srt)?;
             fs::copy(&clean_srt, &normalized_srt)?;
             Ok::<_, anyhow::Error>(stats)
         })
@@ -197,6 +193,13 @@ async fn create_dub_for_video(
                 stats.raw, stats.linear, stats.final_segments
             ),
         ));
+    }
+
+    if options.translate {
+        let gemini = config.gemini.as_ref().context("Missing GEMINI_API_KEYS. Add Gemini API keys before translating")?;
+        translate_srt(&gemini.keys, &clean_srt, &vi_srt).await?;
+    } else {
+        fs::copy(&clean_srt, &vi_srt)?;
     }
 
     let azure = config

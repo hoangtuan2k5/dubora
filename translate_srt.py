@@ -1,7 +1,15 @@
 import sys
 import re
 import time
-from deep_translator import GoogleTranslator
+import json
+import os
+from pathlib import Path
+
+import requests
+
+
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 
 SOURCE_CORRECTIONS = (
     (r"\bcompare it vector\b", "Comparator"),
@@ -141,69 +149,102 @@ def parse_srt(path):
         })
     return segments
 
-def translate_srt(input_srt, output_srt, normalized_srt=None):
+def gemini_api_keys(values=None):
+    if not os.environ.get("GEMINI_API_KEYS"):
+        env_path = Path(__file__).resolve().parent / ".env"
+        if env_path.is_file():
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("GEMINI_API_KEYS="):
+                    os.environ["GEMINI_API_KEYS"] = line.split("=", 1)[1].strip().strip("\"'")
+                    break
+    values = values or [os.environ.get("GEMINI_API_KEYS", "")]
+    return [key.strip() for value in values for key in re.split(r"[,\n]", value) if key.strip()]
+
+
+def translate_batch(batch, source_language, api_key):
+    source = json.dumps(
+        [{"index": segment["index"], "text": protect_tech_terms(segment["text"])} for segment in batch],
+        ensure_ascii=False,
+    )
+    prompt = (
+        "Translate these subtitle segments from "
+        f"{source_language} to Vietnamese. Return one concise, natural Vietnamese text for every "
+        "input index. Preserve technical placeholders beginning ZXQTERM and never add commentary. "
+        "The timestamps are managed by the caller; remove repeated caption wording and make sentence "
+        f"breaks read naturally. Input JSON: {source}"
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "segments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"index": {"type": "integer"}, "text": {"type": "string"}},
+                    "required": ["index", "text"],
+                },
+            }
+        },
+        "required": ["segments"],
+    }
+    response = requests.post(
+        GEMINI_ENDPOINT,
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        json={
+            "model": GEMINI_MODEL,
+            "input": prompt,
+            "store": False,
+            "response_format": {"type": "text", "mime_type": "application/json", "schema": schema},
+        },
+        timeout=90,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    texts = [
+        content["text"]
+        for step in payload.get("steps", [])
+        if step.get("type") == "model_output"
+        for content in step.get("content", [])
+        if content.get("type") == "text"
+    ]
+    if not texts:
+        raise RuntimeError("Gemini returned no text output")
+    translated = json.loads("".join(texts))["segments"]
+    by_index = {item.get("index"): item.get("text", "").strip() for item in translated}
+    expected = [segment["index"] for segment in batch]
+    if set(by_index) != set(expected) or any(not by_index[index] for index in expected):
+        raise RuntimeError("Gemini returned incomplete subtitle segments")
+    return [restore_tech_terms(by_index[segment["index"]]) for segment in batch]
+
+
+def translate_srt(input_srt, output_srt, normalized_srt=None, source_language="en", api_keys=None):
     print("Parsing final clean SRT...")
     segs = parse_srt(input_srt)
     print(f"Loaded {len(segs)} segments for translation.")
 
-    for segment in segs:
-        segment['text'] = normalize_tech_terms(segment['text'])
+    if source_language.lower().startswith("en"):
+        for segment in segs:
+            segment['text'] = normalize_tech_terms(segment['text'])
     if normalized_srt:
         write_srt(normalized_srt, segs, "text")
         print(f"Saved normalized source to {normalized_srt}")
     
-    translator = GoogleTranslator(source='en', target='vi')
-    
-    # We translate in batches or one-by-one. Since we have 176 segments, we can translate them in batches
-    # of 20 to speed it up and avoid rate limiting.
+    keys = gemini_api_keys(api_keys)
+    if not keys:
+        raise RuntimeError("Missing GEMINI_API_KEYS. Add one or more Gemini API keys to .env.")
+
     translated_segs = []
-    
     batch_size = 20
     for i in range(0, len(segs), batch_size):
         batch = segs[i:i+batch_size]
-        texts = [protect_tech_terms(s['text']) for s in batch]
-        
         try:
-            # We can join with a unique separator like " ||| " so we can translate them in one call
-            combined_text = " ||| ".join(texts)
-            translated_combined = translator.translate(combined_text)
-            
-            # Split back
-            translated_texts = [t.strip() for t in translated_combined.split("|||")]
-            
-            # Check length matching
-            if len(translated_texts) != len(texts):
-                print(f"Warning: batch size mismatch (expected {len(texts)}, got {len(translated_texts)}). Translating individually...")
-                # Fallback to individual
-                translated_texts = []
-                for s in batch:
-                    translated_texts.append(
-                        translator.translate(protect_tech_terms(s['text']))
-                    )
-                    time.sleep(0.2)
-            
+            translated_texts = translate_batch(batch, source_language, keys[(i // batch_size) % len(keys)])
             for idx, s in enumerate(batch):
-                translated_text = restore_tech_terms(translated_texts[idx])
-                
-                s['translated_text'] = translated_text
+                s['translated_text'] = translated_texts[idx]
                 translated_segs.append(s)
-                
             print(f"Translated batch {i // batch_size + 1}/{((len(segs) - 1) // batch_size) + 1}")
-            time.sleep(0.5)
-            
         except Exception as e:
-            print(f"Error in batch: {e}. Translating individually...")
-            for s in batch:
-                try:
-                    protected_text = protect_tech_terms(s['text'])
-                    s['translated_text'] = restore_tech_terms(
-                        translator.translate(protected_text)
-                    )
-                except Exception as e2:
-                    print(f"Individual error for '{s['text']}': {e2}")
-                    s['translated_text'] = s['text'] # fallback to English
-                translated_segs.append(s)
-                time.sleep(0.2)
+            raise RuntimeError(f"Gemini translation failed for batch {i // batch_size + 1}: {e}") from e
                 
     # Save the output
     write_srt(output_srt, translated_segs, "translated_text")
@@ -211,7 +252,8 @@ def translate_srt(input_srt, output_srt, normalized_srt=None):
     print(f"Saved {output_srt}")
 
 if __name__ == "__main__":
-    if len(sys.argv) not in {3, 4}:
-        raise SystemExit("Usage: python3 translate_srt.py INPUT.srt OUTPUT_VI.srt [NORMALIZED_SOURCE.srt]")
-    normalized = sys.argv[3] if len(sys.argv) == 4 else None
-    translate_srt(sys.argv[1], sys.argv[2], normalized)
+    if len(sys.argv) not in {3, 4, 5}:
+        raise SystemExit("Usage: python3 translate_srt.py INPUT.srt OUTPUT_VI.srt [NORMALIZED_SOURCE.srt] [SOURCE_LANGUAGE]")
+    normalized = sys.argv[3] if len(sys.argv) >= 4 else None
+    source_language = sys.argv[4] if len(sys.argv) == 5 else "en"
+    translate_srt(sys.argv[1], sys.argv[2], normalized, source_language)

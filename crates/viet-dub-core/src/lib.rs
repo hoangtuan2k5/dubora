@@ -10,9 +10,10 @@ pub mod progress;
 pub mod srt;
 pub mod tts_azure;
 pub mod tts_cache;
+pub mod translate_gemini;
 
 pub use azure_voices::{AzureVoice, list_azure_voices};
-pub use config::{AzureConfig, DubConfig, DubOptions, Provider, AZURE_VOICE};
+pub use config::{AzureConfig, DubConfig, DubOptions, GeminiConfig, Provider, AZURE_VOICE};
 pub use orchestrator::{VideoInfo, create_dubs, scan_videos};
 pub use paths::{PROJECT_LAYOUT_DIRS, ensure_project_layout};
 pub use progress::{ProgressEvent, ProgressReporter, Stage};

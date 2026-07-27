@@ -4,8 +4,9 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use viet_dub_core::ffmpeg::FfmpegPaths;
 use viet_dub_core::{
-    AzureConfig, DubConfig, DubOptions, ProgressEvent, ProgressReporter, Provider, create_dubs,
+    AzureConfig, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider, create_dubs,
 };
+use viet_dub_core::translate_gemini::load_env_keys;
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum ProviderArg {
@@ -49,9 +50,13 @@ struct Args {
     #[arg(long)]
     force_tts: bool,
 
-    /// Translate English SRT to Vietnamese (not available in the Rust MVP).
+    /// Translate and polish English SRT to Vietnamese with Gemini.
     #[arg(long)]
     translate: bool,
+
+    /// Gemini API key; repeat this option to round-robin multiple keys.
+    #[arg(long)]
+    gemini_key: Vec<String>,
 
     /// Azure TTS voice ShortName (default: de-DE-Florian:DragonHDLatestNeural).
     #[arg(long)]
@@ -80,9 +85,8 @@ async fn main() -> Result<()> {
     if matches!(provider, Provider::Edge) {
         anyhow::bail!("Edge TTS is not available in the Rust MVP; use --provider azure");
     }
-    if args.translate {
-        anyhow::bail!("English-to-Vietnamese translation is not available in the Rust MVP");
-    }
+    let mut gemini_keys = load_env_keys(&root);
+    gemini_keys.extend(args.gemini_key);
 
     let mut azure = load_azure_config(&root)?
         .ok_or_else(|| anyhow::anyhow!("Missing AZURE_KEY. Add it to <root>/.env or export it"))?;
@@ -93,6 +97,7 @@ async fn main() -> Result<()> {
         root,
         provider,
         azure: Some(azure),
+        gemini: args.translate.then(|| GeminiConfig::new(gemini_keys)).transpose()?,
         ffmpeg: FfmpegPaths::resolve(None),
     };
     let options = DubOptions {

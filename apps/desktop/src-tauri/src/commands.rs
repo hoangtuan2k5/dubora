@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use viet_dub_core::ffmpeg::FfmpegPaths;
 use viet_dub_core::{
-    AzureConfig, AzureVoice, DubConfig, DubOptions, ProgressEvent, ProgressReporter, Provider,
+    AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
     Stage, VideoInfo, AZURE_VOICE, create_dubs, list_azure_voices,
 };
 
@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub azure_region: String,
     /// Azure TTS ShortName; empty or missing falls back to Florian Dragon HD.
     pub azure_voice: String,
+    pub gemini_keys: String,
 }
 
 impl Default for AppConfig {
@@ -31,6 +32,7 @@ impl Default for AppConfig {
             azure_key: String::new(),
             azure_region: viet_dub_core::config::DEFAULT_AZURE_REGION.to_owned(),
             azure_voice: AZURE_VOICE.to_owned(),
+            gemini_keys: String::new(),
         }
     }
 }
@@ -130,6 +132,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
         root,
         provider: Provider::Azure,
         azure: Some(azure),
+        gemini: request.translate.then(|| GeminiConfig::new(viet_dub_core::translate_gemini::parse_keys(&saved.gemini_keys))).transpose().map_err(|error| format!("{error:#}"))?,
         ffmpeg: FfmpegPaths::resolve(resource_dir.as_deref()),
     };
 
@@ -398,6 +401,7 @@ mod tests {
             azure_key: "secret".to_owned(),
             azure_region: "southeastasia".to_owned(),
             azure_voice: AZURE_VOICE.to_owned(),
+            gemini_keys: "key1,key2".to_owned(),
         };
         write_config(&path, &config).unwrap();
         assert_eq!(read_config(&path).unwrap(), config);
