@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "viet-dub",
+  "productName": "Dubora",
   "version": "0.1.0",
   "identifier": "dev.hoangtuan.viet-dub",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "viet-dub",
+        "title": "Dubora",
         "width": 1180,
         "height": 760,
         "minWidth": 900,
@@ -38,8 +38,8 @@
     "license": "MIT",
     "licenseFile": "installer/license.txt",
     "category": "Video",
-    "shortDescription": "Lồng tiếng Việt cho video — Hoàng Tuấn (tuan@hoangtuan.dev)",
-    "longDescription": "viet-dub — workstation lồng tiếng Việt từ video + SRT (Azure Speech, FFmpeg rubberband).\n\nAuthor: Hoàng Chiều Nguyễn Tuấn\nEmail: tuan@hoangtuan.dev\nGitHub: https://github.com/hoangtuan2k5/viet-dub\nWebsite: https://hoangtuan.dev\nLicense: MIT",
+    "shortDescription": "Dubora — Every story, in every voice.",
+    "longDescription": "Dubora — video dubbing workstation from video + SRT (Azure Speech, FFmpeg rubberband).\n\nAuthor: Hoàng Chiều Nguyễn Tuấn\nEmail: tuan@hoangtuan.dev\nGitHub: https://github.com/hoangtuan2k5/viet-dub\nWebsite: https://hoangtuan.dev\nLicense: MIT",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

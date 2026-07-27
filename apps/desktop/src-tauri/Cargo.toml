@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Windows desktop UI for viet-dub — Vietnamese video dubbing"
+description = "Dubora desktop app — video dubbing"
 
 [lib]
 name = "viet_dub_app"

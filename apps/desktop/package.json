@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Windows desktop UI for viet-dub — Vietnamese video dubbing",
+  "description": "Dubora desktop app — video dubbing",
   "author": {
     "name": "Hoàng Chiều Nguyễn Tuấn",
     "email": "tuan@hoangtuan.dev",

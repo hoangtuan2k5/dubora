@@ -146,8 +146,9 @@ input:focus-visible,
 .brand span {
   margin-top: 3px;
   color: var(--quiet);
-  font-size: 11px;
-  letter-spacing: 0.17em;
+  font-size: 9px;
+  line-height: 1.35;
+  letter-spacing: 0.05em;
 }
 
 .nav {

@@ -374,7 +374,7 @@ function ProjectStructureDiagram() {
       <div className="structure-flow">
         <div className="flow-chip in">INPUT</div>
         <IconArrowRight size={16} className="flow-arrow" />
-        <div className="flow-chip mid">viet-dub</div>
+        <div className="flow-chip mid">Dubora</div>
         <IconArrowRight size={16} className="flow-arrow" />
         <div className="flow-chip out">OUTPUT</div>
       </div>
@@ -812,9 +812,9 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand" aria-label="viet-dub">
+        <div className="brand" aria-label="Dubora">
           <div className="brand-mark"><IconWaveSine size={25} stroke={1.7} /></div>
-          <div><strong>VIET//DUB</strong><span>Lồng tiếng Việt</span></div>
+          <div><strong>DUBORA</strong><span>Every story, in every voice.</span></div>
         </div>
 
         <nav className="nav" aria-label="Điều hướng chính">
@@ -1095,7 +1095,7 @@ function App() {
               </article>
 
               <p className="guide-footer">
-                viet-dub v0.1.0 · © 2026 Hoàng Chiều Nguyễn Tuấn · tuan@hoangtuan.dev ·{" "}
+                Dubora v0.1.0 · © 2026 Hoàng Chiều Nguyễn Tuấn · tuan@hoangtuan.dev ·{" "}
                 github.com/hoangtuan2k5
               </p>
             </div>
