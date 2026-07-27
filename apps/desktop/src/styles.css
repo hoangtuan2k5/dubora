@@ -146,9 +146,10 @@ input:focus-visible,
 .brand span {
   margin-top: 3px;
   color: var(--quiet);
-  font-size: 9px;
-  line-height: 1.35;
-  letter-spacing: 0.05em;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0.025em;
 }
 
 .nav {
@@ -989,6 +990,45 @@ h1 {
   background:
     linear-gradient(110deg, rgba(255, 255, 255, 0.02), transparent 38%),
     var(--panel-raised);
+}
+
+.youtube-import {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: min(610px, 100%);
+  flex: 1 1 420px;
+  min-height: 40px;
+  padding: 3px 3px 3px 12px;
+  border: 1px solid rgba(240, 170, 51, 0.42);
+  border-radius: 8px;
+  background: rgba(240, 170, 51, 0.06);
+  color: var(--amber);
+}
+
+.youtube-import input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.youtube-import input::placeholder {
+  color: var(--quiet);
+}
+
+.youtube-import:focus-within {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 3px var(--amber-soft);
+}
+
+.youtube-button {
+  flex: none;
+  white-space: nowrap;
 }
 
 .control-bar .search {
@@ -2241,6 +2281,11 @@ button.guide-link:hover {
   }
 
   .control-bar .search {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  .youtube-import {
     width: 100%;
     flex: 1 1 100%;
   }

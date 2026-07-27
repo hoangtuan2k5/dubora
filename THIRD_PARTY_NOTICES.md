@@ -15,3 +15,11 @@ The build is distributed under GNU GPL version 3. Its `LICENSE` and vendor
 `README.txt` are included beside the executables in the application resources.
 When publishing an installer, publish or otherwise provide the corresponding
 source alongside it as required by the GPL.
+
+## yt-dlp
+
+The Windows installer bundles the current x64 `yt-dlp.exe` downloaded from the
+[official yt-dlp release](https://github.com/yt-dlp/yt-dlp/releases). The build
+script verifies it against the release's `SHA2-256SUMS` file. The standalone
+executable includes GPLv3+ components; its corresponding source and notices
+are available from the yt-dlp project.

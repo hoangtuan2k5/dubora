@@ -50,10 +50,17 @@ export type SaveConfigResult = {
   createdDirs: string[];
 };
 
+export type YoutubeImportResult = {
+  relativePath: string;
+  subtitleLanguage: string;
+};
+
 export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (config: AppConfig) => invoke<SaveConfigResult>("save_config", { config }),
   scanVideos: (root: string) => invoke<VideoInfo[]>("scan_videos", { root }),
+  importYoutube: (url: string) =>
+    invoke<YoutubeImportResult>("import_youtube", { request: { url } }),
   listVoices: (azureKey: string, azureRegion: string) =>
     invoke<AzureVoice[]>("list_voices", { request: { azureKey, azureRegion } }),
   defaultAzureVoice: () => invoke<string>("default_azure_voice"),

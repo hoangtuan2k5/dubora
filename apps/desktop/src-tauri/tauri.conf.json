@@ -48,6 +48,7 @@
     ],
     "resources": {
       "resources/ffmpeg/*": "ffmpeg/",
+      "resources/yt-dlp/*": "yt-dlp/",
       "../../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
       "../../../LICENSE": "LICENSE"
     },

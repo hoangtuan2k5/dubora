@@ -9,6 +9,7 @@ import {
   IconEye,
   IconEyeOff,
   IconBook,
+  IconBrandYoutube,
   IconExternalLink,
   IconFileText,
   IconFilter,
@@ -402,6 +403,8 @@ function App() {
   const [force, setForce] = useState(false);
   const [forceTts, setForceTts] = useState(false);
   const [translate, setTranslate] = useState(false);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [importingYoutube, setImportingYoutube] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null);
   const [progress, setProgress] = useState<DubProgress | null>(null);
@@ -766,6 +769,27 @@ function App() {
     void api.openPath(path).catch((error) => setNotice(`Không thể mở đường dẫn: ${describeError(error)}`));
   };
 
+  const importYoutube = async () => {
+    if (!youtubeUrl.trim() || importingYoutube) return;
+    if (!config.projectRoot) {
+      setNotice("Chọn và lưu thư mục dự án trước khi tải từ YouTube.");
+      return;
+    }
+    setImportingYoutube(true);
+    setNotice("");
+    try {
+      const result = await api.importYoutube(youtubeUrl.trim());
+      setYoutubeUrl("");
+      await scan(config.projectRoot);
+      setSelected(new Set([result.relativePath]));
+      setNotice(`Đã tải ${result.relativePath} + SRT ${result.subtitleLanguage}. Có thể chọn Dub ngay.`);
+    } catch (error) {
+      setNotice(`Không thể tải từ YouTube: ${describeError(error)}`);
+    } finally {
+      setImportingYoutube(false);
+    }
+  };
+
   const run = async (targets: string[]) => {
     if (!targets.length || busy) return;
     setBusy(true);
@@ -919,6 +943,15 @@ function App() {
                   </li>
                   <li>
                     <div>
+                      <strong>Thêm Gemini key nếu cần dịch</strong>
+                      <span>
+                        Với SRT tiếng Anh, tạo key ở Google AI Studio, dán vào mục Gemini API keys
+                        trong Thiết lập, rồi bật <strong>Dịch bằng Gemini</strong> khi chạy dub.
+                      </span>
+                    </div>
+                  </li>
+                  <li>
+                    <div>
                       <strong>Quét thư viện và Dub</strong>
                       <span>
                         Vào Thư viện → chọn video đã có SRT → bật tùy chọn nếu cần → bấm{" "}
@@ -957,6 +990,26 @@ function App() {
                 <div className="panel-title">
                   <span className="number">03</span>
                   <div>
+                    <h2>Tải từ YouTube</h2>
+                    <p className="lead">Tự tải video và một SRT khớp tên vào thư viện.</p>
+                  </div>
+                </div>
+                <ol>
+                  <li>Chọn và lưu Project root trong Thiết lập trước.</li>
+                  <li>Vào <strong>Thư viện</strong>, dán link <code>youtube.com</code> hoặc <code>youtu.be</code> vào ô vàng ở đầu màn hình.</li>
+                  <li>Bấm <strong>Tải từ YouTube</strong>. Video được lưu vào <code>assets/video</code>; SRT được lưu vào <code>assets/srt</code> với cùng tên để sẵn sàng Dub.</li>
+                </ol>
+                <div className="guide-tip">
+                  <strong>Ưu tiên phụ đề:</strong> English → ngôn ngữ châu Âu → Chinese → Portuguese
+                  → Japanese → Korean → Indonesian → Hindi → Arabic → ngôn ngữ khác. App chỉ tải
+                  một ngôn ngữ đầu tiên có sẵn.
+                </div>
+              </article>
+
+              <article className="panel guide-card">
+                <div className="panel-title">
+                  <span className="number">04</span>
+                  <div>
                     <h2>Lấy Azure Speech key</h2>
                     <p className="lead">Key dùng để sinh giọng nói từng câu phụ đề.</p>
                   </div>
@@ -991,7 +1044,42 @@ function App() {
 
               <article className="panel guide-card">
                 <div className="panel-title">
-                  <span className="number">04</span>
+                  <span className="number">05</span>
+                  <div>
+                    <h2>Lấy Gemini API key</h2>
+                    <p className="lead">Chỉ cần khi muốn dịch và tối ưu SRT tiếng Anh.</p>
+                  </div>
+                </div>
+                <ol>
+                  <li>
+                    Mở{" "}
+                    <ExternalLink href="https://aistudio.google.com/app/apikey">
+                      Google AI Studio <IconExternalLink size={14} />
+                    </ExternalLink>
+                    {" "}và đăng nhập tài khoản Google.
+                  </li>
+                  <li>
+                    Chọn <strong>Create API key</strong>, sau đó copy key vừa tạo.
+                  </li>
+                  <li>
+                    Trong Dubora, vào <strong>Thiết lập</strong> → <strong>Google AI Studio</strong>
+                    → dán key vào <strong>Gemini API keys</strong> → <strong>Lưu thiết lập</strong>.
+                  </li>
+                  <li>
+                    Có thể dán nhiều key, mỗi key một dòng hoặc phân cách bằng dấu phẩy. Dubora
+                    xoay vòng key theo từng batch dịch.
+                  </li>
+                </ol>
+                <div className="guide-tip">
+                  <strong>Khi dùng:</strong> quay lại Thư viện, bật <strong>Dịch bằng Gemini</strong>
+                  {" "}trước khi bấm Dub. App dùng <code>gemini-3.5-flash-lite</code> để dịch và
+                  chỉnh câu SRT.
+                </div>
+              </article>
+
+              <article className="panel guide-card">
+                <div className="panel-title">
+                  <span className="number">06</span>
                   <div>
                     <h2>Dùng màn Thư viện</h2>
                     <p className="lead">Theo dõi video, SRT và output; chạy job dub.</p>
@@ -1029,7 +1117,7 @@ function App() {
 
               <article className="panel guide-card">
                 <div className="panel-title">
-                  <span className="number">05</span>
+                  <span className="number">07</span>
                   <div>
                     <h2>Tác giả</h2>
                     <p className="lead">Thông tin liên hệ và mã nguồn.</p>
@@ -1059,7 +1147,7 @@ function App() {
 
               <article className="panel guide-card">
                 <div className="panel-title">
-                  <span className="number">06</span>
+                  <span className="number">08</span>
                   <div>
                     <h2>Yêu cầu hệ thống &amp; lưu ý</h2>
                     <p className="lead">Những điều cần biết trước khi chạy batch lớn.</p>
@@ -1071,8 +1159,8 @@ function App() {
                     thị READY khi engine ổn.
                   </li>
                   <li>
-                    <strong>Phụ đề mặc định là tiếng Việt.</strong> Dịch EN→VI chưa có trên desktop
-                    (Coming soon). Hãy dùng SRT đã dịch sẵn.
+                    <strong>Phụ đề mặc định là tiếng Việt.</strong> Với SRT tiếng Anh, thêm Gemini
+                    API key trong Thiết lập rồi bật <strong>Dịch bằng Gemini</strong> khi chạy.
                   </li>
                   <li>
                     <strong>Cache TTS:</strong> segment đã sinh sẽ được tái dùng nếu text/giọng
@@ -1437,6 +1525,31 @@ function App() {
           <section className="library-page page-enter" aria-label="Thư viện">
             <div className="library-layout">
               <div className="panel control-bar">
+                <div className="youtube-import">
+                  <IconBrandYoutube size={19} />
+                  <label className="sr-only" htmlFor="youtube-url">Link YouTube</label>
+                  <input
+                    id="youtube-url"
+                    type="url"
+                    value={youtubeUrl}
+                    onChange={(event) => setYoutubeUrl(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void importYoutube();
+                    }}
+                    placeholder="Dán link YouTube để tải video và SRT…"
+                    autoComplete="off"
+                    disabled={importingYoutube}
+                  />
+                  <button
+                    type="button"
+                    className="secondary-button youtube-button"
+                    onClick={() => void importYoutube()}
+                    disabled={!youtubeUrl.trim() || importingYoutube}
+                  >
+                    {importingYoutube ? <IconLoader2 className="spin" size={18} /> : <IconBrandYoutube size={18} />}
+                    {importingYoutube ? "Đang tải…" : "Tải từ YouTube"}
+                  </button>
+                </div>
                 <div className="search">
                   <IconSearch size={18} />
                   <label className="sr-only" htmlFor="video-search">Tìm video</label>

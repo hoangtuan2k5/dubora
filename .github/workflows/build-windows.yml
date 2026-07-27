@@ -13,6 +13,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/prepare-ffmpeg-windows.ps1"
+      - "scripts/prepare-ytdlp-windows.ps1"
       - ".github/workflows/build-windows.yml"
 
 permissions:
@@ -52,6 +53,10 @@ jobs:
       - name: Stage bundled FFmpeg (rubberband)
         shell: pwsh
         run: .\scripts\prepare-ffmpeg-windows.ps1
+
+      - name: Stage bundled yt-dlp
+        shell: pwsh
+        run: .\scripts\prepare-ytdlp-windows.ps1
 
       - name: Build Tauri app (NSIS)
         working-directory: apps/desktop

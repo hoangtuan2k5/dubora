@@ -32,6 +32,7 @@ Prerequisites:
 - Rust 1.85+
 - FFmpeg and FFprobe available in `PATH`
 - FFmpeg must include the `rubberband` audio filter
+- `yt-dlp` available in `PATH` to import a YouTube video and its subtitle
 
 Build the release binary:
 
@@ -72,6 +73,12 @@ ffmpeg -filters | grep rubberband
 ```
 
 ## Windows Desktop
+
+The desktop app includes a **Tải từ YouTube** field at the top of **Thư viện**.
+Paste a `youtube.com` or `youtu.be` URL after choosing a project root. It saves the
+video under `assets/video/` and one matching SRT under `assets/srt/`. Subtitle language
+fallback is English, European languages, Chinese, Portuguese, Japanese, Korean,
+Indonesian, Hindi, Arabic, then any other available language.
 
 ### Build via GitHub Actions (recommended)
 

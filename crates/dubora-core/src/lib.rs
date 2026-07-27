@@ -10,6 +10,7 @@ pub mod progress;
 pub mod srt;
 pub mod tts_azure;
 pub mod tts_cache;
+pub mod youtube;
 pub mod translate_gemini;
 
 pub use azure_voices::{AzureVoice, list_azure_voices};

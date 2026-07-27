@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use dubora_core::ffmpeg::FfmpegPaths;
+use dubora_core::youtube::select_subtitle_language;
 use dubora_core::{
     AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
     Stage, VideoInfo, AZURE_VOICE, create_dubs, list_azure_voices,
@@ -62,6 +64,27 @@ pub struct FfmpegStatus {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YoutubeImportRequest {
+    pub url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YoutubeImportResult {
+    pub relative_path: String,
+    pub subtitle_language: String,
+}
+
+#[derive(Deserialize)]
+struct YoutubeMetadata {
+    #[serde(default)]
+    subtitles: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    automatic_captions: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 #[tauri::command]
 pub fn get_config(app: AppHandle) -> Result<AppConfig, String> {
     read_config(&config_path(&app)?)
@@ -93,6 +116,126 @@ pub async fn scan_videos(root: String) -> Result<Vec<VideoInfo>, String> {
     let path = Path::new(root.trim());
     dubora_core::ensure_project_layout(path).map_err(|error| format!("{error:#}"))?;
     dubora_core::scan_videos(path).map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+pub async fn import_youtube(app: AppHandle, request: YoutubeImportRequest) -> Result<YoutubeImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || import_youtube_blocking(&app, request))
+        .await
+        .map_err(|error| format!("Không khởi chạy được yt-dlp: {error}"))?
+}
+
+fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Result<YoutubeImportResult, String> {
+    let url = request.url.trim();
+    if !is_youtube_url(url) {
+        return Err("Chỉ hỗ trợ link youtube.com hoặc youtu.be hợp lệ".to_owned());
+    }
+
+    let saved = read_config(&config_path(app)?)?;
+    let root = PathBuf::from(saved.project_root.trim());
+    if saved.project_root.trim().is_empty() {
+        return Err("Chọn và lưu thư mục dự án trước khi tải từ YouTube".to_owned());
+    }
+    dubora_core::ensure_project_layout(&root).map_err(|error| format!("{error:#}"))?;
+
+    let yt_dlp = yt_dlp_path(app);
+    let metadata = run_yt_dlp(&yt_dlp, ["--dump-single-json", "--skip-download", "--no-playlist", "--no-warnings"], url)?;
+    let metadata: YoutubeMetadata = serde_json::from_slice(&metadata.stdout)
+        .map_err(|error| format!("yt-dlp không trả metadata hợp lệ: {error}"))?;
+    let language = select_subtitle_language(
+        metadata
+            .subtitles
+            .keys()
+            .chain(metadata.automatic_captions.keys())
+            .filter(|language| language.as_str() != "live_chat")
+            .cloned(),
+    )
+    .ok_or("Video này không có phụ đề để tải")?;
+
+    let video_dir = root.join("assets").join("video");
+    let srt_dir = root.join("assets").join("srt");
+    let output_template = video_dir.join("%(title)s [%(id)s].%(ext)s");
+    let ffmpeg = FfmpegPaths::resolve(app.path().resource_dir().ok().as_deref());
+    let ffmpeg_dir = ffmpeg.ffmpeg.parent().unwrap_or(Path::new("."));
+    let output = Command::new(&yt_dlp)
+        .args(["--no-playlist", "--no-warnings", "--format", "bv*+ba/b", "--merge-output-format", "mp4"])
+        .args(["--write-subs", "--write-auto-subs", "--sub-langs", &language, "--sub-format", "srt", "--convert-subs", "srt"])
+        .arg("--paths")
+        .arg(format!("subtitle:{}", srt_dir.display()))
+        .arg("--output")
+        .arg(output_template)
+        .arg("--ffmpeg-location")
+        .arg(ffmpeg_dir)
+        .args(["--print", "after_move:filepath", "--"])
+        .arg(url)
+        .output()
+        .map_err(|error| format!("Không chạy được {}: {error}", yt_dlp.display()))?;
+    if !output.status.success() {
+        return Err(yt_dlp_error(&output));
+    }
+
+    let video = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .ok_or("yt-dlp tải xong nhưng không tìm thấy file video")?;
+    let video_stem = video.file_stem().and_then(|stem| stem.to_str()).ok_or("Tên video không hợp lệ")?;
+    let subtitle = fs::read_dir(&srt_dir)
+        .map_err(|error| format!("Không đọc được thư mục SRT: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("srt")
+                && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+                    name.starts_with(&format!("{video_stem}.{language}"))
+                })
+        })
+        .ok_or("yt-dlp không tải được SRT đã chọn")?;
+    let companion = srt_dir.join(format!("{video_stem}.srt"));
+    if companion.exists() {
+        fs::remove_file(&companion).map_err(|error| format!("Không thể thay SRT cũ: {error}"))?;
+    }
+    fs::rename(&subtitle, &companion).map_err(|error| format!("Không thể đổi tên SRT: {error}"))?;
+
+    let relative_path = video
+        .strip_prefix(&video_dir)
+        .unwrap_or(&video)
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(YoutubeImportResult { relative_path, subtitle_language: language })
+}
+
+fn is_youtube_url(url: &str) -> bool {
+    ["https://youtube.com/", "https://www.youtube.com/", "https://m.youtube.com/", "https://youtu.be/"]
+        .iter()
+        .any(|prefix| url.starts_with(prefix))
+}
+
+fn yt_dlp_path(app: &AppHandle) -> PathBuf {
+    let binary = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|directory| directory.join("yt-dlp").join(binary))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(binary))
+}
+
+fn run_yt_dlp<const N: usize>(yt_dlp: &Path, args: [&str; N], url: &str) -> Result<std::process::Output, String> {
+    let output = Command::new(yt_dlp)
+        .args(args)
+        .args(["--", url])
+        .output()
+        .map_err(|error| format!("Không chạy được {}: {error}", yt_dlp.display()))?;
+    if output.status.success() { Ok(output) } else { Err(yt_dlp_error(&output)) }
+}
+
+fn yt_dlp_error(output: &std::process::Output) -> String {
+    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if message.is_empty() { "yt-dlp không thể tải video này".to_owned() } else { message }
 }
 
 #[derive(Debug, Deserialize)]

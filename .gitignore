@@ -14,5 +14,7 @@ apps/desktop/dist/
 apps/desktop/src-tauri/gen/
 apps/desktop/src-tauri/resources/ffmpeg/*
 !apps/desktop/src-tauri/resources/ffmpeg/README.md
+apps/desktop/src-tauri/resources/yt-dlp/*
+!apps/desktop/src-tauri/resources/yt-dlp/README.md
 *.vi-dub.mp4
 .DS_Store
