@@ -99,7 +99,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!("viet-dub-video-{unique}"));
+        let directory = std::env::temp_dir().join(format!("dubora-video-{unique}"));
         fs::create_dir_all(&directory)?;
         let output = directory.join("lesson.vi-dub.mp4");
         let temporary = directory.join("lesson.vi-dub.tmp.mp4");

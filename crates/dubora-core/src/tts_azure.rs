@@ -199,7 +199,7 @@ async fn synthesize_once(
             "X-Microsoft-OutputFormat",
             "audio-48khz-192kbitrate-mono-mp3",
         )
-        .header("User-Agent", "viet-dub")
+        .header("User-Agent", "dubora")
         .body(build_ssml(&config.voice, text))
         .timeout(Duration::from_secs(70))
         .send()

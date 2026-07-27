@@ -19,11 +19,11 @@ impl FfmpegPaths {
             .map(|dir| dir.join("ffmpeg").join(ffprobe_name()))
             .filter(|path| path.is_file());
         Self {
-            ffmpeg: std::env::var_os("VIET_DUB_FFMPEG")
+            ffmpeg: std::env::var_os("DUBORA_FFMPEG")
                 .map(PathBuf::from)
                 .or(bundled_ffmpeg)
                 .unwrap_or_else(|| PathBuf::from(ffmpeg_name())),
-            ffprobe: std::env::var_os("VIET_DUB_FFPROBE")
+            ffprobe: std::env::var_os("DUBORA_FFPROBE")
                 .map(PathBuf::from)
                 .or(bundled_ffprobe)
                 .unwrap_or_else(|| PathBuf::from(ffprobe_name())),

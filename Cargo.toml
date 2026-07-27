@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "apps/desktop/src-tauri",
-    "crates/viet-dub-core",
-    "crates/viet-dub-cli",
+    "crates/dubora-core",
+    "crates/dubora-cli",
 ]
 resolver = "2"
 
@@ -11,9 +11,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev>"]
-repository = "https://github.com/hoangtuan2k5/viet-dub"
-homepage = "https://github.com/hoangtuan2k5/viet-dub"
-documentation = "https://github.com/hoangtuan2k5/viet-dub"
+repository = "https://github.com/hoangtuan2k5/dubora"
+homepage = "https://github.com/hoangtuan2k5/dubora"
+documentation = "https://github.com/hoangtuan2k5/dubora"
 
 [workspace.dependencies]
 anyhow = "1"

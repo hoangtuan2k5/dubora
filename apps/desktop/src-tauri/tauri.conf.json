@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Dubora",
   "version": "0.1.0",
-  "identifier": "dev.hoangtuan.viet-dub",
+  "identifier": "dev.hoangtuan.dubora",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -34,12 +34,12 @@
     "targets": ["nsis"],
     "publisher": "Hoàng Tuấn",
     "copyright": "Copyright © 2026 Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev> — https://hoangtuan.dev",
-    "homepage": "https://github.com/hoangtuan2k5/viet-dub",
+    "homepage": "https://github.com/hoangtuan2k5/dubora",
     "license": "MIT",
     "licenseFile": "installer/license.txt",
     "category": "Video",
     "shortDescription": "Dubora — Every story, in every voice.",
-    "longDescription": "Dubora — video dubbing workstation from video + SRT (Azure Speech, FFmpeg rubberband).\n\nAuthor: Hoàng Chiều Nguyễn Tuấn\nEmail: tuan@hoangtuan.dev\nGitHub: https://github.com/hoangtuan2k5/viet-dub\nWebsite: https://hoangtuan.dev\nLicense: MIT",
+    "longDescription": "Dubora — video dubbing workstation from video + SRT (Azure Speech, FFmpeg rubberband).\n\nAuthor: Hoàng Chiều Nguyễn Tuấn\nEmail: tuan@hoangtuan.dev\nGitHub: https://github.com/hoangtuan2k5/dubora\nWebsite: https://hoangtuan.dev\nLicense: MIT",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

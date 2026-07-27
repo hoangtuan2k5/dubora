@@ -945,6 +945,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 
 [[package]]
+name = "dubora-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dubora-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tokio",
+]
+
+[[package]]
+name = "dubora-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dubora-core",
+ "tokio",
+]
+
+[[package]]
+name = "dubora-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4461,44 +4499,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "viet-dub-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tokio",
- "viet-dub-core",
-]
-
-[[package]]
-name = "viet-dub-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "tokio",
- "viet-dub-core",
-]
-
-[[package]]
-name = "viet-dub-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
 
 [[package]]
 name = "vswhom"

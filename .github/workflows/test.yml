@@ -36,7 +36,7 @@ jobs:
           workspaces: ". -> target"
 
       - name: Test Rust core and CLI
-        run: cargo test -p viet-dub-core -p viet-dub-cli
+        run: cargo test -p dubora-core -p dubora-cli
 
       - uses: actions/setup-node@v4
         with:

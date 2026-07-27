@@ -1,5 +1,5 @@
 [package]
-name = "viet-dub-app"
+name = "dubora-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,11 +9,11 @@ homepage.workspace = true
 description = "Dubora desktop app — video dubbing"
 
 [lib]
-name = "viet_dub_app"
+name = "dubora_app"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "viet-dub"
+name = "dubora"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -27,4 +27,4 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-viet-dub-core = { path = "../../../crates/viet-dub-core" }
+dubora-core = { path = "../../../crates/dubora-core" }

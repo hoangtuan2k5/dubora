@@ -1,5 +1,5 @@
 {
-  "name": "viet-dub-desktop",
+  "name": "dubora-desktop",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,10 +9,10 @@
     "email": "tuan@hoangtuan.dev",
     "url": "https://github.com/hoangtuan2k5"
   },
-  "homepage": "https://github.com/hoangtuan2k5/viet-dub",
+  "homepage": "https://github.com/hoangtuan2k5/dubora",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hoangtuan2k5/viet-dub.git"
+    "url": "https://github.com/hoangtuan2k5/dubora.git"
   },
   "license": "MIT",
   "scripts": {

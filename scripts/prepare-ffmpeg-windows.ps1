@@ -1,5 +1,5 @@
 # Stage the pinned Gyan FFmpeg essentials build for the Windows installer.
-# Essentials includes librubberband (required by viet-dub voiceover tempo).
+# Essentials includes librubberband (required by Dubora voiceover tempo).
 # Mirror: https://github.com/GyanD/codexffmpeg
 # Catalog: https://www.gyan.dev/ffmpeg/builds/
 
@@ -9,7 +9,7 @@ $Version = "8.1.2"
 $ArchiveName = "ffmpeg-$Version-essentials_build.zip"
 $Url = "https://github.com/GyanD/codexffmpeg/releases/download/$Version/$ArchiveName"
 $ExpectedSha256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
-$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) "viet-dub-ffmpeg-$([guid]::NewGuid())"
+$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) "dubora-ffmpeg-$([guid]::NewGuid())"
 $Archive = Join-Path $TempDir $ArchiveName
 $Extracted = Join-Path $TempDir "extracted"
 $Destination = Join-Path $PSScriptRoot "../apps/desktop/src-tauri/resources/ffmpeg"

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use viet_dub_core::ffmpeg::FfmpegPaths;
-use viet_dub_core::{
+use dubora_core::ffmpeg::FfmpegPaths;
+use dubora_core::{
     AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
     Stage, VideoInfo, AZURE_VOICE, create_dubs, list_azure_voices,
 };
@@ -30,7 +30,7 @@ impl Default for AppConfig {
         Self {
             project_root: String::new(),
             azure_key: String::new(),
-            azure_region: viet_dub_core::config::DEFAULT_AZURE_REGION.to_owned(),
+            azure_region: dubora_core::config::DEFAULT_AZURE_REGION.to_owned(),
             azure_voice: AZURE_VOICE.to_owned(),
             gemini_keys: String::new(),
         }
@@ -79,7 +79,7 @@ pub fn save_config(app: AppHandle, config: AppConfig) -> Result<SaveConfigResult
     if root.is_empty() {
         return Err("Chưa chọn thư mục dự án".to_owned());
     }
-    let created_dirs = viet_dub_core::ensure_project_layout(Path::new(root))
+    let created_dirs = dubora_core::ensure_project_layout(Path::new(root))
         .map_err(|error| format!("{error:#}"))?;
     write_config(&config_path(&app)?, &config)?;
     Ok(SaveConfigResult { created_dirs })
@@ -91,8 +91,8 @@ pub async fn scan_videos(root: String) -> Result<Vec<VideoInfo>, String> {
         return Err("Chưa chọn thư mục dự án".to_owned());
     }
     let path = Path::new(root.trim());
-    viet_dub_core::ensure_project_layout(path).map_err(|error| format!("{error:#}"))?;
-    viet_dub_core::scan_videos(path).map_err(|error| format!("{error:#}"))
+    dubora_core::ensure_project_layout(path).map_err(|error| format!("{error:#}"))?;
+    dubora_core::scan_videos(path).map_err(|error| format!("{error:#}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,7 +122,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
     }
 
     let root = PathBuf::from(saved.project_root.trim());
-    viet_dub_core::ensure_project_layout(&root).map_err(|error| format!("{error:#}"))?;
+    dubora_core::ensure_project_layout(&root).map_err(|error| format!("{error:#}"))?;
 
     let azure = AzureConfig::new(saved.azure_key, saved.azure_region)
         .and_then(|config| config.with_voice(saved.azure_voice))
@@ -132,7 +132,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
         root,
         provider: Provider::Azure,
         azure: Some(azure),
-        gemini: request.translate.then(|| GeminiConfig::new(viet_dub_core::translate_gemini::parse_keys(&saved.gemini_keys))).transpose().map_err(|error| format!("{error:#}"))?,
+        gemini: request.translate.then(|| GeminiConfig::new(dubora_core::translate_gemini::parse_keys(&saved.gemini_keys))).transpose().map_err(|error| format!("{error:#}"))?,
         ffmpeg: FfmpegPaths::resolve(resource_dir.as_deref()),
     };
 
@@ -148,12 +148,12 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
     // heavy FFmpeg / ffprobe work never starves the Tauri/WebView2 event loop
     // (that starvation often shows up as a solid black window on Windows).
     let spawn_result = std::thread::Builder::new()
-        .name("viet-dub-job".into())
+        .name("dubora-job".into())
         .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(4)
                 .enable_all()
-                .thread_name("viet-dub-worker")
+                .thread_name("dubora-worker")
                 .build()
             {
                 Ok(runtime) => runtime,
@@ -392,7 +392,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!("viet-dub-app-{unique}"));
+        let directory = std::env::temp_dir().join(format!("dubora-app-{unique}"));
         let path = directory.join("config.json");
         assert_eq!(read_config(&path).unwrap(), AppConfig::default());
 

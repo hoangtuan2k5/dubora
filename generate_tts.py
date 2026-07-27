@@ -16,7 +16,7 @@ AZURE_ENV_PATHS = (
     ROOT / ".env",
     Path.cwd() / ".env",
     Path("/home/ubuntu/AI_news/.env"),
-    Path("/home/ubuntu/viet-dub/.env"),
+    Path("/home/ubuntu/dubora/.env"),
 )
 
 TTS_PRONUNCIATIONS = (
@@ -223,7 +223,7 @@ async def generate_speech_with_azure(index, text, output_path, retries=3, cache_
         "Ocp-Apim-Subscription-Key": api_key,
         "Content-Type": "application/ssml+xml",
         "X-Microsoft-OutputFormat": "audio-48khz-192kbitrate-mono-mp3",
-        "User-Agent": "viet-dub",
+        "User-Agent": "dubora",
     }
     ssml = (
         '<speak version="1.0" '

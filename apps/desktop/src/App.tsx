@@ -1050,8 +1050,8 @@ function App() {
                   </li>
                   <li>
                     <strong>Repo:</strong>{" "}
-                    <ExternalLink href="https://github.com/hoangtuan2k5/viet-dub">
-                      hoangtuan2k5/viet-dub <IconExternalLink size={14} />
+                    <ExternalLink href="https://github.com/hoangtuan2k5/dubora">
+                      hoangtuan2k5/dubora <IconExternalLink size={14} />
                     </ExternalLink>
                   </li>
                 </ul>
@@ -1107,7 +1107,7 @@ function App() {
                 <div className="panel-title"><span className="number">01</span><div><h2>Thư mục dự án</h2><p>Nơi chứa assets, work và outputs.</p></div></div>
                 <label htmlFor="project-root">Project root</label>
                 <div className="input-action">
-                  <div className="input-wrap"><IconFolder size={18} /><input id="project-root" value={config.projectRoot} onChange={(event) => setConfig({ ...config, projectRoot: event.target.value })} placeholder="D:\Courses\viet-dub" /></div>
+                  <div className="input-wrap"><IconFolder size={18} /><input id="project-root" value={config.projectRoot} onChange={(event) => setConfig({ ...config, projectRoot: event.target.value })} placeholder="D:\Courses\dubora" /></div>
                   <button className="secondary-button" onClick={browse}><IconFolderOpen size={18} /> Chọn thư mục</button>
                 </div>
                 <div className="path-preview"><span>INPUT</span> {config.projectRoot ? `${config.projectRoot}/assets/video` : "—"}</div>

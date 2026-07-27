@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use viet_dub_core::ffmpeg::FfmpegPaths;
-use viet_dub_core::{
+use dubora_core::ffmpeg::FfmpegPaths;
+use dubora_core::{
     AzureConfig, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider, create_dubs,
 };
-use viet_dub_core::translate_gemini::load_env_keys;
+use dubora_core::translate_gemini::load_env_keys;
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum ProviderArg {
@@ -26,10 +26,10 @@ impl From<ProviderArg> for Provider {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "viet-dub",
+    name = "dubora",
     about = "Create Vietnamese dubbed videos from matching video and SRT files",
     author = "Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev>",
-    long_about = "viet-dub — Vietnamese video dubbing CLI.\nAuthor: Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev>\nGitHub: https://github.com/hoangtuan2k5/viet-dub"
+    long_about = "Dubora — Vietnamese video dubbing CLI.\nAuthor: Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev>\nGitHub: https://github.com/hoangtuan2k5/dubora"
 )]
 struct Args {
     /// Video filename, path, or directory under assets/video; omit to process all.

@@ -312,6 +312,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("viet-dub-paths-{}-{unique}", std::process::id()))
+        std::env::temp_dir().join(format!("dubora-paths-{}-{unique}", std::process::id()))
     }
 }

@@ -26,5 +26,5 @@ pub fn run() {
             commands::open_path,
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run viet-dub");
+        .expect("failed to run Dubora");
 }

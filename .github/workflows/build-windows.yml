@@ -1,4 +1,4 @@
-# Build Windows .exe + NSIS installer for viet-dub desktop.
+# Build Windows .exe + NSIS installer for Dubora desktop.
 # Trigger: manual (workflow_dispatch) or push to main touching desktop/core.
 
 name: Build Windows
@@ -74,11 +74,11 @@ jobs:
       - name: Upload installer and exe
         uses: actions/upload-artifact@v4
         with:
-          name: viet-dub-windows
+          name: dubora-windows
           if-no-files-found: error
           path: |
             target/release/bundle/nsis/*.exe
             apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
-            target/release/viet-dub.exe
-            apps/desktop/src-tauri/target/release/viet-dub.exe
+            target/release/dubora.exe
+            apps/desktop/src-tauri/target/release/dubora.exe
           retention-days: 14

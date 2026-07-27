@@ -1,11 +1,11 @@
-# viet-dub
+# Dubora
 
 Create Vietnamese dubbed videos from video files and matching SRT subtitles.
 
 Author: Hoàng Chiều Nguyễn Tuấn  
 Email: tuan@hoangtuan.dev  
 GitHub: [hoangtuan2k5](https://github.com/hoangtuan2k5)  
-Repository: [hoangtuan2k5/viet-dub](https://github.com/hoangtuan2k5/viet-dub)
+Repository: [hoangtuan2k5/dubora](https://github.com/hoangtuan2k5/dubora)
 
 The pipeline:
 
@@ -19,9 +19,9 @@ The pipeline:
 
 The Rust implementation ships one shared pipeline through:
 
-- `viet-dub`, a Linux CLI in `crates/viet-dub-cli`
-- `viet-dub`, a Windows Tauri 2 desktop app in `apps/desktop`
-- `viet-dub-core`, the library used by both frontends
+- `dubora`, a Linux CLI in `crates/dubora-cli`
+- `Dubora`, a Windows Tauri 2 desktop app in `apps/desktop`
+- `dubora-core`, the library used by both frontends
 
 The Python files remain in the repository as the parity reference.
 
@@ -36,7 +36,7 @@ Prerequisites:
 Build the release binary:
 
 ```bash
-cargo build --release -p viet-dub-cli
+cargo build --release -p dubora-cli
 ```
 
 Run it from a project root or pass `--root` explicitly:
@@ -46,11 +46,11 @@ export AZURE_KEY=...
 export AZURE_REGION=southeastasia
 export GEMINI_API_KEYS=key_1,key_2
 
-./target/release/viet-dub
-./target/release/viet-dub "course/part/lesson.mp4"
-./target/release/viet-dub --force "course/part/lesson.mp4"
-./target/release/viet-dub --force-tts "course/part/lesson.mp4"
-./target/release/viet-dub --root /data/courses/my-course
+./target/release/dubora
+./target/release/dubora "course/part/lesson.mp4"
+./target/release/dubora --force "course/part/lesson.mp4"
+./target/release/dubora --force-tts "course/part/lesson.mp4"
+./target/release/dubora --root /data/courses/my-course
 ```
 
 `<root>/.env` is also supported (`AZURE_KEY`, `AZURE_REGION`, `GEMINI_API_KEYS`). Use
@@ -58,8 +58,8 @@ export GEMINI_API_KEYS=key_1,key_2
 Gemini keys are used round-robin once per subtitle batch.
 
 ```bash
-export VIET_DUB_FFMPEG=/usr/bin/ffmpeg
-export VIET_DUB_FFPROBE=/usr/bin/ffprobe
+export DUBORA_FFMPEG=/usr/bin/ffmpeg
+export DUBORA_FFPROBE=/usr/bin/ffprobe
 ```
 
 Azure is the Rust provider; Edge TTS remains in the Python reference.
@@ -67,7 +67,7 @@ Azure is the Rust provider; Edge TTS remains in the Python reference.
 Verify:
 
 ```bash
-cargo test -p viet-dub-core
+cargo test -p dubora-core
 ffmpeg -filters | grep rubberband
 ```
 
@@ -82,10 +82,10 @@ Workflow: `.github/workflows/build-windows.yml` (runs on `windows-latest`).
 gh workflow run "Build Windows"
 gh run watch
 # Download artifacts when finished:
-gh run download -n viet-dub-windows
+gh run download -n dubora-windows
 ```
 
-Artifacts include the NSIS installer (`viet-dub_*.exe`) and the raw app binary
+Artifacts include the NSIS installer (`Dubora_*.exe`) and the raw app binary
 when present.
 
 ### Build locally on Windows
@@ -139,7 +139,7 @@ Install Python dependencies from the project folder.
 Ubuntu/macOS:
 
 ```bash
-cd ~/viet-dub
+cd ~/dubora
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
@@ -148,7 +148,7 @@ python -m pip install -r requirements.txt
 Windows PowerShell:
 
 ```powershell
-cd viet-dub
+cd dubora
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
@@ -210,10 +210,10 @@ assets/srt/CC-[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. I
 
 ## Run
 
-Always run commands from `~/viet-dub`:
+Always run commands from `~/dubora`:
 
 ```bash
-cd ~/viet-dub
+cd ~/dubora
 ```
 
 Process every video recursively:
