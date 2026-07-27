@@ -152,12 +152,18 @@ def create_dub_for_video(video_path, provider, force=False, force_tts=False, tra
     job_dir = safe_work_path(relative_path)
     tts_dir = job_dir / "tts"
     output_video = (OUTPUT_DIR / relative_path).with_name(f"{video_path.stem}.vi-dub.mp4")
+    output_srt = output_video.with_suffix(".srt")
 
     if not force and not force_tts and output_video.exists():
         video_mtime = video_path.stat().st_mtime
         srt_mtime = srt_path.stat().st_mtime
         out_mtime = output_video.stat().st_mtime
-        if out_mtime >= video_mtime and out_mtime >= srt_mtime:
+        if (
+            out_mtime >= video_mtime
+            and out_mtime >= srt_mtime
+            and output_srt.exists()
+            and output_srt.stat().st_mtime >= srt_mtime
+        ):
             print(f"Skipping {relative_path}, output video already exists and is up to date.")
             return output_video
 
@@ -185,8 +191,9 @@ def create_dub_for_video(video_path, provider, force=False, force_tts=False, tra
     generate_tts_until_complete(provider, vi_srt, tts_dir, srt_path)
     run(["python3", ROOT / "build_audio.py", vi_srt, tts_dir, voiceover, job_dir])
     run(["python3", ROOT / "build_video.py", video_path, voiceover, output_video])
+    shutil.copy2(vi_srt, output_srt)
 
-    print(f"Done: {output_video}")
+    print(f"Done: {output_video} (+ {output_srt.name})")
     return output_video
 
 

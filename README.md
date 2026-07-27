@@ -15,6 +15,7 @@ The pipeline:
 4. Treat cleaned subtitles as Vietnamese by default.
 5. Generate Vietnamese voiceover with Azure Florian Dragon HD Latest.
 6. Build final MP4 with Vietnamese audio only.
+7. Copy the cleaned Vietnamese SRT beside the MP4 with the same basename for player auto-loading.
 
 The Rust implementation ships one shared pipeline through:
 
@@ -252,6 +253,7 @@ Output:
 
 ```text
 outputs/[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.vi-dub.mp4
+outputs/[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.vi-dub.srt
 ```
 
 The default TTS provider is Azure Speech with:
@@ -315,6 +317,6 @@ If no matching SRT exists, the script stops and prints the paths it tried.
 
 - `work/` stores intermediate cleaned/translated SRT, TTS segments, and voiceover audio.
 - By default, input SRT files are assumed to already be Vietnamese.
-- `outputs/` stores final dubbed videos.
+- `outputs/` stores final dubbed videos and matching `*.vi-dub.srt` subtitle files.
 - The final video keeps only the original video stream and the Vietnamese audio track.
 - Output keeps the same folder structure as `assets/video/`.
