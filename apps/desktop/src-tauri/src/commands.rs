@@ -10,6 +10,7 @@ use dubora_core::youtube::select_subtitle_language;
 use dubora_core::{
     AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
     Stage, VideoInfo, AZURE_VOICE, create_dubs, delete_input_video, list_azure_voices, rename_input_video,
+    repair_adjacent_youtube_subtitles,
 };
 
 static DUB_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -129,6 +130,7 @@ pub async fn scan_videos(root: String) -> Result<Vec<VideoInfo>, String> {
     }
     let path = Path::new(root.trim());
     dubora_core::ensure_project_layout(path).map_err(|error| format!("{error:#}"))?;
+    repair_adjacent_youtube_subtitles(path).map_err(|error| format!("{error:#}"))?;
     dubora_core::scan_videos(path).map_err(|error| format!("{error:#}"))
 }
 
@@ -196,11 +198,15 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
     let video_dir = root.join("assets").join("video");
     let srt_dir = root.join("assets").join("srt");
     let output_template = video_dir.join("%(title)s [%(id)s].%(ext)s");
+    let ffmpeg = FfmpegPaths::resolve(app.path().resource_dir().ok().as_deref());
+    let ffmpeg_dir = ffmpeg.ffmpeg.parent().unwrap_or(Path::new("."));
     let output = yt_dlp_command(&yt_dlp)
         .args(["--no-playlist", "--no-warnings", "--format", "best[ext=mp4]"])
         .args(["--write-subs", "--write-auto-subs", "--sub-langs", &language, "--sub-format", "srt", "--convert-subs", "srt"])
         .arg("--output")
         .arg(output_template)
+        .arg("--ffmpeg-location")
+        .arg(ffmpeg_dir)
         .args(["--print", "after_move:filepath", "--"])
         .arg(url)
         .output()

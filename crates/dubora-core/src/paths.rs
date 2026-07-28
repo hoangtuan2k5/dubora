@@ -160,6 +160,36 @@ pub fn find_matching_srt(root: &Path, video: &Path) -> Result<PathBuf> {
     )
 }
 
+/// Move legacy yt-dlp subtitle files next to videos into the matching assets/srt path.
+pub fn repair_adjacent_youtube_subtitles(root: &Path) -> Result<()> {
+    for video in list_videos(root)? {
+        let relative = video_relative_path(root, &video);
+        let destination = root.join("assets/srt").join(&relative).with_extension("srt");
+        if destination.exists() {
+            continue;
+        }
+        let Some(stem) = video.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let prefix = format!("{stem}.");
+        let Some(parent) = video.parent() else {
+            continue;
+        };
+        let subtitle = fs::read_dir(parent)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension().and_then(OsStr::to_str) == Some("srt")
+                    && path.file_name().and_then(OsStr::to_str).is_some_and(|name| name.starts_with(&prefix))
+            });
+        if let Some(subtitle) = subtitle {
+            fs::create_dir_all(destination.parent().context("SRT destination has no parent")?)?;
+            fs::rename(subtitle, destination)?;
+        }
+    }
+    Ok(())
+}
+
 /// Rename one input video and its matching input SRT, keeping their relative paths aligned.
 pub fn rename_input_video(root: &Path, relative_video: &Path, new_stem: &str) -> Result<PathBuf> {
     let (video_dir, video) = input_video_path(root, relative_video)?;
@@ -392,6 +422,20 @@ mod tests {
         delete_input_video(&root, &renamed)?;
         assert!(!root.join("assets/video/renamed lesson.mp4").exists());
         assert!(!root.join("assets/srt/renamed lesson.srt").exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn repair_moves_a_legacy_youtube_srt_to_assets_srt() -> Result<()> {
+        let root = temp_root();
+        ensure_project_layout(&root)?;
+        fs::write(root.join("assets/video/lesson.mp4"), "video")?;
+        fs::write(root.join("assets/video/lesson.en.srt"), "srt")?;
+
+        repair_adjacent_youtube_subtitles(&root)?;
+        assert!(!root.join("assets/video/lesson.en.srt").exists());
+        assert!(root.join("assets/srt/lesson.srt").is_file());
         fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -1334,7 +1334,7 @@ th:nth-child(4) {
 }
 
 th:last-child {
-  width: 46px;
+  width: 118px;
 }
 
 th,
@@ -1462,6 +1462,7 @@ input[type="checkbox"] {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
+  white-space: nowrap;
 }
 
 .row-action.danger:hover:not(:disabled) {
