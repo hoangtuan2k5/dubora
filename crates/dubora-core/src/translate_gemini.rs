@@ -8,6 +8,7 @@ use crate::srt::{SrtSegment, parse_srt, write_srt};
 
 const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const MODEL: &str = "gemini-3.5-flash-lite";
+const BATCH_SIZE: usize = 200;
 
 #[derive(Serialize)]
 struct InputSegment<'a> { index: usize, text: &'a str }
@@ -24,7 +25,7 @@ pub async fn translate_srt(keys: &[String], input: &Path, output: &Path) -> Resu
     let client = reqwest::Client::new();
     let mut translated = Vec::with_capacity(source.len());
 
-    for (batch_number, batch) in source.chunks(20).enumerate() {
+    for (batch_number, batch) in source.chunks(BATCH_SIZE).enumerate() {
         let result = translate_batch(&client, &keys[batch_number % keys.len()], batch).await?;
         translated.extend(result);
     }

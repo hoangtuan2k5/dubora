@@ -75,6 +75,7 @@ pub struct YoutubeImportRequest {
 pub struct YoutubeImportResult {
     pub relative_path: String,
     pub subtitle_language: String,
+    pub videos: Vec<VideoInfo>,
 }
 
 #[derive(Deserialize)]
@@ -155,17 +156,13 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
     let video_dir = root.join("assets").join("video");
     let srt_dir = root.join("assets").join("srt");
     let output_template = video_dir.join("%(title)s [%(id)s].%(ext)s");
-    let ffmpeg = FfmpegPaths::resolve(app.path().resource_dir().ok().as_deref());
-    let ffmpeg_dir = ffmpeg.ffmpeg.parent().unwrap_or(Path::new("."));
-    let output = Command::new(&yt_dlp)
-        .args(["--no-playlist", "--no-warnings", "--format", "bv*+ba/b", "--merge-output-format", "mp4"])
+    let output = yt_dlp_command(&yt_dlp)
+        .args(["--no-playlist", "--no-warnings", "--format", "best[ext=mp4]"])
         .args(["--write-subs", "--write-auto-subs", "--sub-langs", &language, "--sub-format", "srt", "--convert-subs", "srt"])
         .arg("--paths")
         .arg(format!("subtitle:{}", srt_dir.display()))
         .arg("--output")
         .arg(output_template)
-        .arg("--ffmpeg-location")
-        .arg(ffmpeg_dir)
         .args(["--print", "after_move:filepath", "--"])
         .arg(url)
         .output()
@@ -180,7 +177,7 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
         .filter(|line| !line.is_empty())
         .next_back()
         .map(PathBuf::from)
-        .filter(|path| path.is_file())
+        .filter(|path| path.is_file() && path.extension().and_then(|extension| extension.to_str()) == Some("mp4"))
         .ok_or("yt-dlp tải xong nhưng không tìm thấy file video")?;
     let video_stem = video.file_stem().and_then(|stem| stem.to_str()).ok_or("Tên video không hợp lệ")?;
     let subtitle = fs::read_dir(&srt_dir)
@@ -205,7 +202,8 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
         .unwrap_or(&video)
         .to_string_lossy()
         .replace('\\', "/");
-    Ok(YoutubeImportResult { relative_path, subtitle_language: language })
+    let videos = dubora_core::scan_videos(&root).map_err(|error| format!("{error:#}"))?;
+    Ok(YoutubeImportResult { relative_path, subtitle_language: language, videos })
 }
 
 fn is_youtube_url(url: &str) -> bool {
@@ -224,8 +222,19 @@ fn yt_dlp_path(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(binary))
 }
 
+fn yt_dlp_command(path: &Path) -> Command {
+    let mut command = Command::new(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
 fn run_yt_dlp<const N: usize>(yt_dlp: &Path, args: [&str; N], url: &str) -> Result<std::process::Output, String> {
-    let output = Command::new(yt_dlp)
+    let output = yt_dlp_command(yt_dlp)
         .args(args)
         .args(["--", url])
         .output()

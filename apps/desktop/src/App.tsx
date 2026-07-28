@@ -780,7 +780,7 @@ function App() {
     try {
       const result = await api.importYoutube(youtubeUrl.trim());
       setYoutubeUrl("");
-      await scan(config.projectRoot);
+      setVideos(result.videos);
       setSelected(new Set([result.relativePath]));
       setNotice(`Đã tải ${result.relativePath} + SRT ${result.subtitleLanguage}. Có thể chọn Dub ngay.`);
     } catch (error) {

@@ -53,6 +53,7 @@ export type SaveConfigResult = {
 export type YoutubeImportResult = {
   relativePath: string;
   subtitleLanguage: string;
+  videos: VideoInfo[];
 };
 
 export const api = {

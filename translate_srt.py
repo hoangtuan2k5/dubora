@@ -234,7 +234,7 @@ def translate_srt(input_srt, output_srt, normalized_srt=None, source_language="e
         raise RuntimeError("Missing GEMINI_API_KEYS. Add one or more Gemini API keys to .env.")
 
     translated_segs = []
-    batch_size = 20
+    batch_size = 200
     for i in range(0, len(segs), batch_size):
         batch = segs[i:i+batch_size]
         try:

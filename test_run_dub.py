@@ -69,7 +69,7 @@ class OutputSubtitleTest(unittest.TestCase):
                 generate_tts.tts_cache_key("edge", "text"),
             )
 
-    def test_gemini_translation_rotates_keys_per_batch(self):
+    def test_gemini_translation_uses_one_request_for_a_small_srt(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "input.srt"
@@ -100,7 +100,7 @@ class OutputSubtitleTest(unittest.TestCase):
             with patch.object(translate_srt.requests, "post", side_effect=fake_post):
                 translate_srt.translate_srt(source, output, api_keys=["key-1", "key-2"])
 
-            self.assertEqual(used_keys, ["key-1", "key-2"])
+            self.assertEqual(used_keys, ["key-1"])
             self.assertEqual(len(translate_srt.parse_srt(output)), 21)
 
 
