@@ -56,12 +56,20 @@ export type YoutubeImportResult = {
   videos: VideoInfo[];
 };
 
+export type LibraryMutationResult = {
+  videos: VideoInfo[];
+};
+
 export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (config: AppConfig) => invoke<SaveConfigResult>("save_config", { config }),
   scanVideos: (root: string) => invoke<VideoInfo[]>("scan_videos", { root }),
   importYoutube: (url: string) =>
     invoke<YoutubeImportResult>("import_youtube", { request: { url } }),
+  renameVideo: (relativePath: string, newStem: string) =>
+    invoke<LibraryMutationResult>("rename_video", { request: { relativePath, newStem } }),
+  deleteVideo: (relativePath: string) =>
+    invoke<LibraryMutationResult>("delete_video", { relativePath }),
   listVoices: (azureKey: string, azureRegion: string) =>
     invoke<AzureVoice[]>("list_voices", { request: { azureKey, azureRegion } }),
   defaultAzureVoice: () => invoke<string>("default_azure_voice"),

@@ -9,7 +9,7 @@ use dubora_core::ffmpeg::FfmpegPaths;
 use dubora_core::youtube::select_subtitle_language;
 use dubora_core::{
     AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
-    Stage, VideoInfo, AZURE_VOICE, create_dubs, list_azure_voices,
+    Stage, VideoInfo, AZURE_VOICE, create_dubs, delete_input_video, list_azure_voices, rename_input_video,
 };
 
 static DUB_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -78,6 +78,19 @@ pub struct YoutubeImportResult {
     pub videos: Vec<VideoInfo>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameVideoRequest {
+    pub relative_path: String,
+    pub new_stem: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMutationResult {
+    pub videos: Vec<VideoInfo>,
+}
+
 #[derive(Deserialize)]
 struct YoutubeMetadata {
     #[serde(default)]
@@ -120,6 +133,33 @@ pub async fn scan_videos(root: String) -> Result<Vec<VideoInfo>, String> {
 }
 
 #[tauri::command]
+pub fn rename_video(app: AppHandle, request: RenameVideoRequest) -> Result<LibraryMutationResult, String> {
+    let root = configured_project_root(&app)?;
+    rename_input_video(&root, Path::new(&request.relative_path), &request.new_stem)
+        .map_err(|error| format!("{error:#}"))?;
+    let videos = dubora_core::scan_videos(&root).map_err(|error| format!("{error:#}"))?;
+    Ok(LibraryMutationResult { videos })
+}
+
+#[tauri::command]
+pub fn delete_video(app: AppHandle, relative_path: String) -> Result<LibraryMutationResult, String> {
+    let root = configured_project_root(&app)?;
+    delete_input_video(&root, Path::new(&relative_path)).map_err(|error| format!("{error:#}"))?;
+    let videos = dubora_core::scan_videos(&root).map_err(|error| format!("{error:#}"))?;
+    Ok(LibraryMutationResult { videos })
+}
+
+fn configured_project_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let saved = read_config(&config_path(app)?)?;
+    if saved.project_root.trim().is_empty() {
+        return Err("Chưa chọn thư mục dự án".to_owned());
+    }
+    let root = PathBuf::from(saved.project_root.trim());
+    dubora_core::ensure_project_layout(&root).map_err(|error| format!("{error:#}"))?;
+    Ok(root)
+}
+
+#[tauri::command]
 pub async fn import_youtube(app: AppHandle, request: YoutubeImportRequest) -> Result<YoutubeImportResult, String> {
     tauri::async_runtime::spawn_blocking(move || import_youtube_blocking(&app, request))
         .await
@@ -159,8 +199,6 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
     let output = yt_dlp_command(&yt_dlp)
         .args(["--no-playlist", "--no-warnings", "--format", "best[ext=mp4]"])
         .args(["--write-subs", "--write-auto-subs", "--sub-langs", &language, "--sub-format", "srt", "--convert-subs", "srt"])
-        .arg("--paths")
-        .arg(format!("subtitle:{}", srt_dir.display()))
         .arg("--output")
         .arg(output_template)
         .args(["--print", "after_move:filepath", "--"])
@@ -180,15 +218,15 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
         .filter(|path| path.is_file() && path.extension().and_then(|extension| extension.to_str()) == Some("mp4"))
         .ok_or("yt-dlp tải xong nhưng không tìm thấy file video")?;
     let video_stem = video.file_stem().and_then(|stem| stem.to_str()).ok_or("Tên video không hợp lệ")?;
-    let subtitle = fs::read_dir(&srt_dir)
-        .map_err(|error| format!("Không đọc được thư mục SRT: {error}"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.extension().and_then(|extension| extension.to_str()) == Some("srt")
-                && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-                    name.starts_with(&format!("{video_stem}.{language}"))
-                })
+    let subtitle = [srt_dir.as_path(), video_dir.as_path()]
+        .into_iter()
+        .find_map(|directory| {
+            fs::read_dir(directory).ok()?.filter_map(Result::ok).map(|entry| entry.path()).find(|path| {
+                path.extension().and_then(|extension| extension.to_str()) == Some("srt")
+                    && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+                        name.starts_with(&format!("{video_stem}.{language}"))
+                    })
+            })
         })
         .ok_or("yt-dlp không tải được SRT đã chọn")?;
     let companion = srt_dir.join(format!("{video_stem}.srt"));

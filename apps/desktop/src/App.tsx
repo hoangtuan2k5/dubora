@@ -22,6 +22,7 @@ import {
   IconMovie,
   IconPlayerPlayFilled,
   IconPlayerStopFilled,
+  IconPencil,
   IconRefresh,
   IconSearch,
   IconSettings,
@@ -29,6 +30,7 @@ import {
   IconSortDescendingLetters,
   IconSun,
   IconTerminal2,
+  IconTrash,
   IconVideo,
   IconWaveSine,
   IconX,
@@ -456,6 +458,13 @@ function App() {
     }
   };
 
+  const refreshVideos = (found: VideoInfo[]) => {
+    setVideos(found);
+    setSelected((current) =>
+      new Set([...current].filter((path) => found.some((video) => video.relativePath === path))),
+    );
+  };
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("theme", theme);
@@ -475,6 +484,14 @@ function App() {
   useEffect(() => {
     projectRootRef.current = savedConfig.projectRoot;
   }, [savedConfig.projectRoot]);
+
+  useEffect(() => {
+    if (view !== "library" || !config.projectRoot) return;
+    const timer = window.setInterval(() => {
+      void api.scanVideos(config.projectRoot).then(refreshVideos).catch(() => {});
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [view, config.projectRoot]);
 
   useEffect(() => {
     let active = true;
@@ -787,6 +804,34 @@ function App() {
       setNotice(`Không thể tải từ YouTube: ${describeError(error)}`);
     } finally {
       setImportingYoutube(false);
+    }
+  };
+
+  const renameVideo = async (video: VideoInfo) => {
+    const filename = video.relativePath.split(/[\\/]/).at(-1) ?? "";
+    const extension = filename.lastIndexOf(".");
+    const currentStem = extension > 0 ? filename.slice(0, extension) : filename;
+    const newStem = window.prompt("Tên mới của video (không gồm phần mở rộng)", currentStem)?.trim();
+    if (!newStem || newStem === currentStem) return;
+    try {
+      const result = await api.renameVideo(video.relativePath, newStem);
+      setVideos(result.videos);
+      setSelected((current) => new Set([...current].filter((path) => path !== video.relativePath)));
+      setNotice(`Đã đổi tên video${video.hasSrt ? " và SRT tương ứng" : ""}.`);
+    } catch (error) {
+      setNotice(`Không thể đổi tên video: ${describeError(error)}`);
+    }
+  };
+
+  const deleteVideo = async (video: VideoInfo) => {
+    if (!window.confirm(`Xóa ${video.relativePath}${video.hasSrt ? " và SRT tương ứng" : ""}?\n\nOutput đã dub sẽ được giữ lại.`)) return;
+    try {
+      const result = await api.deleteVideo(video.relativePath);
+      setVideos(result.videos);
+      setSelected((current) => new Set([...current].filter((path) => path !== video.relativePath)));
+      setNotice(`Đã xóa video${video.hasSrt ? " và SRT tương ứng" : ""}.`);
+    } catch (error) {
+      setNotice(`Không thể xóa video: ${describeError(error)}`);
     }
   };
 
@@ -1655,7 +1700,13 @@ function App() {
                             <td><button className="video-name" onClick={() => toggleSelected(video.relativePath)}><span className="file-icon"><IconVideo size={18} /></span><span><strong>{video.relativePath.split(/[\\/]/).at(-1)}</strong><small>{video.relativePath}</small></span></button></td>
                             <td><span className={`badge ${video.hasSrt ? "success" : "danger"}`}>{video.hasSrt ? <IconCheck size={14} /> : <IconX size={14} />}{video.hasSrt ? "Có SRT" : "Thiếu"}</span></td>
                             <td><span className={`badge ${video.hasOutput ? "cyan" : "muted"}`}><span className="mini-dot" />{video.hasOutput ? "Đã dub" : "Chưa có"}</span></td>
-                            <td><button className="icon-button row-action" disabled={!video.hasOutput} onClick={() => openPath(outputPath(config.projectRoot, video.relativePath))} aria-label={`Mở output của ${video.relativePath}`} data-tooltip="Mở output"><IconFolderOpen size={18} /></button></td>
+                            <td>
+                              <div className="row-actions">
+                                <button className="icon-button row-action" disabled={busy} onClick={() => void renameVideo(video)} aria-label={`Đổi tên ${video.relativePath}`} data-tooltip="Đổi tên video và SRT"><IconPencil size={18} /></button>
+                                <button className="icon-button row-action danger" disabled={busy} onClick={() => void deleteVideo(video)} aria-label={`Xóa ${video.relativePath}`} data-tooltip="Xóa video và SRT"><IconTrash size={18} /></button>
+                                <button className="icon-button row-action" disabled={!video.hasOutput} onClick={() => openPath(outputPath(config.projectRoot, video.relativePath))} aria-label={`Mở output của ${video.relativePath}`} data-tooltip="Mở output"><IconFolderOpen size={18} /></button>
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>

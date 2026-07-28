@@ -1458,6 +1458,17 @@ input[type="checkbox"] {
   margin: auto;
 }
 
+.row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.row-action.danger:hover:not(:disabled) {
+  border-color: rgba(255, 120, 111, 0.6);
+  color: var(--red);
+}
+
 .empty-state {
   min-height: 280px;
   flex: 1;

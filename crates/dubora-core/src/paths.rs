@@ -160,6 +160,76 @@ pub fn find_matching_srt(root: &Path, video: &Path) -> Result<PathBuf> {
     )
 }
 
+/// Rename one input video and its matching input SRT, keeping their relative paths aligned.
+pub fn rename_input_video(root: &Path, relative_video: &Path, new_stem: &str) -> Result<PathBuf> {
+    let (video_dir, video) = input_video_path(root, relative_video)?;
+    let new_stem = new_stem.trim();
+    if new_stem.is_empty()
+        || new_stem == "."
+        || new_stem == ".."
+        || new_stem
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0'))
+    {
+        bail!("New video name is invalid");
+    }
+    let extension = video
+        .extension()
+        .and_then(OsStr::to_str)
+        .context("Video has no extension")?;
+    let renamed_video = video.with_file_name(format!("{new_stem}.{extension}"));
+    if renamed_video.exists() {
+        bail!("A video with this name already exists");
+    }
+
+    let srt = find_matching_srt(root, &video).ok();
+    let renamed_srt = srt
+        .as_ref()
+        .map(|path| path.with_file_name(format!("{new_stem}.srt")));
+    if renamed_srt.as_ref().is_some_and(|path| path.exists()) {
+        bail!("An SRT with this name already exists");
+    }
+
+    fs::rename(&video, &renamed_video)?;
+    if let (Some(srt), Some(renamed_srt)) = (srt, renamed_srt)
+        && let Err(error) = fs::rename(&srt, &renamed_srt)
+    {
+        let _ = fs::rename(&renamed_video, &video);
+        return Err(error).context("Failed to rename matching SRT");
+    }
+    renamed_video
+        .strip_prefix(video_dir)
+        .map(Path::to_path_buf)
+        .context("Renamed video is outside assets/video")
+}
+
+/// Delete one input video and its matching input SRT. Existing outputs are preserved.
+pub fn delete_input_video(root: &Path, relative_video: &Path) -> Result<()> {
+    let (_, video) = input_video_path(root, relative_video)?;
+    let srt = find_matching_srt(root, &video).ok();
+    fs::remove_file(&video)?;
+    if let Some(srt) = srt {
+        fs::remove_file(srt).context("Video was deleted, but its matching SRT could not be deleted")?;
+    }
+    Ok(())
+}
+
+fn input_video_path(root: &Path, relative_video: &Path) -> Result<(PathBuf, PathBuf)> {
+    if relative_video.is_absolute()
+        || relative_video
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!("Video path must stay inside assets/video");
+    }
+    let video_dir = root.join("assets/video").canonicalize()?;
+    let video = video_dir.join(relative_video).canonicalize()?;
+    if !video.starts_with(&video_dir) || !video.is_file() {
+        bail!("Video path must point to a file inside assets/video");
+    }
+    Ok((video_dir, video))
+}
+
 pub fn safe_work_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -303,6 +373,25 @@ mod tests {
         let second = ensure_project_layout(&root)?;
         assert!(second.is_empty());
 
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rename_and_delete_keep_the_input_video_and_srt_in_sync() -> Result<()> {
+        let root = temp_root();
+        ensure_project_layout(&root)?;
+        fs::write(root.join("assets/video/lesson.mp4"), "video")?;
+        fs::write(root.join("assets/srt/lesson.srt"), "srt")?;
+
+        let renamed = rename_input_video(&root, Path::new("lesson.mp4"), "renamed lesson")?;
+        assert_eq!(renamed, Path::new("renamed lesson.mp4"));
+        assert!(root.join("assets/video/renamed lesson.mp4").is_file());
+        assert!(root.join("assets/srt/renamed lesson.srt").is_file());
+
+        delete_input_video(&root, &renamed)?;
+        assert!(!root.join("assets/video/renamed lesson.mp4").exists());
+        assert!(!root.join("assets/srt/renamed lesson.srt").exists());
         fs::remove_dir_all(root)?;
         Ok(())
     }
