@@ -1017,6 +1017,19 @@ h1 {
   font-size: 12px;
 }
 
+.youtube-import select {
+  flex: none;
+  max-width: 102px;
+  height: 32px;
+  padding: 0 24px 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .youtube-import input::placeholder {
   color: var(--quiet);
 }

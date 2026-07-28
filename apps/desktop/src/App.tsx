@@ -406,6 +406,7 @@ function App() {
   const [forceTts, setForceTts] = useState(false);
   const [translate, setTranslate] = useState(false);
   const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [youtubeQuality, setYoutubeQuality] = useState("highest");
   const [importingYoutube, setImportingYoutube] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null);
@@ -795,7 +796,7 @@ function App() {
     setImportingYoutube(true);
     setNotice("");
     try {
-      const result = await api.importYoutube(youtubeUrl.trim());
+      const result = await api.importYoutube(youtubeUrl.trim(), youtubeQuality);
       setYoutubeUrl("");
       setVideos(result.videos);
       setSelected(new Set([result.relativePath]));
@@ -1585,6 +1586,23 @@ function App() {
                     autoComplete="off"
                     disabled={importingYoutube}
                   />
+                  <label className="sr-only" htmlFor="youtube-quality">Chất lượng video</label>
+                  <select
+                    id="youtube-quality"
+                    value={youtubeQuality}
+                    onChange={(event) => setYoutubeQuality(event.target.value)}
+                    disabled={importingYoutube}
+                    title="Chất lượng MP4 tối đa"
+                  >
+                    <option value="lowest">Thấp nhất</option>
+                    <option value="144p">144p</option>
+                    <option value="240p">240p</option>
+                    <option value="360p">360p</option>
+                    <option value="480p">480p</option>
+                    <option value="720p">720p</option>
+                    <option value="1080p">1080p</option>
+                    <option value="highest">Cao nhất</option>
+                  </select>
                   <button
                     type="button"
                     className="secondary-button youtube-button"

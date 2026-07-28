@@ -75,8 +75,9 @@ ffmpeg -filters | grep rubberband
 ## Windows Desktop
 
 The desktop app includes a **Tải từ YouTube** field at the top of **Thư viện**.
-Paste a `youtube.com` or `youtu.be` URL after choosing a project root. It saves an MP4
-under `assets/video/` and one matching SRT under `assets/srt/`. Subtitle language
+Paste a `youtube.com` or `youtu.be` URL after choosing a project root, then choose a
+quality from lowest through 1080p or highest. It saves an MP4 under `assets/video/`
+and one matching SRT under `assets/srt/`. Subtitle language
 fallback is English, European languages, Chinese, Portuguese, Japanese, Korean,
 Indonesian, Hindi, Arabic, then any other available language.
 

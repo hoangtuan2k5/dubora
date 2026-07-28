@@ -69,6 +69,43 @@ pub struct FfmpegStatus {
 #[serde(rename_all = "camelCase")]
 pub struct YoutubeImportRequest {
     pub url: String,
+    #[serde(default)]
+    pub quality: YoutubeQuality,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum YoutubeQuality {
+    Lowest,
+    #[serde(rename = "144p")]
+    P144,
+    #[serde(rename = "240p")]
+    P240,
+    #[serde(rename = "360p")]
+    P360,
+    #[serde(rename = "480p")]
+    P480,
+    #[serde(rename = "720p")]
+    P720,
+    #[serde(rename = "1080p")]
+    P1080,
+    #[default]
+    Highest,
+}
+
+impl YoutubeQuality {
+    fn format(&self) -> &'static str {
+        match self {
+            Self::Lowest => "worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]",
+            Self::P144 => "bestvideo[ext=mp4][height<=144]+bestaudio[ext=m4a]/best[ext=mp4][height<=144]",
+            Self::P240 => "bestvideo[ext=mp4][height<=240]+bestaudio[ext=m4a]/best[ext=mp4][height<=240]",
+            Self::P360 => "bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]/best[ext=mp4][height<=360]",
+            Self::P480 => "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]",
+            Self::P720 => "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]",
+            Self::P1080 => "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]",
+            Self::Highest => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -201,7 +238,7 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
     let ffmpeg = FfmpegPaths::resolve(app.path().resource_dir().ok().as_deref());
     let ffmpeg_dir = ffmpeg.ffmpeg.parent().unwrap_or(Path::new("."));
     let output = yt_dlp_command(&yt_dlp)
-        .args(["--no-playlist", "--no-warnings", "--format", "best[ext=mp4]"])
+        .args(["--no-playlist", "--no-warnings", "--format", request.quality.format(), "--merge-output-format", "mp4"])
         .args(["--write-subs", "--write-auto-subs", "--sub-langs", &language, "--sub-format", "srt", "--convert-subs", "srt"])
         .arg("--output")
         .arg(output_template)
@@ -289,6 +326,30 @@ fn run_yt_dlp<const N: usize>(yt_dlp: &Path, args: [&str; N], url: &str) -> Resu
 fn yt_dlp_error(output: &std::process::Output) -> String {
     let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if message.is_empty() { "yt-dlp không thể tải video này".to_owned() } else { message }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::YoutubeQuality;
+
+    #[test]
+    fn youtube_quality_uses_mp4_formats() {
+        for quality in [
+            YoutubeQuality::Lowest,
+            YoutubeQuality::P144,
+            YoutubeQuality::P240,
+            YoutubeQuality::P360,
+            YoutubeQuality::P480,
+            YoutubeQuality::P720,
+            YoutubeQuality::P1080,
+            YoutubeQuality::Highest,
+        ] {
+            assert!(quality.format().contains("ext=mp4"));
+        }
+        assert!(YoutubeQuality::Highest.format().starts_with("bestvideo"));
+        let selected: YoutubeQuality = serde_json::from_str("\"1080p\"").unwrap();
+        assert!(selected.format().contains("height<=1080"));
+    }
 }
 
 #[derive(Debug, Deserialize)]

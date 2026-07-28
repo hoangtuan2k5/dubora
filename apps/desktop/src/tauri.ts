@@ -64,8 +64,8 @@ export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (config: AppConfig) => invoke<SaveConfigResult>("save_config", { config }),
   scanVideos: (root: string) => invoke<VideoInfo[]>("scan_videos", { root }),
-  importYoutube: (url: string) =>
-    invoke<YoutubeImportResult>("import_youtube", { request: { url } }),
+  importYoutube: (url: string, quality: string) =>
+    invoke<YoutubeImportResult>("import_youtube", { request: { url, quality } }),
   renameVideo: (relativePath: string, newStem: string) =>
     invoke<LibraryMutationResult>("rename_video", { request: { relativePath, newStem } }),
   deleteVideo: (relativePath: string) =>
