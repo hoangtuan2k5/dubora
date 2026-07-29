@@ -44,6 +44,8 @@ import {
   type FfmpegStatus,
   type VideoInfo,
 } from "./tauri";
+import duboraLogoDark from "./assets/dubora-logo-dark.svg";
+import duboraLogoLight from "./assets/dubora-logo-light.svg";
 
 const DEFAULT_CONFIG: AppConfig = {
   projectRoot: "",
@@ -883,8 +885,12 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand" aria-label="Dubora">
-          <div className="brand-mark"><IconWaveSine size={25} stroke={1.7} /></div>
-          <div><strong>DUBORA</strong><span>Every story, in every voice.</span></div>
+          <img
+            className="brand-logo"
+            src={theme === "dark" ? duboraLogoDark : duboraLogoLight}
+            alt="Dubora"
+          />
+          <span>Every story, in every voice.</span>
         </div>
 
         <nav className="nav" aria-label="Điều hướng chính">
