@@ -166,6 +166,13 @@ function formatDuration(seconds: number) {
   return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
 }
 
+function releaseVideo(element: HTMLVideoElement | null) {
+  if (!element) return;
+  element.pause();
+  element.removeAttribute("src");
+  element.load();
+}
+
 function VideoPlayer({
   video,
   playback,
@@ -187,6 +194,10 @@ function VideoPlayer({
   useEffect(() => {
     const element = videoRef.current;
     if (!element || !playback) return;
+    if (!element.hasAttribute("src")) {
+      element.src = convertFileSrc(playback.videoPath);
+      element.load();
+    }
     const track = element.addTextTrack("subtitles", "Tiếng Việt", "vi");
     track.mode = "showing";
     playback.cues.forEach((cue) => track.addCue(new VTTCue(cue.start, cue.end, cue.text)));
@@ -194,6 +205,7 @@ function VideoPlayer({
     return () => {
       track.mode = "disabled";
       Array.from(track.cues ?? []).forEach((cue) => track.removeCue(cue));
+      releaseVideo(element);
     };
   }, [playback]);
 
@@ -230,7 +242,7 @@ function VideoPlayer({
     <section className="media-player" ref={panelRef} aria-label={`Trình phát ${videoName(video)}`}>
       <div className="media-player-head">
         <div><span>Đang phát</span><strong>{videoName(video)}</strong></div>
-        <button className="icon-button" onClick={onClose} aria-label="Đóng trình phát" data-tooltip="Đóng"><IconX size={18} /></button>
+        <button className="icon-button" onClick={() => { releaseVideo(videoRef.current); onClose(); }} aria-label="Đóng trình phát" data-tooltip="Đóng"><IconX size={18} /></button>
       </div>
       <div className="media-frame">
         {playback ? (
