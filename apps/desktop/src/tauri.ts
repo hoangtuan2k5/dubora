@@ -10,6 +10,14 @@ export type AppConfig = {
   /** Azure TTS ShortName; default Florian Dragon HD. */
   azureVoice: string;
   geminiKeys: string;
+  playlists: Playlist[];
+};
+
+export type Playlist = {
+  id: string;
+  projectRoot: string;
+  name: string;
+  videoPaths: string[];
 };
 
 export type AzureVoice = {
@@ -29,6 +37,18 @@ export type VideoInfo = {
   relativePath: string;
   hasSrt: boolean;
   hasOutput: boolean;
+  addedAt: number;
+};
+
+export type SubtitleCue = {
+  start: number;
+  end: number;
+  text: string;
+};
+
+export type VideoPlayback = {
+  videoPath: string;
+  cues: SubtitleCue[];
 };
 
 export type FfmpegStatus = {
@@ -70,6 +90,8 @@ export const api = {
     invoke<LibraryMutationResult>("rename_video", { request: { relativePath, newStem } }),
   deleteVideo: (relativePath: string) =>
     invoke<LibraryMutationResult>("delete_video", { relativePath }),
+  getVideoPlayback: (relativePath: string) =>
+    invoke<VideoPlayback>("get_video_playback", { relativePath }),
   listVoices: (azureKey: string, azureRegion: string) =>
     invoke<AzureVoice[]>("list_voices", { request: { azureKey, azureRegion } }),
   defaultAzureVoice: () => invoke<string>("default_azure_voice"),

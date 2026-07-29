@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use dubora_core::ffmpeg::FfmpegPaths;
 use dubora_core::youtube::select_subtitle_language;
+use dubora_core::paths::find_matching_srt;
+use dubora_core::srt::{parse_srt, time_to_seconds};
 use dubora_core::{
     AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
     Stage, VideoInfo, AZURE_VOICE, create_dubs, delete_input_video, list_azure_voices, rename_input_video,
@@ -26,6 +28,16 @@ pub struct AppConfig {
     /// Azure TTS ShortName; empty or missing falls back to Florian Dragon HD.
     pub azure_voice: String,
     pub gemini_keys: String,
+    pub playlists: Vec<Playlist>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Playlist {
+    pub id: String,
+    pub project_root: String,
+    pub name: String,
+    pub video_paths: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -36,6 +48,7 @@ impl Default for AppConfig {
             azure_region: dubora_core::config::DEFAULT_AZURE_REGION.to_owned(),
             azure_voice: AZURE_VOICE.to_owned(),
             gemini_keys: String::new(),
+            playlists: Vec::new(),
         }
     }
 }
@@ -129,6 +142,21 @@ pub struct LibraryMutationResult {
     pub videos: Vec<VideoInfo>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleCue {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPlayback {
+    pub video_path: String,
+    pub cues: Vec<SubtitleCue>,
+}
+
 #[derive(Deserialize)]
 struct YoutubeMetadata {
     #[serde(default)]
@@ -186,6 +214,43 @@ pub fn delete_video(app: AppHandle, relative_path: String) -> Result<LibraryMuta
     delete_input_video(&root, Path::new(&relative_path)).map_err(|error| format!("{error:#}"))?;
     let videos = dubora_core::scan_videos(&root).map_err(|error| format!("{error:#}"))?;
     Ok(LibraryMutationResult { videos })
+}
+
+#[tauri::command]
+pub fn get_video_playback(app: AppHandle, relative_path: String) -> Result<VideoPlayback, String> {
+    let root = configured_project_root(&app)?;
+    let relative = Path::new(relative_path.trim());
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("Đường dẫn video không hợp lệ".to_owned());
+    }
+
+    let video_dir = root.join("assets/video").canonicalize()
+        .map_err(|error| format!("Không thể mở thư mục video: {error}"))?;
+    let video = video_dir.join(relative).canonicalize()
+        .map_err(|_| "Không tìm thấy video".to_owned())?;
+    if !video.starts_with(&video_dir) || !video.is_file() {
+        return Err("Video phải nằm trong assets/video".to_owned());
+    }
+
+    let cues = find_matching_srt(&root, &video)
+        .ok()
+        .and_then(|srt| parse_srt(&srt).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|segment| Some(SubtitleCue {
+            start: time_to_seconds(&segment.start).ok()?,
+            end: time_to_seconds(&segment.end).ok()?,
+            text: segment.text,
+        }))
+        .collect();
+
+    Ok(VideoPlayback {
+        video_path: video.display().to_string(),
+        cues,
+    })
 }
 
 fn configured_project_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -659,6 +724,7 @@ mod tests {
             azure_region: "southeastasia".to_owned(),
             azure_voice: AZURE_VOICE.to_owned(),
             gemini_keys: "key1,key2".to_owned(),
+            playlists: Vec::new(),
         };
         write_config(&path, &config).unwrap();
         assert_eq!(read_config(&path).unwrap(), config);
@@ -669,6 +735,7 @@ mod tests {
         fs::write(&legacy_path, legacy).unwrap();
         let loaded = read_config(&legacy_path).unwrap();
         assert_eq!(loaded.azure_voice, AZURE_VOICE);
+        assert!(loaded.playlists.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 }

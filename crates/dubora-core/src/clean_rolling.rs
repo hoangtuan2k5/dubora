@@ -175,9 +175,18 @@ fn can_merge(current: &TimedText, next: &TimedText) -> bool {
         current.text.split_whitespace().count() + next.text.split_whitespace().count();
     let combined_duration = next.end_sec - current.start_sec;
 
-    (gap < 2.0 || current.end_sec - current.start_sec < 4.5)
-        && combined_words <= 22
-        && combined_duration <= 8.0
+    if gap > 2.0 || combined_words > 26 || combined_duration > 8.5 {
+        return false;
+    }
+
+    !ends_sentence(&current.text) || current.end_sec - current.start_sec < 2.0
+}
+
+fn ends_sentence(text: &str) -> bool {
+    let text = text
+        .trim()
+        .trim_end_matches(&['"', '\'', '”', '’', ')', ']', '}'][..]);
+    matches!(text.chars().last(), Some('.' | '!' | '?' | '…'))
 }
 
 fn format_srt(segments: &[TimedText]) -> String {
@@ -201,7 +210,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_python_overlap_merge_and_formatting() {
+    fn linearizes_overlap_and_formats_segments() {
         let input = concat!(
             "ignored header\n",
             "1\n00:00:00,000  -->   00:00:00,400 trailing data\nHello\nworld\n\n",
@@ -217,15 +226,38 @@ mod tests {
 
         assert_eq!(
             (raw.len(), linearized.len(), final_segments.len()),
-            (5, 4, 2)
+            (5, 4, 3)
         );
         assert_eq!(
             format_srt(&final_segments),
             concat!(
-                "1\n00:00:00,000 --> 00:00:05,000\nHello world again tail\n\n",
-                "2\n00:00:10,000 --> 00:00:11,000\nstop\n\n",
+                "1\n00:00:00,000 --> 00:00:02,000\nHello world again\n\n",
+                "2\n00:00:04,100 --> 00:00:05,000\ntail\n\n",
+                "3\n00:00:10,000 --> 00:00:11,000\nstop\n\n",
             )
         );
         assert_eq!(seconds_to_time(59.9996), "00:00:60,000");
+    }
+
+    #[test]
+    fn merge_keeps_complete_sentences_but_joins_fragments() {
+        let complete = TimedText {
+            start_sec: 0.0,
+            end_sec: 3.0,
+            text: "The application is ready.".to_owned(),
+        };
+        let fragment = TimedText {
+            start_sec: 0.0,
+            end_sec: 3.0,
+            text: "The application is".to_owned(),
+        };
+        let next = TimedText {
+            start_sec: 3.1,
+            end_sec: 5.0,
+            text: "ready to run.".to_owned(),
+        };
+
+        assert!(!can_merge(&complete, &next));
+        assert!(can_merge(&fragment, &next));
     }
 }

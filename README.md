@@ -81,6 +81,24 @@ and one matching SRT under `assets/srt/`. Subtitle language
 fallback is English, European languages, Chinese, Portuguese, Japanese, Korean,
 Indonesian, Hindi, Arabic, then any other available language.
 
+### Dubora Hub and library organization
+
+**Dubora Hub** is the first item in the desktop sidebar. It plays a source video
+inside the app with its matching input SRT, native volume controls, 0.5x–2x speed
+selection, seeking, and fullscreen. The Library also has a play button for each
+video, so a video can be opened without leaving the file-management workflow.
+
+The Library supports list and grid views, sorting by name or added date, and
+grouping by name, added date, course, or no grouping. A course is the first
+directory under `assets/video/`; for example, `assets/video/Rust Basics/lesson-01.mp4`
+appears under the `Rust Basics` course group. Grid view uses the video frame directly
+and does not generate or persist thumbnail files.
+
+Create a playlist in the Library or Hub, select that playlist, then select videos in
+the Library and use **Add**. Playlists are stored locally in the Dubora app config
+and are scoped to their project root. Renaming or deleting a video also updates its
+playlist entries.
+
 ### Build via GitHub Actions (recommended)
 
 Workflow: `.github/workflows/build-windows.yml` (runs on `windows-latest`).

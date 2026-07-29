@@ -20,6 +20,7 @@ pub fn run() {
             commands::scan_videos,
             commands::rename_video,
             commands::delete_video,
+            commands::get_video_playback,
             commands::import_youtube,
             commands::list_voices,
             commands::default_azure_voice,

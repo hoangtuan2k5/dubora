@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,8 @@ pub struct VideoInfo {
     pub relative_path: PathBuf,
     pub has_srt: bool,
     pub has_output: bool,
+    /// Creation time when available, falling back to modification time.
+    pub added_at: u64,
 }
 
 pub fn scan_videos(root: &Path) -> Result<Vec<VideoInfo>> {
@@ -34,9 +36,18 @@ pub fn scan_videos(root: &Path) -> Result<Vec<VideoInfo>> {
                 has_srt: find_matching_srt(root, &video).is_ok(),
                 has_output: output_path(root, &video, &relative_path)?.exists(),
                 relative_path,
+                added_at: video_added_at(&video),
             })
         })
         .collect()
+}
+
+fn video_added_at(video: &Path) -> u64 {
+    fs::metadata(video)
+        .ok()
+        .and_then(|metadata| metadata.created().or_else(|_| metadata.modified()).ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_secs())
 }
 
 pub async fn create_dubs(

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   IconAlertTriangle,
   IconArrowRight,
@@ -17,12 +18,17 @@ import {
   IconFolderOpen,
   IconKey,
   IconLibrary,
+  IconLayoutGrid,
   IconLoader2,
+  IconMaximize,
   IconMoon,
   IconMovie,
   IconPlayerPlayFilled,
+  IconPlayerPauseFilled,
   IconPlayerStopFilled,
   IconPencil,
+  IconPlaylistAdd,
+  IconPlus,
   IconRefresh,
   IconSearch,
   IconSettings,
@@ -42,6 +48,8 @@ import {
   type AzureVoice,
   type DubProgress,
   type FfmpegStatus,
+  type Playlist,
+  type VideoPlayback,
   type VideoInfo,
 } from "./tauri";
 import duboraLogoDark from "./assets/dubora-logo-dark.svg";
@@ -53,6 +61,7 @@ const DEFAULT_CONFIG: AppConfig = {
   azureRegion: "southeastasia",
   azureVoice: DEFAULT_AZURE_VOICE,
   geminiKeys: "",
+  playlists: [],
 };
 
 const POPULAR_LOCALES = ["vi-VN", "en-US", "de-DE", "zh-CN", "ja-JP", "ko-KR", "fr-FR", "en-GB"] as const;
@@ -132,6 +141,129 @@ function outputPath(root: string, relativePath?: string) {
   if (!relativePath) return joinPath(root, "outputs");
   const file = relativePath.replace(/\.[^./\\]+$/, ".vi-dub.mp4");
   return joinPath(root, "outputs", file);
+}
+
+type LibraryView = "list" | "grid";
+type LibrarySort = "name" | "added";
+type LibraryGroup = "none" | "name" | "date" | "course";
+
+function videoName(video: VideoInfo) {
+  return video.relativePath.split(/[\\/]/).at(-1) ?? video.relativePath;
+}
+
+function videoCourse(video: VideoInfo) {
+  const parts = video.relativePath.split(/[\\/]/);
+  return parts.length > 1 ? parts[0] : "Chưa phân khóa học";
+}
+
+function formatAddedAt(seconds: number) {
+  return seconds ? new Intl.DateTimeFormat("vi-VN", { dateStyle: "medium" }).format(new Date(seconds * 1000)) : "Không rõ";
+}
+
+function formatDuration(seconds: number) {
+  if (!Number.isFinite(seconds)) return "0:00";
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
+}
+
+function VideoPlayer({
+  video,
+  playback,
+  loading,
+  onClose,
+}: {
+  video: VideoInfo | null;
+  playback: VideoPlayback | null;
+  loading: boolean;
+  onClose: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [rate, setRate] = useState(1);
+
+  useEffect(() => {
+    const element = videoRef.current;
+    if (!element || !playback) return;
+    const track = element.addTextTrack("subtitles", "Tiếng Việt", "vi");
+    track.mode = "showing";
+    playback.cues.forEach((cue) => track.addCue(new VTTCue(cue.start, cue.end, cue.text)));
+    element.play().catch(() => {});
+    return () => {
+      track.mode = "disabled";
+      Array.from(track.cues ?? []).forEach((cue) => track.removeCue(cue));
+    };
+  }, [playback]);
+
+  if (!video) {
+    return <div className="player-empty"><IconPlayerPlayFilled size={28} /><p>Chọn video để bắt đầu xem.</p></div>;
+  }
+
+  const togglePlay = () => {
+    const element = videoRef.current;
+    if (!element) return;
+    if (element.paused) element.play().catch(() => {});
+    else element.pause();
+  };
+
+  const seek = (value: number) => {
+    const element = videoRef.current;
+    if (element) element.currentTime = value;
+  };
+
+  const changeRate = (nextRate: number) => {
+    const element = videoRef.current;
+    if (element) element.playbackRate = nextRate;
+    setRate(nextRate);
+  };
+
+  const toggleFullscreen = () => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void panel.requestFullscreen();
+  };
+
+  return (
+    <section className="media-player" ref={panelRef} aria-label={`Trình phát ${videoName(video)}`}>
+      <div className="media-player-head">
+        <div><span>Đang phát</span><strong>{videoName(video)}</strong></div>
+        <button className="icon-button" onClick={onClose} aria-label="Đóng trình phát" data-tooltip="Đóng"><IconX size={18} /></button>
+      </div>
+      <div className="media-frame">
+        {playback ? (
+          <video
+            key={playback.videoPath}
+            ref={videoRef}
+            src={convertFileSrc(playback.videoPath)}
+            controls
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+            onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+            onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
+          />
+        ) : (
+          <div className="player-loading">{loading ? <IconLoader2 className="spin" size={24} /> : <IconAlertTriangle size={24} />} {loading ? "Đang mở video…" : "Không thể mở video."}</div>
+        )}
+      </div>
+      {playback && (
+        <div className="media-controls">
+          <button className="icon-button" onClick={togglePlay} aria-label={playing ? "Tạm dừng" : "Phát"} data-tooltip={playing ? "Tạm dừng" : "Phát"}>
+            {playing ? <IconPlayerPauseFilled size={19} /> : <IconPlayerPlayFilled size={19} />}
+          </button>
+          <span>{formatDuration(currentTime)}</span>
+          <input aria-label="Tiến độ video" type="range" min="0" max={duration || 0} step="0.1" value={currentTime} onChange={(event) => seek(Number(event.target.value))} />
+          <span>{formatDuration(duration)}</span>
+          <select aria-label="Tốc độ phát" value={rate} onChange={(event) => changeRate(Number(event.target.value))}>
+            {[0.5, 0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{value}×</option>)}
+          </select>
+          <button className="icon-button" onClick={toggleFullscreen} aria-label="Toàn màn hình" data-tooltip="Toàn màn hình"><IconMaximize size={19} /></button>
+        </div>
+      )}
+    </section>
+  );
 }
 
 const TIP_DELAY_MS = 500;
@@ -395,7 +527,7 @@ function ProjectStructureDiagram() {
 }
 
 function App() {
-  const [view, setView] = useState<"library" | "settings" | "guide">("library");
+  const [view, setView] = useState<"hub" | "library" | "settings" | "guide">("library");
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     localStorage.getItem("theme") === "light" ? "light" : "dark",
   );
@@ -404,6 +536,13 @@ function App() {
   const [videos, setVideos] = useState<VideoInfo[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
+  const [libraryView, setLibraryView] = useState<LibraryView>("list");
+  const [librarySort, setLibrarySort] = useState<LibrarySort>("name");
+  const [libraryGroup, setLibraryGroup] = useState<LibraryGroup>("none");
+  const [activePlaylist, setActivePlaylist] = useState("all");
+  const [activeVideo, setActiveVideo] = useState<VideoInfo | null>(null);
+  const [playback, setPlayback] = useState<VideoPlayback | null>(null);
+  const [loadingPlayback, setLoadingPlayback] = useState(false);
   const [force, setForce] = useState(false);
   const [forceTts, setForceTts] = useState(false);
   const [translate, setTranslate] = useState(false);
@@ -432,6 +571,7 @@ function App() {
   const logEndRef = useRef<HTMLDivElement>(null);
   const projectRootRef = useRef("");
   const scanRequestRef = useRef(0);
+  const playRequestRef = useRef(0);
 
   const scan = async (root = config.projectRoot): Promise<boolean> => {
     const requestId = ++scanRequestRef.current;
@@ -489,7 +629,7 @@ function App() {
   }, [savedConfig.projectRoot]);
 
   useEffect(() => {
-    if (view !== "library" || !config.projectRoot) return;
+    if ((view !== "library" && view !== "hub") || !config.projectRoot) return;
     const timer = window.setInterval(() => {
       void api.scanVideos(config.projectRoot).then(refreshVideos).catch(() => {});
     }, 5_000);
@@ -587,12 +727,38 @@ function App() {
     logEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [logs]);
 
+  const projectPlaylists = useMemo(
+    () => config.playlists.filter((playlist) => playlist.projectRoot === config.projectRoot),
+    [config.playlists, config.projectRoot],
+  );
+
   const visibleVideos = useMemo(() => {
     const term = query.trim().toLocaleLowerCase("vi");
-    return term
-      ? videos.filter((video) => video.relativePath.toLocaleLowerCase("vi").includes(term))
-      : videos;
-  }, [query, videos]);
+    const playlist = projectPlaylists.find((item) => item.id === activePlaylist);
+    const list = videos.filter((video) =>
+      (!term || video.relativePath.toLocaleLowerCase("vi").includes(term))
+      && (!playlist || playlist.videoPaths.includes(video.relativePath)),
+    );
+    return list.sort((left, right) =>
+      librarySort === "added"
+        ? right.addedAt - left.addedAt || videoName(left).localeCompare(videoName(right), "vi")
+        : videoName(left).localeCompare(videoName(right), "vi"),
+    );
+  }, [activePlaylist, librarySort, projectPlaylists, query, videos]);
+
+  const videoGroups = useMemo(() => {
+    if (libraryGroup === "none") return [{ label: "", videos: visibleVideos }];
+    const groups = new Map<string, VideoInfo[]>();
+    visibleVideos.forEach((video) => {
+      const label = libraryGroup === "course"
+        ? videoCourse(video)
+        : libraryGroup === "date"
+          ? formatAddedAt(video.addedAt)
+          : (videoName(video).trim().charAt(0).toLocaleUpperCase("vi") || "#");
+      groups.set(label, [...(groups.get(label) ?? []), video]);
+    });
+    return [...groups.entries()].map(([label, groupedVideos]) => ({ label, videos: groupedVideos }));
+  }, [libraryGroup, visibleVideos]);
 
   const progressValue = progress
     ? progress.stage === "tts" && progress.current != null && progress.total
@@ -810,6 +976,66 @@ function App() {
     }
   };
 
+  const savePlaylists = async (playlists: Playlist[]) => {
+    const updated = { ...savedConfig, playlists };
+    await api.saveConfig(updated);
+    setConfig(updated);
+    setSavedConfig(updated);
+  };
+
+  const createPlaylist = async () => {
+    if (!config.projectRoot) return;
+    const name = window.prompt("Tên playlist mới")?.trim();
+    if (!name) return;
+    const playlist: Playlist = {
+      id: globalThis.crypto.randomUUID(),
+      projectRoot: config.projectRoot,
+      name,
+      videoPaths: [],
+    };
+    try {
+      await savePlaylists([...config.playlists, playlist]);
+      setActivePlaylist(playlist.id);
+      setNotice(`Đã tạo playlist “${name}”.`);
+    } catch (error) {
+      setNotice(`Không thể lưu playlist: ${describeError(error)}`);
+    }
+  };
+
+  const addSelectedToPlaylist = async () => {
+    const playlist = projectPlaylists.find((item) => item.id === activePlaylist);
+    if (!playlist || !selected.size) return;
+    const videoPaths = [...new Set([...playlist.videoPaths, ...selected])];
+    try {
+      await savePlaylists(config.playlists.map((item) => item.id === playlist.id ? { ...item, videoPaths } : item));
+      setNotice(`Đã thêm ${selected.size} video vào “${playlist.name}”.`);
+    } catch (error) {
+      setNotice(`Không thể cập nhật playlist: ${describeError(error)}`);
+    }
+  };
+
+  const closePlayer = () => {
+    ++playRequestRef.current;
+    setActiveVideo(null);
+    setPlayback(null);
+    setLoadingPlayback(false);
+  };
+
+  const playVideo = async (video: VideoInfo) => {
+    const requestId = ++playRequestRef.current;
+    setActiveVideo(video);
+    setPlayback(null);
+    setLoadingPlayback(true);
+    try {
+      const nextPlayback = await api.getVideoPlayback(video.relativePath);
+      if (requestId === playRequestRef.current) setPlayback(nextPlayback);
+    } catch (error) {
+      if (requestId === playRequestRef.current) setNotice(`Không thể mở video: ${describeError(error)}`);
+    } finally {
+      if (requestId === playRequestRef.current) setLoadingPlayback(false);
+    }
+  };
+
   const renameVideo = async (video: VideoInfo) => {
     const filename = video.relativePath.split(/[\\/]/).at(-1) ?? "";
     const extension = filename.lastIndexOf(".");
@@ -820,6 +1046,12 @@ function App() {
       const result = await api.renameVideo(video.relativePath, newStem);
       setVideos(result.videos);
       setSelected((current) => new Set([...current].filter((path) => path !== video.relativePath)));
+      const newPath = video.relativePath.slice(0, -filename.length) + `${newStem}${filename.slice(extension)}`;
+      await savePlaylists(config.playlists.map((playlist) => ({
+        ...playlist,
+        videoPaths: playlist.videoPaths.map((path) => path === video.relativePath ? newPath : path),
+      })));
+      if (activeVideo?.relativePath === video.relativePath) closePlayer();
       setNotice(`Đã đổi tên video${video.hasSrt ? " và SRT tương ứng" : ""}.`);
     } catch (error) {
       setNotice(`Không thể đổi tên video: ${describeError(error)}`);
@@ -832,6 +1064,11 @@ function App() {
       const result = await api.deleteVideo(video.relativePath);
       setVideos(result.videos);
       setSelected((current) => new Set([...current].filter((path) => path !== video.relativePath)));
+      await savePlaylists(config.playlists.map((playlist) => ({
+        ...playlist,
+        videoPaths: playlist.videoPaths.filter((path) => path !== video.relativePath),
+      })));
+      if (activeVideo?.relativePath === video.relativePath) closePlayer();
       setNotice(`Đã xóa video${video.hasSrt ? " và SRT tương ứng" : ""}.`);
     } catch (error) {
       setNotice(`Không thể xóa video: ${describeError(error)}`);
@@ -894,6 +1131,9 @@ function App() {
         </div>
 
         <nav className="nav" aria-label="Điều hướng chính">
+          <button className={view === "hub" ? "active" : ""} onClick={() => setView("hub")}>
+            <IconPlayerPlayFilled size={19} /> Dubora Hub
+          </button>
           <button
             className={view === "library" ? "active" : ""}
             onClick={() => {
@@ -933,7 +1173,7 @@ function App() {
       <main>
         <header className="topbar">
           <div className="breadcrumb" aria-live="polite">
-            {view === "library" ? "Thư viện" : view === "settings" ? "Thiết lập" : "Hướng dẫn"}
+            {view === "hub" ? "Dubora Hub" : view === "library" ? "Thư viện" : view === "settings" ? "Thiết lập" : "Hướng dẫn"}
           </div>
           <div className="root-chip" data-tooltip={config.projectRoot || "Chưa chọn project root"}>
             <IconFolder size={16} />
@@ -1142,6 +1382,13 @@ function App() {
                     <strong>Quét lại</strong> — làm mới danh sách sau khi thêm file.
                   </li>
                   <li>
+                    <strong>Nút Phát</strong> trên từng hàng — mở video trong app, kèm SRT khớp tên.
+                  </li>
+                  <li>
+                    <strong>Danh sách / lưới</strong>, sắp xếp theo tên hoặc ngày thêm; nhóm theo tên,
+                    ngày hoặc khóa học (folder cấp một trong <code>assets/video</code>).
+                  </li>
+                  <li>
                     Cột <strong>SRT</strong> / <strong>Output</strong> — biết file nào sẵn sàng
                     dub / đã có bản lồng tiếng.
                   </li>
@@ -1171,6 +1418,25 @@ function App() {
                 <div className="panel-title">
                   <span className="number">07</span>
                   <div>
+                    <h2>Dubora Hub</h2>
+                    <p className="lead">Không gian xem và tổ chức video trong project.</p>
+                  </div>
+                </div>
+                <ul>
+                  <li><strong>Phát video:</strong> dùng player tích hợp, tự nạp SRT trùng tên nếu có.</li>
+                  <li><strong>Tốc độ và toàn màn hình:</strong> chọn 0.5×–2× dưới player; nút góc phải đưa toàn bộ player vào toàn màn hình.</li>
+                  <li><strong>Playlist:</strong> tạo playlist, chọn nó, rồi chọn video ở Thư viện và bấm <strong>Thêm</strong>. Playlist chỉ lưu cục bộ theo Project root.</li>
+                  <li><strong>Khóa học:</strong> để video trong <code>assets/video/Ten-khoa-hoc/</code> để nhóm theo khóa học.</li>
+                </ul>
+                <button type="button" className="guide-link" onClick={() => setView("hub")}>
+                  Mở Dubora Hub <IconArrowRight size={16} />
+                </button>
+              </article>
+
+              <article className="panel guide-card">
+                <div className="panel-title">
+                  <span className="number">08</span>
+                  <div>
                     <h2>Tác giả</h2>
                     <p className="lead">Thông tin liên hệ và mã nguồn.</p>
                   </div>
@@ -1199,7 +1465,7 @@ function App() {
 
               <article className="panel guide-card">
                 <div className="panel-title">
-                  <span className="number">08</span>
+                  <span className="number">09</span>
                   <div>
                     <h2>Yêu cầu hệ thống &amp; lưu ý</h2>
                     <p className="lead">Những điều cần biết trước khi chạy batch lớn.</p>
@@ -1238,6 +1504,46 @@ function App() {
                 Dubora v0.1.0 · © 2026 Hoàng Chiều Nguyễn Tuấn · tuan@hoangtuan.dev ·{" "}
                 github.com/hoangtuan2k5
               </p>
+            </div>
+          </section>
+        ) : view === "hub" ? (
+          <section className="hub-page page-enter" aria-label="Dubora Hub">
+            <div className="hub-layout">
+              <article className="panel hub-intro">
+                <div>
+                  <span className="eyebrow">DUBORA HUB</span>
+                  <h1>Xem, sắp xếp, tiếp tục.</h1>
+                  <p>Trình phát nội bộ dùng video và SRT trong project hiện tại.</p>
+                </div>
+                <div className="hub-playlist-actions">
+                  <label className="sr-only" htmlFor="hub-playlist">Playlist đang xem</label>
+                  <select id="hub-playlist" value={activePlaylist} onChange={(event) => setActivePlaylist(event.target.value)}>
+                    <option value="all">Toàn bộ thư viện</option>
+                    {projectPlaylists.map((playlist) => <option key={playlist.id} value={playlist.id}>{playlist.name}</option>)}
+                  </select>
+                  <button className="secondary-button" onClick={() => void createPlaylist()} disabled={!config.projectRoot}><IconPlus size={18} /> Playlist</button>
+                  <button className="secondary-button" onClick={() => void addSelectedToPlaylist()} disabled={activePlaylist === "all" || !selected.size}><IconPlaylistAdd size={18} /> Thêm đã chọn</button>
+                </div>
+              </article>
+
+              <VideoPlayer video={activeVideo} playback={playback} loading={loadingPlayback} onClose={closePlayer} />
+
+              <article className="panel hub-queue">
+                <div className="panel-title">
+                  <span className="number">{String(visibleVideos.length).padStart(2, "0")}</span>
+                  <div><h2>{activePlaylist === "all" ? "Video trong thư viện" : projectPlaylists.find((item) => item.id === activePlaylist)?.name}</h2><p>Chọn một video để phát ngay.</p></div>
+                </div>
+                <div className="hub-video-list">
+                  {visibleVideos.map((video) => (
+                    <button key={video.relativePath} className={activeVideo?.relativePath === video.relativePath ? "hub-video active" : "hub-video"} onClick={() => void playVideo(video)}>
+                      <span className="hub-video-icon"><IconPlayerPlayFilled size={17} /></span>
+                      <span><strong>{videoName(video)}</strong><small>{videoCourse(video)} · {formatAddedAt(video.addedAt)}</small></span>
+                      <span className={`badge ${video.hasSrt ? "success" : "danger"}`}>{video.hasSrt ? "SRT" : "Thiếu SRT"}</span>
+                    </button>
+                  ))}
+                  {!visibleVideos.length && <div className="player-empty"><IconVideo size={28} /><p>Playlist này chưa có video.</p></div>}
+                </div>
+              </article>
             </div>
           </section>
         ) : view === "settings" ? (
@@ -1633,6 +1939,29 @@ function App() {
                 <div className="library-count">
                   <strong>{selected.size}</strong> đã chọn <span>/</span> {videos.length} video
                 </div>
+                <div className="library-tools" aria-label="Tổ chức thư viện">
+                  <button className={`tool-button icon-only ${libraryView === "list" ? "active" : ""}`} onClick={() => setLibraryView("list")} aria-label="Dạng danh sách" data-tooltip="Dạng danh sách"><IconLibrary size={17} /></button>
+                  <button className={`tool-button icon-only ${libraryView === "grid" ? "active" : ""}`} onClick={() => setLibraryView("grid")} aria-label="Dạng lưới" data-tooltip="Dạng lưới"><IconLayoutGrid size={17} /></button>
+                  <label className="sr-only" htmlFor="library-sort">Sắp xếp</label>
+                  <select id="library-sort" value={librarySort} onChange={(event) => setLibrarySort(event.target.value as LibrarySort)}>
+                    <option value="name">Tên A–Z</option>
+                    <option value="added">Mới thêm</option>
+                  </select>
+                  <label className="sr-only" htmlFor="library-group">Nhóm video</label>
+                  <select id="library-group" value={libraryGroup} onChange={(event) => setLibraryGroup(event.target.value as LibraryGroup)}>
+                    <option value="none">Không nhóm</option>
+                    <option value="course">Theo khóa học</option>
+                    <option value="date">Theo ngày thêm</option>
+                    <option value="name">Theo tên</option>
+                  </select>
+                  <label className="sr-only" htmlFor="library-playlist">Lọc playlist</label>
+                  <select id="library-playlist" value={activePlaylist} onChange={(event) => setActivePlaylist(event.target.value)}>
+                    <option value="all">Mọi playlist</option>
+                    {projectPlaylists.map((playlist) => <option key={playlist.id} value={playlist.id}>{playlist.name}</option>)}
+                  </select>
+                  <button className="tool-button" onClick={() => void createPlaylist()} disabled={!config.projectRoot}><IconPlus size={16} /> Playlist</button>
+                  <button className="tool-button" onClick={() => void addSelectedToPlaylist()} disabled={activePlaylist === "all" || !selected.size}><IconPlaylistAdd size={16} /> Thêm</button>
+                </div>
                 <div className="option-chips" role="group" aria-label="Tùy chọn dub">
                   <OptionChip
                     id="force"
@@ -1714,28 +2043,53 @@ function App() {
                 ) : !videos.length && !scanning ? (
                   <div className="empty-state"><IconVideo size={38} /><h2>Chưa tìm thấy video</h2><p>Bỏ file vào assets/video (và SRT khớp trong assets/srt), rồi quét lại.</p></div>
                 ) : (
-                  <div className="table-scroll">
-                    <table>
-                      <thead><tr><th className="check-cell"><input type="checkbox" aria-label="Chọn tất cả video đang hiển thị" checked={visibleVideos.length > 0 && visibleVideos.every((video) => selected.has(video.relativePath))} onChange={toggleAllVisible} /></th><th>Video / đường dẫn tương đối</th><th>SRT</th><th>Output</th><th><span className="sr-only">Tác vụ</span></th></tr></thead>
-                      <tbody>
-                        {visibleVideos.map((video) => (
-                          <tr key={video.relativePath} className={selected.has(video.relativePath) ? "selected" : ""}>
-                            <td className="check-cell"><input type="checkbox" aria-label={`Chọn ${video.relativePath}`} checked={selected.has(video.relativePath)} onChange={() => toggleSelected(video.relativePath)} /></td>
-                            <td><button className="video-name" onClick={() => toggleSelected(video.relativePath)}><span className="file-icon"><IconVideo size={18} /></span><span><strong>{video.relativePath.split(/[\\/]/).at(-1)}</strong><small>{video.relativePath}</small></span></button></td>
-                            <td><span className={`badge ${video.hasSrt ? "success" : "danger"}`}>{video.hasSrt ? <IconCheck size={14} /> : <IconX size={14} />}{video.hasSrt ? "Có SRT" : "Thiếu"}</span></td>
-                            <td><span className={`badge ${video.hasOutput ? "cyan" : "muted"}`}><span className="mini-dot" />{video.hasOutput ? "Đã dub" : "Chưa có"}</span></td>
-                            <td>
-                              <div className="row-actions">
-                                <button className="icon-button row-action" disabled={busy} onClick={() => void renameVideo(video)} aria-label={`Đổi tên ${video.relativePath}`} data-tooltip="Đổi tên video và SRT"><IconPencil size={18} /></button>
-                                <button className="icon-button row-action danger" disabled={busy} onClick={() => void deleteVideo(video)} aria-label={`Xóa ${video.relativePath}`} data-tooltip="Xóa video và SRT"><IconTrash size={18} /></button>
-                                <button className="icon-button row-action" disabled={!video.hasOutput} onClick={() => openPath(outputPath(config.projectRoot, video.relativePath))} aria-label={`Mở output của ${video.relativePath}`} data-tooltip="Mở output"><IconFolderOpen size={18} /></button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  !visibleVideos.length ? (
+                    <div className="empty-state"><IconFilter size={38} /><h2>Không có video phù hợp</h2><p>Đổi playlist, từ khóa tìm kiếm hoặc cách lọc để xem lại video.</p></div>
+                  ) : libraryView === "list" ? (
+                    <div className="table-scroll">
+                      <table>
+                        <thead><tr><th className="check-cell"><input type="checkbox" aria-label="Chọn tất cả video đang hiển thị" checked={visibleVideos.every((video) => selected.has(video.relativePath))} onChange={toggleAllVisible} /></th><th>Video / đường dẫn tương đối</th><th>SRT</th><th>Output</th><th><span className="sr-only">Tác vụ</span></th></tr></thead>
+                        <tbody>
+                          {videoGroups.flatMap((group) => [
+                            ...(group.label ? [<tr className="library-group-row" key={`group-${group.label}`}><td colSpan={5}>{group.label} <span>{group.videos.length}</span></td></tr>] : []),
+                            ...group.videos.map((video) => (
+                              <tr key={video.relativePath} className={selected.has(video.relativePath) ? "selected" : ""}>
+                                <td className="check-cell"><input type="checkbox" aria-label={`Chọn ${video.relativePath}`} checked={selected.has(video.relativePath)} onChange={() => toggleSelected(video.relativePath)} /></td>
+                                <td><button className="video-name" onClick={() => toggleSelected(video.relativePath)}><span className="file-icon"><IconVideo size={18} /></span><span><strong>{videoName(video)}</strong><small>{video.relativePath} · Thêm {formatAddedAt(video.addedAt)}</small></span></button></td>
+                                <td><span className={`badge ${video.hasSrt ? "success" : "danger"}`}>{video.hasSrt ? <IconCheck size={14} /> : <IconX size={14} />}{video.hasSrt ? "Có SRT" : "Thiếu"}</span></td>
+                                <td><span className={`badge ${video.hasOutput ? "cyan" : "muted"}`}><span className="mini-dot" />{video.hasOutput ? "Đã dub" : "Chưa có"}</span></td>
+                                <td><div className="row-actions">
+                                  <button className="icon-button row-action" onClick={() => void playVideo(video)} aria-label={`Phát ${video.relativePath}`} data-tooltip="Phát trong Dubora"><IconPlayerPlayFilled size={18} /></button>
+                                  <button className="icon-button row-action" disabled={busy} onClick={() => void renameVideo(video)} aria-label={`Đổi tên ${video.relativePath}`} data-tooltip="Đổi tên video và SRT"><IconPencil size={18} /></button>
+                                  <button className="icon-button row-action danger" disabled={busy} onClick={() => void deleteVideo(video)} aria-label={`Xóa ${video.relativePath}`} data-tooltip="Xóa video và SRT"><IconTrash size={18} /></button>
+                                  <button className="icon-button row-action" disabled={!video.hasOutput} onClick={() => openPath(outputPath(config.projectRoot, video.relativePath))} aria-label={`Mở output của ${video.relativePath}`} data-tooltip="Mở output"><IconFolderOpen size={18} /></button>
+                                </div></td>
+                              </tr>
+                            )),
+                          ])}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="video-grid-scroll">
+                      {videoGroups.map((group) => (
+                        <section key={group.label || "all"} className="video-grid-group">
+                          {group.label && <h2>{group.label}<span>{group.videos.length}</span></h2>}
+                          <div className="video-grid">
+                            {group.videos.map((video) => (
+                              <article key={video.relativePath} className={selected.has(video.relativePath) ? "video-card selected" : "video-card"}>
+                                <button className="video-card-preview" onClick={() => void playVideo(video)} aria-label={`Phát ${videoName(video)}`}>
+                                  <video muted playsInline preload="metadata" src={convertFileSrc(joinPath(config.projectRoot, "assets", "video", video.relativePath))} onLoadedMetadata={(event) => { event.currentTarget.currentTime = Math.min(0.1, event.currentTarget.duration / 10); }} />
+                                  <span><IconPlayerPlayFilled size={24} /></span>
+                                </button>
+                                <div className="video-card-body"><div><strong>{videoName(video)}</strong><small>{videoCourse(video)} · {formatAddedAt(video.addedAt)}</small></div><input type="checkbox" aria-label={`Chọn ${video.relativePath}`} checked={selected.has(video.relativePath)} onChange={() => toggleSelected(video.relativePath)} /></div>
+                              </article>
+                            ))}
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                  )
                 )}
               </article>
 
@@ -1803,6 +2157,11 @@ function App() {
                 </div>
               </article>
             </div>
+            {activeVideo && (
+              <div className="library-player-overlay" role="dialog" aria-modal="true" aria-label="Trình phát video">
+                <VideoPlayer video={activeVideo} playback={playback} loading={loadingPlayback} onClose={closePlayer} />
+              </div>
+            )}
           </section>
         )}
       </main>
