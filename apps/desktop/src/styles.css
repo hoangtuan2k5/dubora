@@ -1106,6 +1106,13 @@ h1 {
   background: #000;
 }
 
+.media-frame video::cue {
+  color: #fff;
+  background: rgba(8, 13, 20, 0.42);
+  font-family: "Be Vietnam Pro", system-ui, sans-serif;
+  font-weight: 600;
+}
+
 .player-loading,
 .player-empty {
   display: grid;
@@ -1712,7 +1719,7 @@ th:nth-child(4) {
 }
 
 th:last-child {
-  width: 118px;
+  width: 170px;
 }
 
 th,
@@ -2552,6 +2559,10 @@ button.guide-link:hover {
   th:nth-child(3),
   th:nth-child(4) {
     width: 80px;
+  }
+
+  th:last-child {
+    width: 170px;
   }
 
   .progress-panel.job-monitor {

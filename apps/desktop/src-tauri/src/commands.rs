@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use dubora_core::ffmpeg::FfmpegPaths;
 use dubora_core::youtube::select_subtitle_language;
-use dubora_core::paths::find_matching_srt;
+use dubora_core::paths::{companion_output_srt, find_matching_srt, output_path};
 use dubora_core::srt::{parse_srt, time_to_seconds};
 use dubora_core::{
     AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
@@ -235,9 +235,19 @@ pub fn get_video_playback(app: AppHandle, relative_path: String) -> Result<Video
         return Err("Video phải nằm trong assets/video".to_owned());
     }
 
-    let cues = find_matching_srt(&root, &video)
+    // Prefer the Vietnamese dubbed output when it exists; source is the fallback for previews.
+    let relative = video.strip_prefix(&video_dir).unwrap_or(relative);
+    let output = output_path(&root, &video, relative).map_err(|error| format!("{error:#}"))?;
+    let (playback_video, subtitle) = if output.is_file() {
+        let subtitle = companion_output_srt(&output);
+        (output, subtitle)
+    } else {
+        let subtitle = find_matching_srt(&root, &video).unwrap_or_default();
+        (video, subtitle)
+    };
+
+    let cues = parse_srt(&subtitle)
         .ok()
-        .and_then(|srt| parse_srt(&srt).ok())
         .unwrap_or_default()
         .into_iter()
         .filter_map(|segment| Some(SubtitleCue {
@@ -248,7 +258,7 @@ pub fn get_video_playback(app: AppHandle, relative_path: String) -> Result<Video
         .collect();
 
     Ok(VideoPlayback {
-        video_path: video.display().to_string(),
+        video_path: playback_video.display().to_string(),
         cues,
     })
 }
