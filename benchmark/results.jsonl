@@ -1,0 +1,50 @@
+{"file": "1. Introduction.srt", "dur_min": 1.24, "chars_en": 948, "chars_vi": 1201, "prompt_tokens": 922, "completion_tokens": 4674, "finish": "stop", "secs": 32.7}
+{"file": "10. Spring Projects.srt", "dur_min": 2.12, "chars_en": 2230, "chars_vi": 2105, "prompt_tokens": 1953, "completion_tokens": 14547, "finish": "stop", "secs": 84.4}
+{"file": "11. What is Maven.srt", "dur_min": 4.9, "chars_en": 4471, "chars_vi": 4107, "prompt_tokens": 3424, "completion_tokens": 10070, "finish": "stop", "secs": 56.8}
+{"file": "12. Maven Project Structure.srt", "dur_min": 4.22, "chars_en": 3339, "chars_vi": 4009, "prompt_tokens": 3293, "completion_tokens": 3880, "finish": "stop", "secs": 22.0}
+{"file": "13. Maven Key Concepts.srt", "dur_min": 6.83, "chars_en": 5810, "chars_vi": 6969, "prompt_tokens": 5223, "completion_tokens": 28472, "finish": "stop", "secs": 174.7}
+{"file": "14. Exploring Spring Boot Project Files - Part 1.srt", "dur_min": 5.13, "chars_en": 4284, "chars_vi": 4968, "prompt_tokens": 4041, "completion_tokens": 11249, "finish": "stop", "secs": 65.8}
+{"file": "15. Exploring Spring Boot Project Files - Part 2.srt", "dur_min": 4.73, "chars_en": 4023, "chars_vi": 4680, "prompt_tokens": 3752, "completion_tokens": 10829, "finish": "stop", "secs": 63.4}
+{"file": "16. Spring Boot Starters.srt", "dur_min": 6.5, "chars_en": 5284, "chars_vi": 5963, "prompt_tokens": 4939, "completion_tokens": 12137, "finish": "stop", "secs": 61.9}
+{"file": "17. Spring Boot Parents for Starters.srt", "dur_min": 2.74, "chars_en": 3050, "chars_vi": 2871, "prompt_tokens": 2196, "completion_tokens": 21315, "finish": "stop", "secs": 109.4}
+{"file": "18. Spring Boot Dev Tools - Overview.srt", "dur_min": 2.47, "chars_en": 1717, "chars_vi": 2008, "prompt_tokens": 1674, "completion_tokens": 6772, "finish": "stop", "secs": 44.8}
+{"file": "19. Spring Boot Dev Tools - Coding.srt", "dur_min": 10.67, "chars_en": 5635, "chars_vi": 6636, "prompt_tokens": 5232, "completion_tokens": 18842, "finish": "stop", "secs": 106.5}
+{"file": "20. Spring Boot Actuator - Overview.srt", "dur_min": 6.59, "chars_en": 5493, "chars_vi": 6530, "prompt_tokens": 5007, "completion_tokens": 11737, "finish": "stop", "secs": 63.0}
+{"file": "21. Spring Boot Actuator - Accessing Endpoints - Part 1.srt", "dur_min": 7.43, "chars_en": 4064, "chars_vi": 4091, "prompt_tokens": 3211, "completion_tokens": 17031, "finish": "stop", "secs": 87.4}
+{"file": "22. Spring Boot Actuator - Accessing Endpoints - Part 2.srt", "dur_min": 5.99, "chars_en": 3433, "chars_vi": 4089, "prompt_tokens": 3208, "completion_tokens": 16255, "finish": "stop", "secs": 95.5}
+{"file": "23. Spring Boot Actuator - Securing Endpoints - Overview.srt", "dur_min": 3.2, "chars_en": 3244, "chars_vi": 3262, "prompt_tokens": 2445, "completion_tokens": 8386, "finish": "stop", "secs": 49.8}
+{"file": "24. Spring Boot Actuator - Securing Endpoints - Coding.srt", "dur_min": 7.89, "chars_en": 4103, "chars_vi": 4615, "prompt_tokens": 3895, "completion_tokens": 11270, "finish": "stop", "secs": 71.2}
+{"file": "25. Run Spring Boot apps from the Command Line - Overview.srt", "dur_min": 4.11, "chars_en": 3456, "chars_vi": 4045, "prompt_tokens": 3380, "completion_tokens": 11687, "finish": "stop", "secs": 74.9}
+{"file": "26. Run Spring Boot apps from the Command Line - Prep.srt", "dur_min": 3.24, "chars_en": 909, "chars_vi": 992, "prompt_tokens": 986, "completion_tokens": 3292, "finish": "stop", "secs": 21.0}
+{"file": "27. Run Spring Boot apps from the Command Line - Microsoft Windows.srt", "dur_min": 7.44, "chars_en": 6014, "chars_vi": 5327, "prompt_tokens": 4107, "completion_tokens": 9883, "finish": "stop", "secs": 111.0}
+{"file": "28. Run Spring Boot apps from the Command Line - macOS  Linux.srt", "dur_min": 5.23, "chars_en": 3463, "chars_vi": 4080, "prompt_tokens": 3400, "completion_tokens": 10038, "finish": "stop", "secs": 50.8}
+{"file": "29. Injecting Custom Application Properties - Overview.srt", "dur_min": 3.21, "chars_en": 3417, "chars_vi": 2987, "prompt_tokens": 2485, "completion_tokens": 6078, "finish": "stop", "secs": 31.6}
+{"file": "30. Injecting Custom Application Properties - Coding.srt", "dur_min": 7.51, "chars_en": 3258, "chars_vi": 3941, "prompt_tokens": 3276, "completion_tokens": 18294, "finish": "stop", "secs": 103.7}
+{"file": "31. Configuring the Spring Boot Server - Overview.srt", "dur_min": 6.22, "chars_en": 5168, "chars_vi": 6137, "prompt_tokens": 4722, "completion_tokens": 40131, "finish": "stop", "secs": 201.1}
+{"file": "32. Configuring the Spring Boot Server - Coding.srt", "dur_min": 4.73, "chars_en": 2631, "chars_vi": 3269, "prompt_tokens": 2666, "completion_tokens": 17887, "finish": "stop", "secs": 118.4}
+{"file": "4. Java Development Environment Checkpoint.srt", "dur_min": 2.26, "chars_en": 2282, "chars_vi": 2021, "prompt_tokens": 1665, "completion_tokens": 5818, "finish": "stop", "secs": 32.9}
+{"file": "5. Spring Boot Overview.srt", "dur_min": 7.25, "chars_en": 5953, "chars_vi": 7222, "prompt_tokens": 5399, "completion_tokens": 14795, "finish": "stop", "secs": 75.6}
+{"file": "6. Spring Boot Initialzr Demo.srt", "dur_min": 9.82, "chars_en": 6836, "chars_vi": 7941, "prompt_tokens": 6490, "completion_tokens": 12918, "finish": "stop", "secs": 69.7}
+{"file": "7. Spring Boot - Create a REST Controller.srt", "dur_min": 4.75, "chars_en": 2703, "chars_vi": 2709, "prompt_tokens": 2260, "completion_tokens": 2343, "finish": "stop", "secs": 12.7}
+{"file": "8. Spring Framework Overview - Part 1.srt", "dur_min": 3.82, "chars_en": 3174, "chars_vi": 3657, "prompt_tokens": 2962, "completion_tokens": 11494, "finish": "stop", "secs": 70.3}
+{"file": "9. Spring Framework Overview - Part 2.srt", "dur_min": 3.29, "chars_en": 2764, "chars_vi": 3249, "prompt_tokens": 2591, "completion_tokens": 7190, "finish": "stop", "secs": 43.8}
+{"file": "Depression, the secret we share ｜ Andrew Solomon.en-orig.srt", "dur_min": 29.34, "chars_en": 77308, "chars_vi": 4574, "prompt_tokens": 46129, "completion_tokens": 65536, "finish": "length", "secs": 349.0}
+{"file": "How to Calm Your Anxiety, From a Neuroscientist ｜ The Way We Work, a TED series.en-orig.srt", "dur_min": 7.29, "chars_en": 16647, "chars_vi": 17077, "prompt_tokens": 9790, "completion_tokens": 49066, "finish": "stop", "secs": 324.4}
+{"file": "How to Do Laundry When You're Depressed ｜ KC Davis ｜ TED.en-orig.srt", "dur_min": 12.84, "chars_en": 29845, "chars_vi": 27920, "prompt_tokens": 19304, "completion_tokens": 65535, "finish": "length", "secs": 357.5}
+{"file": "How we can bring mental health support to refugees ｜ Essam Daod.en-orig.srt", "dur_min": 5.38, "chars_en": 12409, "chars_vi": 13329, "prompt_tokens": 7423, "completion_tokens": 51994, "finish": "stop", "secs": 308.5}
+{"file": "Is Someone You Love Suffering in Silence？ Here's What To Do ｜ Gus Worland ｜ TED.en-orig.srt", "dur_min": 12.8, "chars_en": 36047, "chars_vi": 36624, "prompt_tokens": 23145, "completion_tokens": 62016, "finish": "stop", "secs": 355.5}
+{"file": "Lessons from Losing My Mind ｜ Andy Dunn ｜ TED.en-orig.srt", "dur_min": 14.5, "chars_en": 30800, "chars_vi": 34116, "prompt_tokens": 21231, "completion_tokens": 54250, "finish": "stop", "secs": 313.6}
+{"file": "Mental Health Care That Disrupts Cycles of Violence ｜ Celina de Sola ｜ TED.en.srt", "dur_min": 8.12, "chars_en": 6873, "chars_vi": 7789, "prompt_tokens": 4620, "completion_tokens": 17624, "finish": "stop", "secs": 113.9}
+{"file": "Sangu Delle： In praise of macro -- yes, macro -- finance in Africa.en-orig.srt", "dur_min": 5.84, "chars_en": 12341, "chars_vi": 13462, "prompt_tokens": 7635, "completion_tokens": 56941, "finish": "stop", "secs": 355.0}
+{"file": "Serial S01 - Ep. 3： Leakin Park.en-orig.srt", "dur_min": 27.1, "chars_en": 73856, "chars_vi": 17323, "prompt_tokens": 45308, "completion_tokens": 65536, "finish": "length", "secs": 418.5}
+{"file": "Serial Season 1 Episode 11.en-orig.srt", "dur_min": 40.47, "chars_en": 111769, "chars_vi": 17838, "prompt_tokens": 74564, "completion_tokens": 16793, "finish": "stop", "secs": 103.9}
+{"file": "Serial Season 1 Episode 12.en-orig.srt", "dur_min": 55.15, "chars_en": 151770, "chars_vi": 57998, "prompt_tokens": 102633, "completion_tokens": 48949, "finish": "stop", "secs": 272.0}
+{"file": "Serial Season 1 Episode 2.en-orig.srt", "dur_min": 36.92, "chars_en": 109205, "chars_vi": 85823, "prompt_tokens": 69256, "completion_tokens": 63038, "finish": "stop", "secs": 365.9}
+{"file": "Serial Season 1 Episode 3.en-orig.srt", "dur_min": 28.17, "chars_en": 77174, "chars_vi": 51743, "prompt_tokens": 52309, "completion_tokens": 65536, "finish": "length", "secs": 428.0}
+{"file": "Serial Season 1 Episode 4.en-orig.srt", "dur_min": 34.09, "chars_en": 94094, "chars_vi": 43784, "prompt_tokens": 65626, "completion_tokens": 65536, "finish": "length", "secs": 350.8}
+{"file": "Serial Season 1 Episode 5.en-orig.srt", "dur_min": 44.0, "chars_en": 116058, "chars_vi": 27511, "prompt_tokens": 79517, "completion_tokens": 23017, "finish": "stop", "secs": 173.8}
+{"file": "Serial Season 1 Episode 6.en-orig.srt", "dur_min": 43.9, "chars_en": 125411, "chars_vi": 75546, "prompt_tokens": 84765, "completion_tokens": 65536, "finish": "length", "secs": 355.0}
+{"file": "Serial Season 1 Episode 7.en-orig.srt", "dur_min": 32.95, "chars_en": 90493, "chars_vi": 39379, "prompt_tokens": 60922, "completion_tokens": 65536, "finish": "length", "secs": 389.6}
+{"file": "Stress Resets, the Ultimate Mental Health Hack ｜ Jenny Taitz ｜ TED.en.srt", "dur_min": 10.47, "chars_en": 8428, "chars_vi": 9605, "prompt_tokens": 6061, "completion_tokens": 16345, "finish": "stop", "secs": 98.4}
+{"file": "Why Social Health Is Key to Happiness and Longevity ｜ Kasley Killam ｜ TED.en-orig.srt", "dur_min": 9.49, "chars_en": 23990, "chars_vi": 25772, "prompt_tokens": 14222, "completion_tokens": 55306, "finish": "stop", "secs": 295.4}
+{"file": "Why we need to talk about depression ｜ Kevin Breel.en-orig.srt", "dur_min": 10.97, "chars_en": 30378, "chars_vi": 31464, "prompt_tokens": 19057, "completion_tokens": 65536, "finish": "length", "secs": 362.8}

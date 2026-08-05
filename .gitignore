@@ -2,6 +2,7 @@ work/
 outputs/
 .env
 .venv/
+.serena/
 assets/video/*
 assets/srt/*
 !assets/video/.gitkeep

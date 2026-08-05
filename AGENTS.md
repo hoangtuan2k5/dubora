@@ -35,7 +35,19 @@ Entry point duy nhất: `run_dub.py`. Không gọi trực tiếp `build_audio.py
 | `build_audio.py` | Xây voiceover: `rubberband=tempo` time-stretch khi audio dài quá slot, `atrim`, `adelay`, `amix=normalize=0`, `alimiter`. Ghi `filter_complex.txt` + runner script. | **Yêu cầu FFmpeg có filter `rubberband`.** |
 | `build_video.py` | Mux: `0:v:0` copy + `1:a:0` aac 192k, `apad` + `-shortest`, metadata lang `vie`, default disposition. | Không re-encode video. |
 | `drive_helper.py` | Upload/download Google Drive qua service account (`~/.hermes/google_service_account.json`). | File độc lập, không nằm trong pipeline chính. |
-| `scratch/` | Script phụ/test (extract_srt, merge_srt, process_srt) + file text tạm. | Không production, không import. |
+
+## Nhánh Rust / Desktop (đang phát triển chính)
+
+Pipeline Python đang được port sang Rust (monorepo workspace, edition 2024).
+Spec chi tiết + quyết định đã chốt nằm ở **`HANDOFF-TAURI-RUST.md` — đọc trước khi sửa code Rust.**
+
+- `crates/dubora-core` — pipeline dùng chung: `orchestrator.rs` (`create_dubs`), `clean_rolling.rs`,
+  `srt.rs`, `tts_azure.rs`, `tts_cache.rs`, `build_audio.rs`, `build_video.rs`, `translate_gemini.rs`,
+  `youtube.rs`, `ffmpeg.rs`, `paths.rs`, `config.rs`. Parity 1:1 với module Python tương ứng.
+- `crates/dubora-cli` — Linux CLI (parity `run_dub.py`). Chạy: `cargo run -p dubora-cli -- <rel>.mp4`.
+- `apps/desktop` — app Tauri 2 + React 19 + Vite (Windows). Commands Rust ở `src-tauri/src/commands.rs`.
+- Cấm nhân đôi logic pipeline giữa CLI và Tauri — cả hai gọi `dubora-core`.
+- Rust: `cargo fmt` (rustfmt mặc định, line width 100), edition 2024, lỗi dùng `anyhow`.
 
 ## Quy ước & gotchas quan trọng
 
