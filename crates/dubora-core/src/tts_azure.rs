@@ -348,7 +348,7 @@ fn build_ssml(voice: &str, style: &str, text: &str) -> String {
         )
     };
     format!(
-        "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"vi-VN\"><voice name=\"{voice}\"><prosody rate=\"0%\">{text}</prosody></voice></speak>",
+        "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"vi-VN\"><voice name=\"{voice}\">{text}</voice></speak>",
     )
 }
 
@@ -369,7 +369,8 @@ mod tests {
         let ssml = build_ssml("voice", "", "API & SQL");
         assert!(ssml.contains("xml:lang=\"vi-VN\""));
         assert!(ssml.contains("<voice name=\"voice\">"));
-        assert!(ssml.contains("<prosody rate=\"0%\">API &amp; SQL</prosody>"));
+        assert!(ssml.contains("<voice name=\"voice\">API &amp; SQL</voice>"));
+        assert!(!ssml.contains("<prosody"));
     }
 
     #[test]

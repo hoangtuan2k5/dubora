@@ -125,8 +125,8 @@ impl AzureVoice {
                     CapabilityState::Unknown,
                 ),
                 VoiceModelFamily::DragonHd => (
-                    CapabilityState::Unknown,
-                    CapabilityState::Unknown,
+                    CapabilityState::Unsupported,
+                    CapabilityState::Unsupported,
                     CapabilityState::Supported,
                     CapabilityState::Supported,
                     CapabilityState::Supported,
@@ -161,11 +161,11 @@ impl AzureVoice {
 
 fn model_family(short_name: &str) -> VoiceModelFamily {
     let name = short_name.to_ascii_lowercase();
-    if name.contains(":dragonhdomni") {
+    if name.contains("dragonhdomni") {
         VoiceModelFamily::DragonHdOmni
-    } else if name.contains(":dragonhdflash") {
+    } else if name.contains("dragonhdflash") {
         VoiceModelFamily::DragonHdFlash
-    } else if name.contains(":dragonhd") {
+    } else if name.contains("dragonhd") {
         VoiceModelFamily::DragonHd
     } else if name.ends_with("neural") {
         VoiceModelFamily::Standard
@@ -338,11 +338,12 @@ mod tests {
             &[],
         );
         assert_eq!(hd.model_family, VoiceModelFamily::DragonHd);
-        assert_eq!(hd.manual_emphasis, CapabilityState::Unknown);
+        assert_eq!(hd.manual_emphasis, CapabilityState::Unsupported);
+        assert_eq!(hd.manual_prosody, CapabilityState::Unsupported);
         assert_eq!(hd.semantic_break, CapabilityState::Supported);
 
         let omni = AzureVoice::capabilities(
-            "en-US-Ava:DragonHDOmniLatestNeural",
+            "en-US-Ava-DragonHDOmniLatestNeural",
             &[],
             false,
             &[],
