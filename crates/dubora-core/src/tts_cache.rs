@@ -7,8 +7,12 @@ use sha2::{Digest, Sha256};
 
 use crate::ffmpeg::FfmpegPaths;
 
-pub fn tts_cache_key(provider: &str, voice: &str, text: &str) -> String {
-    let payload = format!("{provider}\n{voice}\n{}", text.trim());
+pub fn tts_cache_key(provider: &str, voice: &str, style: &str, text: &str) -> String {
+    let payload = if style.trim().is_empty() {
+        format!("{provider}\n{voice}\n{}", text.trim())
+    } else {
+        format!("{provider}\n{voice}\n{}\n{}", style.trim(), text.trim())
+    };
     format!("{:x}", Sha256::digest(payload.as_bytes()))
 }
 
@@ -42,9 +46,18 @@ mod tests {
             tts_cache_key(
                 "azure",
                 "de-DE-Florian:DragonHDLatestNeural",
+                "",
                 "  Xin chào\n",
             ),
             "8b2c0952701d669d691f33f940935e949f1fe334538ad33cd84003bd1a928d7d"
+        );
+    }
+
+    #[test]
+    fn style_invalidates_the_cache() {
+        assert_ne!(
+            tts_cache_key("azure", "voice", "", "Xin chào"),
+            tts_cache_key("azure", "voice", "chat", "Xin chào")
         );
     }
 

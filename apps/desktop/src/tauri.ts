@@ -9,6 +9,8 @@ export type AppConfig = {
   azureRegion: string;
   /** Azure TTS ShortName; default Florian Dragon HD. */
   azureVoice: string;
+  /** Optional expressive style supported by the selected Azure voice. */
+  azureVoiceStyle: string;
   geminiKeys: string;
   playlists: Playlist[];
 };
@@ -29,6 +31,8 @@ export type AzureVoice = {
   localeName: string;
   status: string;
   voiceType: string;
+  styles: string[];
+  secondaryLocales: string[];
 };
 
 export const DEFAULT_AZURE_VOICE = "de-DE-Florian:DragonHDLatestNeural";

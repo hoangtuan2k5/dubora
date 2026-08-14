@@ -22,6 +22,7 @@ pub struct AzureConfig {
     pub key: String,
     pub region: String,
     pub voice: String,
+    pub style: String,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +60,7 @@ impl AzureConfig {
             key,
             region,
             voice: AZURE_VOICE.to_owned(),
+            style: String::new(),
         })
     }
 
@@ -72,6 +74,19 @@ impl AzureConfig {
         }
         validate_azure_voice(voice)?;
         self.voice = voice.to_owned();
+        Ok(self)
+    }
+
+    /// Override the optional Azure voice style (for example, `chat`).
+    pub fn with_style(mut self, style: impl Into<String>) -> Result<Self> {
+        let style = style.into();
+        let style = style.trim();
+        if style.is_empty() {
+            self.style.clear();
+            return Ok(self);
+        }
+        validate_azure_voice_style(style)?;
+        self.style = style.to_owned();
         Ok(self)
     }
 }
@@ -89,6 +104,16 @@ pub fn validate_azure_voice(voice: &str) -> Result<()> {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
     {
         bail!("Invalid Azure voice name: use letters, digits, '-', '_', ':', '.' only");
+    }
+    Ok(())
+}
+
+pub fn validate_azure_voice_style(style: &str) -> Result<()> {
+    if style.is_empty() || style.len() > 64 {
+        bail!("Azure voice style must contain 1 to 64 characters");
+    }
+    if !style.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("Invalid Azure voice style: use letters, digits, and hyphens only");
     }
     Ok(())
 }
@@ -156,5 +181,21 @@ mod tests {
                 .with_voice("bad voice!")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn accepts_or_clears_voice_style() {
+        let config = AzureConfig::new("key", "southeastasia")
+            .unwrap()
+            .with_style("chat")
+            .unwrap();
+        assert_eq!(config.style, "chat");
+        assert!(
+            AzureConfig::new("key", "southeastasia")
+                .unwrap()
+                .with_style("bad style!")
+                .is_err()
+        );
+        assert!(config.with_style(" ").unwrap().style.is_empty());
     }
 }

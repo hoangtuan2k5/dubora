@@ -3,17 +3,17 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
 use dubora_core::ffmpeg::FfmpegPaths;
-use dubora_core::youtube::select_subtitle_language;
 use dubora_core::paths::{companion_output_srt, find_matching_srt, output_path};
 use dubora_core::srt::{parse_srt, time_to_seconds};
+use dubora_core::youtube::select_subtitle_language;
 use dubora_core::{
-    AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
-    Stage, VideoInfo, AZURE_VOICE, create_dubs, delete_input_video, list_azure_voices, rename_input_video,
-    repair_adjacent_youtube_subtitles,
+    AZURE_VOICE, AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent,
+    ProgressReporter, Provider, Stage, VideoInfo, create_dubs, delete_input_video,
+    list_azure_voices, rename_input_video, repair_adjacent_youtube_subtitles,
 };
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager};
 
 static DUB_RUNNING: AtomicBool = AtomicBool::new(false);
 static DUB_CANCEL: AtomicBool = AtomicBool::new(false);
@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub azure_region: String,
     /// Azure TTS ShortName; empty or missing falls back to Florian Dragon HD.
     pub azure_voice: String,
+    /// Optional expressive style supported by the selected Azure voice.
+    pub azure_voice_style: String,
     pub gemini_keys: String,
     pub playlists: Vec<Playlist>,
 }
@@ -47,6 +49,7 @@ impl Default for AppConfig {
             azure_key: String::new(),
             azure_region: dubora_core::config::DEFAULT_AZURE_REGION.to_owned(),
             azure_voice: AZURE_VOICE.to_owned(),
+            azure_voice_style: String::new(),
             gemini_keys: String::new(),
             playlists: Vec::new(),
         }
@@ -110,12 +113,24 @@ impl YoutubeQuality {
     fn format(&self) -> &'static str {
         match self {
             Self::Lowest => "worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]",
-            Self::P144 => "bestvideo[ext=mp4][height<=144]+bestaudio[ext=m4a]/best[ext=mp4][height<=144]",
-            Self::P240 => "bestvideo[ext=mp4][height<=240]+bestaudio[ext=m4a]/best[ext=mp4][height<=240]",
-            Self::P360 => "bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]/best[ext=mp4][height<=360]",
-            Self::P480 => "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]",
-            Self::P720 => "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]",
-            Self::P1080 => "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]",
+            Self::P144 => {
+                "bestvideo[ext=mp4][height<=144]+bestaudio[ext=m4a]/best[ext=mp4][height<=144]"
+            }
+            Self::P240 => {
+                "bestvideo[ext=mp4][height<=240]+bestaudio[ext=m4a]/best[ext=mp4][height<=240]"
+            }
+            Self::P360 => {
+                "bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]/best[ext=mp4][height<=360]"
+            }
+            Self::P480 => {
+                "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]"
+            }
+            Self::P720 => {
+                "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]"
+            }
+            Self::P1080 => {
+                "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]"
+            }
             Self::Highest => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
         }
     }
@@ -200,7 +215,10 @@ pub async fn scan_videos(root: String) -> Result<Vec<VideoInfo>, String> {
 }
 
 #[tauri::command]
-pub fn rename_video(app: AppHandle, request: RenameVideoRequest) -> Result<LibraryMutationResult, String> {
+pub fn rename_video(
+    app: AppHandle,
+    request: RenameVideoRequest,
+) -> Result<LibraryMutationResult, String> {
     let root = configured_project_root(&app)?;
     rename_input_video(&root, Path::new(&request.relative_path), &request.new_stem)
         .map_err(|error| format!("{error:#}"))?;
@@ -209,7 +227,10 @@ pub fn rename_video(app: AppHandle, request: RenameVideoRequest) -> Result<Libra
 }
 
 #[tauri::command]
-pub fn delete_video(app: AppHandle, relative_path: String) -> Result<LibraryMutationResult, String> {
+pub fn delete_video(
+    app: AppHandle,
+    relative_path: String,
+) -> Result<LibraryMutationResult, String> {
     let root = configured_project_root(&app)?;
     delete_input_video(&root, Path::new(&relative_path)).map_err(|error| format!("{error:#}"))?;
     let videos = dubora_core::scan_videos(&root).map_err(|error| format!("{error:#}"))?;
@@ -222,14 +243,20 @@ pub fn get_video_playback(app: AppHandle, relative_path: String) -> Result<Video
     let relative = Path::new(relative_path.trim());
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
-        || relative.components().any(|component| matches!(component, Component::ParentDir))
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
     {
         return Err("Đường dẫn video không hợp lệ".to_owned());
     }
 
-    let video_dir = root.join("assets/video").canonicalize()
+    let video_dir = root
+        .join("assets/video")
+        .canonicalize()
         .map_err(|error| format!("Không thể mở thư mục video: {error}"))?;
-    let video = video_dir.join(relative).canonicalize()
+    let video = video_dir
+        .join(relative)
+        .canonicalize()
         .map_err(|_| "Không tìm thấy video".to_owned())?;
     if !video.starts_with(&video_dir) || !video.is_file() {
         return Err("Video phải nằm trong assets/video".to_owned());
@@ -250,11 +277,13 @@ pub fn get_video_playback(app: AppHandle, relative_path: String) -> Result<Video
         .ok()
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|segment| Some(SubtitleCue {
-            start: time_to_seconds(&segment.start).ok()?,
-            end: time_to_seconds(&segment.end).ok()?,
-            text: segment.text,
-        }))
+        .filter_map(|segment| {
+            Some(SubtitleCue {
+                start: time_to_seconds(&segment.start).ok()?,
+                end: time_to_seconds(&segment.end).ok()?,
+                text: segment.text,
+            })
+        })
         .collect();
 
     Ok(VideoPlayback {
@@ -274,13 +303,19 @@ fn configured_project_root(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub async fn import_youtube(app: AppHandle, request: YoutubeImportRequest) -> Result<YoutubeImportResult, String> {
+pub async fn import_youtube(
+    app: AppHandle,
+    request: YoutubeImportRequest,
+) -> Result<YoutubeImportResult, String> {
     tauri::async_runtime::spawn_blocking(move || import_youtube_blocking(&app, request))
         .await
         .map_err(|error| format!("Không khởi chạy được yt-dlp: {error}"))?
 }
 
-fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Result<YoutubeImportResult, String> {
+fn import_youtube_blocking(
+    app: &AppHandle,
+    request: YoutubeImportRequest,
+) -> Result<YoutubeImportResult, String> {
     let url = request.url.trim();
     if !is_youtube_url(url) {
         return Err("Chỉ hỗ trợ link youtube.com hoặc youtu.be hợp lệ".to_owned());
@@ -294,7 +329,16 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
     dubora_core::ensure_project_layout(&root).map_err(|error| format!("{error:#}"))?;
 
     let yt_dlp = yt_dlp_path(app);
-    let metadata = run_yt_dlp(&yt_dlp, ["--dump-single-json", "--skip-download", "--no-playlist", "--no-warnings"], url)?;
+    let metadata = run_yt_dlp(
+        &yt_dlp,
+        [
+            "--dump-single-json",
+            "--skip-download",
+            "--no-playlist",
+            "--no-warnings",
+        ],
+        url,
+    )?;
     let metadata: YoutubeMetadata = serde_json::from_slice(&metadata.stdout)
         .map_err(|error| format!("yt-dlp không trả metadata hợp lệ: {error}"))?;
     let language = select_subtitle_language(
@@ -313,8 +357,24 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
     let ffmpeg = FfmpegPaths::resolve(app.path().resource_dir().ok().as_deref());
     let ffmpeg_dir = ffmpeg.ffmpeg.parent().unwrap_or(Path::new("."));
     let output = yt_dlp_command(&yt_dlp)
-        .args(["--no-playlist", "--no-warnings", "--format", request.quality.format(), "--merge-output-format", "mp4"])
-        .args(["--write-subs", "--write-auto-subs", "--sub-langs", &language, "--sub-format", "srt", "--convert-subs", "srt"])
+        .args([
+            "--no-playlist",
+            "--no-warnings",
+            "--format",
+            request.quality.format(),
+            "--merge-output-format",
+            "mp4",
+        ])
+        .args([
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            &language,
+            "--sub-format",
+            "srt",
+            "--convert-subs",
+            "srt",
+        ])
         .arg("--output")
         .arg(output_template)
         .arg("--ffmpeg-location")
@@ -333,18 +393,31 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
         .filter(|line| !line.is_empty())
         .next_back()
         .map(PathBuf::from)
-        .filter(|path| path.is_file() && path.extension().and_then(|extension| extension.to_str()) == Some("mp4"))
+        .filter(|path| {
+            path.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("mp4")
+        })
         .ok_or("yt-dlp tải xong nhưng không tìm thấy file video")?;
-    let video_stem = video.file_stem().and_then(|stem| stem.to_str()).ok_or("Tên video không hợp lệ")?;
+    let video_stem = video
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or("Tên video không hợp lệ")?;
     let subtitle = [srt_dir.as_path(), video_dir.as_path()]
         .into_iter()
         .find_map(|directory| {
-            fs::read_dir(directory).ok()?.filter_map(Result::ok).map(|entry| entry.path()).find(|path| {
-                path.extension().and_then(|extension| extension.to_str()) == Some("srt")
-                    && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-                        name.starts_with(&format!("{video_stem}.{language}"))
-                    })
-            })
+            fs::read_dir(directory)
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension().and_then(|extension| extension.to_str()) == Some("srt")
+                        && path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.starts_with(&format!("{video_stem}.{language}"))
+                            })
+                })
         })
         .ok_or("yt-dlp không tải được SRT đã chọn")?;
     let companion = srt_dir.join(format!("{video_stem}.srt"));
@@ -359,17 +432,30 @@ fn import_youtube_blocking(app: &AppHandle, request: YoutubeImportRequest) -> Re
         .to_string_lossy()
         .replace('\\', "/");
     let videos = dubora_core::scan_videos(&root).map_err(|error| format!("{error:#}"))?;
-    Ok(YoutubeImportResult { relative_path, subtitle_language: language, videos })
+    Ok(YoutubeImportResult {
+        relative_path,
+        subtitle_language: language,
+        videos,
+    })
 }
 
 fn is_youtube_url(url: &str) -> bool {
-    ["https://youtube.com/", "https://www.youtube.com/", "https://m.youtube.com/", "https://youtu.be/"]
-        .iter()
-        .any(|prefix| url.starts_with(prefix))
+    [
+        "https://youtube.com/",
+        "https://www.youtube.com/",
+        "https://m.youtube.com/",
+        "https://youtu.be/",
+    ]
+    .iter()
+    .any(|prefix| url.starts_with(prefix))
 }
 
 fn yt_dlp_path(app: &AppHandle) -> PathBuf {
-    let binary = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
+    let binary = if cfg!(windows) {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    };
     app.path()
         .resource_dir()
         .ok()
@@ -389,18 +475,30 @@ fn yt_dlp_command(path: &Path) -> Command {
     command
 }
 
-fn run_yt_dlp<const N: usize>(yt_dlp: &Path, args: [&str; N], url: &str) -> Result<std::process::Output, String> {
+fn run_yt_dlp<const N: usize>(
+    yt_dlp: &Path,
+    args: [&str; N],
+    url: &str,
+) -> Result<std::process::Output, String> {
     let output = yt_dlp_command(yt_dlp)
         .args(args)
         .args(["--", url])
         .output()
         .map_err(|error| format!("Không chạy được {}: {error}", yt_dlp.display()))?;
-    if output.status.success() { Ok(output) } else { Err(yt_dlp_error(&output)) }
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(yt_dlp_error(&output))
+    }
 }
 
 fn yt_dlp_error(output: &std::process::Output) -> String {
     let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if message.is_empty() { "yt-dlp không thể tải video này".to_owned() } else { message }
+    if message.is_empty() {
+        "yt-dlp không thể tải video này".to_owned()
+    } else {
+        message
+    }
 }
 
 #[cfg(test)]
@@ -458,13 +556,22 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
 
     let azure = AzureConfig::new(saved.azure_key, saved.azure_region)
         .and_then(|config| config.with_voice(saved.azure_voice))
+        .and_then(|config| config.with_style(saved.azure_voice_style))
         .map_err(|error| format!("{error:#}"))?;
     let resource_dir = app.path().resource_dir().ok();
     let config = DubConfig {
         root,
         provider: Provider::Azure,
         azure: Some(azure),
-        gemini: request.translate.then(|| GeminiConfig::new(dubora_core::translate_gemini::parse_keys(&saved.gemini_keys))).transpose().map_err(|error| format!("{error:#}"))?,
+        gemini: request
+            .translate
+            .then(|| {
+                GeminiConfig::new(dubora_core::translate_gemini::parse_keys(
+                    &saved.gemini_keys,
+                ))
+            })
+            .transpose()
+            .map_err(|error| format!("{error:#}"))?,
         ffmpeg: FfmpegPaths::resolve(resource_dir.as_deref()),
     };
 
@@ -549,8 +656,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
                             break;
                         }
                         if let Err(error) =
-                            create_dubs(&config, Some(Path::new(&target)), options, &reporter)
-                                .await
+                            create_dubs(&config, Some(Path::new(&target)), options, &reporter).await
                         {
                             result = Err(error);
                             break;
@@ -733,6 +839,7 @@ mod tests {
             azure_key: "secret".to_owned(),
             azure_region: "southeastasia".to_owned(),
             azure_voice: AZURE_VOICE.to_owned(),
+            azure_voice_style: "chat".to_owned(),
             gemini_keys: "key1,key2".to_owned(),
             playlists: Vec::new(),
         };
@@ -745,6 +852,7 @@ mod tests {
         fs::write(&legacy_path, legacy).unwrap();
         let loaded = read_config(&legacy_path).unwrap();
         assert_eq!(loaded.azure_voice, AZURE_VOICE);
+        assert!(loaded.azure_voice_style.is_empty());
         assert!(loaded.playlists.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }

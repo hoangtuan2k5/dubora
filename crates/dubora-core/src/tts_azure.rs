@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use regex::Regex;
 use reqwest::{Client, StatusCode};
+use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -39,7 +41,8 @@ pub async fn generate_all_tts(
         .into_iter()
         .filter(|segment| {
             let output = segment_path(output_dir, segment.index);
-            let key = tts_cache_key("azure", &config.voice, &segment.text);
+            let text = prepare_tts_text(&segment.text);
+            let key = tts_cache_key("azure", &config.voice, &config.style, &text);
             !is_fresh_audio_file(ffmpeg, &output, &key)
         })
         .collect();
@@ -112,7 +115,8 @@ async fn generate_segment(
     segment: SrtSegment,
 ) -> Result<SegmentResult> {
     let output = segment_path(output_dir, segment.index);
-    let cache_key = tts_cache_key("azure", &config.voice, &segment.text);
+    let text = prepare_tts_text(&segment.text);
+    let cache_key = tts_cache_key("azure", &config.voice, &config.style, &text);
     if is_fresh_audio_file(ffmpeg, &output, &cache_key) {
         return Ok(SegmentResult {
             index: segment.index,
@@ -126,17 +130,7 @@ async fn generate_segment(
     let mut fallback_allowed = false;
     for attempt in 1..=RETRIES {
         let _ = fs::remove_file(&tmp);
-        match synthesize_once(
-            client,
-            config,
-            ffmpeg,
-            &segment.text,
-            &tmp,
-            &output,
-            &cache_key,
-        )
-        .await
-        {
+        match synthesize_once(client, config, ffmpeg, &text, &tmp, &output, &cache_key).await {
             Ok(()) => {
                 return Ok(SegmentResult {
                     index: segment.index,
@@ -162,7 +156,10 @@ async fn generate_segment(
         bail!(
             "Azure TTS failed for segment {} after {RETRIES} attempts: {}",
             segment.index,
-            attempt_errors.last().map(String::as_str).unwrap_or("unknown error")
+            attempt_errors
+                .last()
+                .map(String::as_str)
+                .unwrap_or("unknown error")
         );
     }
 
@@ -200,7 +197,7 @@ async fn synthesize_once(
             "audio-48khz-192kbitrate-mono-mp3",
         )
         .header("User-Agent", "dubora")
-        .body(build_ssml(&config.voice, text))
+        .body(build_ssml(&config.voice, &config.style, text))
         .timeout(Duration::from_secs(70))
         .send()
         .await
@@ -277,10 +274,54 @@ fn escape_xml(text: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn build_ssml(voice: &str, text: &str) -> String {
+fn prepare_tts_text(text: &str) -> String {
+    static IPV4: OnceLock<Regex> = OnceLock::new();
+    IPV4.get_or_init(|| Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap())
+        .replace_all(text, |captures: &regex::Captures<'_>| {
+            let ip = &captures[0];
+            let octets: Vec<_> = ip.split('.').collect();
+            if octets.iter().any(|octet| octet.parse::<u8>().is_err()) {
+                return ip.to_owned();
+            }
+            octets
+                .into_iter()
+                .map(|octet| {
+                    octet
+                        .chars()
+                        .map(|digit| match digit {
+                            '0' => "không",
+                            '1' => "một",
+                            '2' => "hai",
+                            '3' => "ba",
+                            '4' => "bốn",
+                            '5' => "năm",
+                            '6' => "sáu",
+                            '7' => "bảy",
+                            '8' => "tám",
+                            '9' => "chín",
+                            _ => unreachable!(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect::<Vec<_>>()
+                .join(" chấm ")
+        })
+        .into_owned()
+}
+
+fn build_ssml(voice: &str, style: &str, text: &str) -> String {
+    let text = escape_xml(text);
+    let text = if style.is_empty() {
+        text
+    } else {
+        format!(
+            "<mstts:express-as style=\"{}\">{text}</mstts:express-as>",
+            escape_xml(style)
+        )
+    };
     format!(
-        "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"vi-VN\"><voice name=\"{voice}\"><prosody rate=\"0%\">{}</prosody></voice></speak>",
-        escape_xml(text)
+        "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"vi-VN\"><voice name=\"{voice}\"><prosody rate=\"0%\">{text}</prosody></voice></speak>",
     )
 }
 
@@ -298,10 +339,21 @@ mod tests {
 
     #[test]
     fn ssml_matches_azure_contract() {
-        let ssml = build_ssml("voice", "API & SQL");
+        let ssml = build_ssml("voice", "", "API & SQL");
         assert!(ssml.contains("xml:lang=\"vi-VN\""));
         assert!(ssml.contains("<voice name=\"voice\">"));
         assert!(ssml.contains("<prosody rate=\"0%\">API &amp; SQL</prosody>"));
+    }
+
+    #[test]
+    fn style_and_ipv4_are_sent_as_spoken_text() {
+        assert_eq!(
+            prepare_tts_text("Mở 192.168.0.1 nhé."),
+            "Mở một chín hai chấm một sáu tám chấm không chấm một nhé."
+        );
+        assert_eq!(prepare_tts_text("999.1.1.1"), "999.1.1.1");
+        let ssml = build_ssml("voice", "chat", "Xin chào");
+        assert!(ssml.contains("<mstts:express-as style=\"chat\">Xin chào</mstts:express-as>"));
     }
 
     #[test]

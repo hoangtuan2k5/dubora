@@ -16,6 +16,8 @@ pub struct AzureVoice {
     pub locale_name: String,
     pub status: String,
     pub voice_type: String,
+    pub styles: Vec<String>,
+    pub secondary_locales: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +38,10 @@ struct AzureVoiceDto {
     status: String,
     #[serde(rename = "VoiceType", default)]
     voice_type: String,
+    #[serde(rename = "StyleList", default)]
+    styles: Vec<String>,
+    #[serde(rename = "SecondaryLocaleList", default)]
+    secondary_locales: Vec<String>,
 }
 
 /// Fetch voices available for the Speech resource region.
@@ -100,6 +106,18 @@ pub async fn list_azure_voices(key: &str, region: &str) -> Result<Vec<AzureVoice
                 locale_name: row.locale_name.trim().to_owned(),
                 status: row.status.trim().to_owned(),
                 voice_type: row.voice_type.trim().to_owned(),
+                styles: row
+                    .styles
+                    .into_iter()
+                    .map(|style| style.trim().to_owned())
+                    .filter(|style| !style.is_empty())
+                    .collect(),
+                secondary_locales: row
+                    .secondary_locales
+                    .into_iter()
+                    .map(|locale| locale.trim().to_owned())
+                    .filter(|locale| !locale.is_empty())
+                    .collect(),
             })
         })
         .collect();
@@ -129,7 +147,9 @@ mod tests {
             "Locale": "en-US",
             "LocaleName": "English (United States)",
             "VoiceType": "Neural",
-            "Status": "GA"
+            "Status": "GA",
+            "StyleList": ["chat", "newscast-casual"],
+            "SecondaryLocaleList": ["vi-VN"]
           },
           {
             "ShortName": "de-DE-Florian:DragonHDLatestNeural",
@@ -145,5 +165,7 @@ mod tests {
         let rows: Vec<AzureVoiceDto> = serde_json::from_str(json).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].short_name, "de-DE-Florian:DragonHDLatestNeural");
+        assert_eq!(rows[0].styles, ["chat", "newscast-casual"]);
+        assert_eq!(rows[0].secondary_locales, ["vi-VN"]);
     }
 }

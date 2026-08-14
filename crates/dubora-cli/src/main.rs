@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use dubora_core::ffmpeg::FfmpegPaths;
-use dubora_core::{
-    AzureConfig, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider, create_dubs,
-};
 use dubora_core::translate_gemini::load_env_keys;
+use dubora_core::{
+    AzureConfig, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
+    create_dubs,
+};
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
 enum ProviderArg {
@@ -61,6 +62,10 @@ struct Args {
     /// Azure TTS voice ShortName (default: de-DE-Florian:DragonHDLatestNeural).
     #[arg(long)]
     voice: Option<String>,
+
+    /// Expressive style supported by the selected Azure voice (for example, chat).
+    #[arg(long)]
+    voice_style: Option<String>,
 }
 
 struct StdoutProgress;
@@ -93,11 +98,17 @@ async fn main() -> Result<()> {
     if let Some(voice) = args.voice.as_deref() {
         azure = azure.with_voice(voice)?;
     }
+    if let Some(style) = args.voice_style.as_deref() {
+        azure = azure.with_style(style)?;
+    }
     let config = DubConfig {
         root,
         provider,
         azure: Some(azure),
-        gemini: args.translate.then(|| GeminiConfig::new(gemini_keys)).transpose()?,
+        gemini: args
+            .translate
+            .then(|| GeminiConfig::new(gemini_keys))
+            .transpose()?,
         ffmpeg: FfmpegPaths::resolve(None),
     };
     let options = DubOptions {
@@ -114,6 +125,7 @@ fn load_azure_config(root: &std::path::Path) -> Result<Option<AzureConfig>> {
     let mut key = std::env::var("AZURE_KEY").ok();
     let mut region = std::env::var("AZURE_REGION").ok();
     let mut voice = std::env::var("AZURE_VOICE").ok();
+    let mut style = std::env::var("AZURE_VOICE_STYLE").ok();
 
     if let Ok(contents) = std::fs::read_to_string(root.join(".env")) {
         for line in contents.lines() {
@@ -129,6 +141,7 @@ fn load_azure_config(root: &std::path::Path) -> Result<Option<AzureConfig>> {
                 "AZURE_KEY" if key.is_none() => key = Some(value),
                 "AZURE_REGION" if region.is_none() => region = Some(value),
                 "AZURE_VOICE" if voice.is_none() => voice = Some(value),
+                "AZURE_VOICE_STYLE" if style.is_none() => style = Some(value),
                 _ => {}
             }
         }
@@ -136,8 +149,12 @@ fn load_azure_config(root: &std::path::Path) -> Result<Option<AzureConfig>> {
 
     key.map(|key| {
         let config = AzureConfig::new(key, region.unwrap_or_default())?;
-        match voice {
+        let config = match voice {
             Some(voice) => config.with_voice(voice),
+            None => Ok(config),
+        }?;
+        match style {
+            Some(style) => config.with_style(style),
             None => Ok(config),
         }
     })

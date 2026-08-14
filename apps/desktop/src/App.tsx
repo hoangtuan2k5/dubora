@@ -60,6 +60,7 @@ const DEFAULT_CONFIG: AppConfig = {
   azureKey: "",
   azureRegion: "southeastasia",
   azureVoice: DEFAULT_AZURE_VOICE,
+  azureVoiceStyle: "",
   geminiKeys: "",
   playlists: [],
 };
@@ -86,8 +87,12 @@ const EMPTY_VOICE_FEATURES: VoiceFeatureFilter = {
 };
 
 function isMultilingualVoice(voice: AzureVoice) {
-  const blob = `${voice.shortName} ${voice.displayName} ${voice.localName}`.toLowerCase();
+  const blob = `${voice.shortName} ${voice.displayName} ${voice.localName} ${voice.secondaryLocales.join(" ")}`.toLowerCase();
   return blob.includes("multilingual") || blob.includes("multi");
+}
+
+function supportsVoiceLocale(voice: AzureVoice, locale: string) {
+  return voice.locale === locale || voice.secondaryLocales.includes(locale) || (locale === "vi-VN" && isMultilingualVoice(voice));
 }
 
 function isHdVoice(voice: AzureVoice) {
@@ -837,7 +842,12 @@ function App() {
         setNotice(`Đã tải ${list.length} giọng Azure.`);
       }
       if (!config.azureVoice.trim()) {
-        setConfig((current) => ({ ...current, azureVoice: DEFAULT_AZURE_VOICE }));
+        setConfig((current) => ({ ...current, azureVoice: DEFAULT_AZURE_VOICE, azureVoiceStyle: "" }));
+      } else {
+        const voice = list.find((item) => item.shortName === config.azureVoice);
+        if (voice && config.azureVoiceStyle && !voice.styles.includes(config.azureVoiceStyle)) {
+          setConfig((current) => ({ ...current, azureVoiceStyle: "" }));
+        }
       }
     } catch (error) {
       setNotice(`Không tải được danh sách giọng: ${describeError(error)}`);
@@ -872,10 +882,15 @@ function App() {
     return count;
   }, [voiceLocale, voiceFeatures]);
 
+  const selectedVoice = useMemo(
+    () => voices.find((voice) => voice.shortName === (config.azureVoice || DEFAULT_AZURE_VOICE)),
+    [voices, config.azureVoice],
+  );
+
   const filteredVoices = useMemo(() => {
     const q = voiceQuery.trim().toLowerCase();
     let list = voices.filter((voice) => {
-      if (voiceLocale !== "all" && voice.locale !== voiceLocale) return false;
+      if (voiceLocale !== "all" && !supportsVoiceLocale(voice, voiceLocale)) return false;
       if (voiceFeatures.multilingual && !isMultilingualVoice(voice)) return false;
       if (voiceFeatures.hd && !isHdVoice(voice)) return false;
       if (voiceFeatures.female && voice.gender.toLowerCase() !== "female") return false;
@@ -891,6 +906,8 @@ function App() {
         voice.localeName,
         voice.status,
         voice.voiceType,
+        voice.styles.join(" "),
+        voice.secondaryLocales.join(" "),
       ]
         .join(" ")
         .toLowerCase();
@@ -1593,7 +1610,7 @@ function App() {
                   <button
                     type="button"
                     className="text-button"
-                    onClick={() => setConfig((current) => ({ ...current, azureVoice: DEFAULT_AZURE_VOICE }))}
+                    onClick={() => setConfig((current) => ({ ...current, azureVoice: DEFAULT_AZURE_VOICE, azureVoiceStyle: "" }))}
                   >
                     Mặc định Florian HD
                   </button>
@@ -1816,7 +1833,7 @@ function App() {
                         id="azure-voice"
                         value={config.azureVoice || DEFAULT_AZURE_VOICE}
                         onChange={(event) =>
-                          setConfig((current) => ({ ...current, azureVoice: event.target.value }))
+                          setConfig((current) => ({ ...current, azureVoice: event.target.value, azureVoiceStyle: "" }))
                         }
                       >
                         {!filteredVoices.some((v) => v.shortName === (config.azureVoice || DEFAULT_AZURE_VOICE)) && (
@@ -1847,7 +1864,7 @@ function App() {
                         id="azure-voice"
                         value={config.azureVoice || DEFAULT_AZURE_VOICE}
                         onChange={(event) =>
-                          setConfig((current) => ({ ...current, azureVoice: event.target.value }))
+                          setConfig((current) => ({ ...current, azureVoice: event.target.value, azureVoiceStyle: "" }))
                         }
                         placeholder={DEFAULT_AZURE_VOICE}
                         spellCheck={false}
@@ -1857,6 +1874,27 @@ function App() {
                       Mặc định: <code>{DEFAULT_AZURE_VOICE}</code>. Bấm “Tải danh sách giọng” để chọn từ Azure.
                     </p>
                   </>
+                )}
+                <label htmlFor="azure-voice-style">Tông giọng</label>
+                {selectedVoice?.styles.length ? (
+                  <>
+                    <div className="input-wrap select-wrap">
+                      <IconWaveSine size={18} />
+                      <select
+                        id="azure-voice-style"
+                        value={config.azureVoiceStyle}
+                        onChange={(event) =>
+                          setConfig((current) => ({ ...current, azureVoiceStyle: event.target.value }))
+                        }
+                      >
+                        <option value="">Mặc định</option>
+                        {selectedVoice.styles.map((style) => <option key={style} value={style}>{style}</option>)}
+                      </select>
+                    </div>
+                    <p className="field-hint">Chỉ áp dụng khi Azure hỗ trợ tone này cho giọng đã chọn.</p>
+                  </>
+                ) : (
+                  <p className="field-hint">Tải danh sách giọng để xem các tone được Azure hỗ trợ.</p>
                 )}
               </article>
 

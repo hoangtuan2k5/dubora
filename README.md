@@ -51,10 +51,12 @@ export GEMINI_API_KEYS=key_1,key_2
 ./target/release/dubora "course/part/lesson.mp4"
 ./target/release/dubora --force "course/part/lesson.mp4"
 ./target/release/dubora --force-tts "course/part/lesson.mp4"
+./target/release/dubora --voice vi-VN-HoaiMyNeural --voice-style chat "course/part/lesson.mp4"
 ./target/release/dubora --root /data/courses/my-course
 ```
 
-`<root>/.env` is also supported (`AZURE_KEY`, `AZURE_REGION`, `GEMINI_API_KEYS`). Use
+`<root>/.env` is also supported (`AZURE_KEY`, `AZURE_REGION`, `AZURE_VOICE`,
+`AZURE_VOICE_STYLE`, `GEMINI_API_KEYS`). Use
 `--translate` to translate and polish English SRT files with Gemini 3.5 Flash-Lite. Multiple
 Gemini keys are used round-robin once per subtitle batch.
 
@@ -130,6 +132,8 @@ exists. See `THIRD_PARTY_NOTICES.md` before distributing an installer.
 
 The desktop app stores project root and Azure settings under the local Tauri
 app config directory. UI copy is Vietnamese; icons use Tabler Icons.
+After loading the Azure voice list, selecting a voice exposes its supported expressive
+styles. The `vi-VN` filter also includes multilingual voices that support Vietnamese.
 
 Dev UI only (no native shell) from `apps/desktop`:
 
@@ -293,6 +297,11 @@ The default TTS provider is Azure Speech with:
 ```text
 de-DE-Florian:DragonHDLatestNeural
 ```
+
+Azure voices that expose expressive styles can use `AZURE_VOICE_STYLE` or the CLI
+`--voice-style` option. The desktop Settings screen lists styles supported by the selected voice.
+IPv4 addresses are spoken digit by digit, for example `192.168.0.1` becomes
+`một chín hai chấm một sáu tám chấm không chấm một` for TTS.
 
 You can still run the old Edge provider if needed:
 
