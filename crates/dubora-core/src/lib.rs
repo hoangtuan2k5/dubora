@@ -8,6 +8,7 @@ pub mod orchestrator;
 pub mod paths;
 pub mod progress;
 pub mod srt;
+pub mod speech_plan;
 pub mod tts_azure;
 pub mod tts_cache;
 pub mod youtube;
