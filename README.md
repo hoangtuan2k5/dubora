@@ -300,8 +300,9 @@ de-DE-Florian:DragonHDLatestNeural
 
 Azure voices that expose expressive styles can use `AZURE_VOICE_STYLE` or the CLI
 `--voice-style` option. The desktop Settings screen lists styles supported by the selected voice.
-IPv4 addresses are spoken digit by digit, for example `192.168.0.1` becomes
-`một chín hai chấm một sáu tám chấm không chấm một` for TTS.
+IP addresses are spoken character by character: `192.168.0.1` becomes
+`một chín hai chấm một sáu tám chấm không chấm một`, and `2001:db8::1` uses
+Vietnamese digit/hex names with `hai chấm` for `:`.
 
 You can still run the old Edge provider if needed:
 

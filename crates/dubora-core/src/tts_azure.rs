@@ -1,4 +1,5 @@
 use std::fs;
+use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -275,39 +276,65 @@ fn escape_xml(text: &str) -> String {
 }
 
 fn prepare_tts_text(text: &str) -> String {
-    static IPV4: OnceLock<Regex> = OnceLock::new();
-    IPV4.get_or_init(|| Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap())
+    static IP_ADDRESS: OnceLock<Regex> = OnceLock::new();
+    IP_ADDRESS
+        .get_or_init(|| {
+            Regex::new(r"(?i)(?:[0-9a-f.]*:){2,}[0-9a-f.]*|\b(?:\d{1,3}\.){3}\d{1,3}\b")
+                .unwrap()
+        })
         .replace_all(text, |captures: &regex::Captures<'_>| {
             let ip = &captures[0];
+            if ip.contains(':') {
+                return ip
+                    .parse::<Ipv6Addr>()
+                    .map(|_| spell_ipv6(ip))
+                    .unwrap_or_else(|_| ip.to_owned());
+            }
             let octets: Vec<_> = ip.split('.').collect();
             if octets.iter().any(|octet| octet.parse::<u8>().is_err()) {
                 return ip.to_owned();
             }
             octets
                 .into_iter()
-                .map(|octet| {
-                    octet
-                        .chars()
-                        .map(|digit| match digit {
-                            '0' => "không",
-                            '1' => "một",
-                            '2' => "hai",
-                            '3' => "ba",
-                            '4' => "bốn",
-                            '5' => "năm",
-                            '6' => "sáu",
-                            '7' => "bảy",
-                            '8' => "tám",
-                            '9' => "chín",
-                            _ => unreachable!(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
+                .map(|octet| octet.chars().map(spell_digit).collect::<Vec<_>>().join(" "))
                 .collect::<Vec<_>>()
                 .join(" chấm ")
         })
         .into_owned()
+}
+
+fn spell_digit(digit: char) -> &'static str {
+    match digit {
+        '0' => "không",
+        '1' => "một",
+        '2' => "hai",
+        '3' => "ba",
+        '4' => "bốn",
+        '5' => "năm",
+        '6' => "sáu",
+        '7' => "bảy",
+        '8' => "tám",
+        '9' => "chín",
+        _ => unreachable!(),
+    }
+}
+
+fn spell_ipv6(ip: &str) -> String {
+    ip.chars()
+        .map(|character| match character {
+            '0'..='9' => spell_digit(character),
+            'a' | 'A' => "a",
+            'b' | 'B' => "bê",
+            'c' | 'C' => "xê",
+            'd' | 'D' => "đê",
+            'e' | 'E' => "e",
+            'f' | 'F' => "ép",
+            ':' => "hai chấm",
+            '.' => "chấm",
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn build_ssml(voice: &str, style: &str, text: &str) -> String {
@@ -346,12 +373,21 @@ mod tests {
     }
 
     #[test]
-    fn style_and_ipv4_are_sent_as_spoken_text() {
+    fn style_and_ip_addresses_are_sent_as_spoken_text() {
         assert_eq!(
             prepare_tts_text("Mở 192.168.0.1 nhé."),
             "Mở một chín hai chấm một sáu tám chấm không chấm một nhé."
         );
         assert_eq!(prepare_tts_text("999.1.1.1"), "999.1.1.1");
+        assert_eq!(
+            prepare_tts_text("Mở [2001:db8::1] nhé."),
+            "Mở [hai không không một hai chấm đê bê tám hai chấm hai chấm một] nhé."
+        );
+        assert_eq!(
+            prepare_tts_text("::ffff:192.0.2.128"),
+            "hai chấm hai chấm ép ép ép ép hai chấm một chín hai chấm không chấm hai chấm một hai tám"
+        );
+        assert_eq!(prepare_tts_text("1:2:3"), "1:2:3");
         let ssml = build_ssml("voice", "chat", "Xin chào");
         assert!(ssml.contains("<mstts:express-as style=\"chat\">Xin chào</mstts:express-as>"));
     }
