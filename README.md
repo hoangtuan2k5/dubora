@@ -79,11 +79,12 @@ Vietnamese.
 ./target/release/dubora --translate --natural-voice "course/part/lesson.mp4"
 ```
 
-For each segment, Dubora accepts a duration error up to 5%, makes at most one TTS retry, and only
-uses final time-stretch within `1.12x`. A segment that still cannot fit fails clearly rather than
-being truncated or over-stretched. Standard neural voices may receive a small prosody retry when
-Azure reports support; Dragon HD voices use their automatic delivery and a revised Speech Plan
-instead.
+For each segment, Dubora accepts a duration error up to 5%, tries concise Speech Plan revisions
+only when necessary, and only uses final time-stretch within `1.13x`. When a non-Sync segment
+still cannot fit, it may start early inside the immediate previous segment's real unused tail; it
+never overlaps speech. A segment that still cannot fit fails clearly rather than being truncated
+or over-stretched. Standard neural voices may receive a small prosody retry when Azure reports
+support; Dragon HD voices use their automatic delivery and a revised Speech Plan instead.
 
 ```bash
 export DUBORA_FFMPEG=/usr/bin/ffmpeg

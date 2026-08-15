@@ -15,7 +15,9 @@ use tokio::time::sleep;
 
 use crate::azure_voices::{AzureVoice, CapabilityState};
 use crate::config::AzureConfig;
-use crate::duration_solver::{DurationDecision, DurationTarget, solve_duration};
+use crate::duration_solver::{
+    DurationDecision, DurationTarget, SEGMENT_HEADROOM_MS, solve_duration,
+};
 use crate::ffmpeg::FfmpegPaths;
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
 use crate::speech_plan::{EmphasisLevel, NaturalMode, SpeechPlan};
@@ -26,6 +28,7 @@ use crate::tts_cache::{is_fresh_audio_file, tts_cache_key, write_tts_cache_key};
 const CONCURRENCY: usize = 4;
 const RETRIES: usize = 3;
 const SPEECH_PLAN_CACHE_PROVIDER: &str = "azure-speech-plan-v1";
+const MAX_SPEECH_PLAN_REVISIONS: u8 = 2;
 
 pub async fn generate_all_tts(
     config: &AzureConfig,
@@ -148,7 +151,8 @@ pub async fn generate_all_tts_for_speech_plans(
             .get(&segment.index)
             .expect("plans were matched above")
             .clone();
-        let target = duration_target(&segments, position, mode)?;
+        let mut target = duration_target(&segments, position, mode)?;
+        let mut speech_plan_revisions = 0;
         let mut result =
             generate_plan_segment(&client, config, ffmpeg, output_dir, &plan, voice, 0).await?;
         if result.fallback {
@@ -161,7 +165,14 @@ pub async fn generate_all_tts_for_speech_plans(
         }
 
         let output = segment_path(output_dir, plan.index);
-        let decision = solve_duration(target, duration_ms(ffmpeg, &output)?, false)?;
+        let actual_duration_ms = duration_ms(ffmpeg, &output)?;
+        let initial_decision = solve_duration(target, actual_duration_ms, false)?;
+        if mode != NaturalMode::Sync
+            && matches!(initial_decision, DurationDecision::RegenerateSpeech { .. })
+        {
+            target.spillback_ms = available_spillback_ms(ffmpeg, &segments, position, output_dir)?;
+        }
+        let decision = solve_duration(target, actual_duration_ms, false)?;
         match decision {
             DurationDecision::Accept => {}
             DurationDecision::RegenerateWithProsody { rate_percent }
@@ -178,21 +189,81 @@ pub async fn generate_all_tts_for_speech_plans(
                 )
                 .await?;
             }
-            DurationDecision::RegenerateWithProsody { .. }
-            | DurationDecision::RegenerateSpeech { .. } => {
-                plan = revise_speech_plan(gemini_keys, &plan, target.effective_ms(), &voice.styles)
-                    .await?;
-                result =
-                    generate_plan_segment(&client, config, ffmpeg, output_dir, &plan, voice, 0)
-                        .await?;
+            DurationDecision::RegenerateWithProsody { .. } => {
+                // This voice cannot express prosody; the bounded stretch below avoids an AI retry.
             }
-            DurationDecision::TimeStretch { .. } | DurationDecision::Reject { .. } => {
-                unreachable!("the first duration decision never stretches or rejects")
+            DurationDecision::RegenerateSpeech { .. } => {
+                let candidates = revise_speech_plan(
+                    gemini_keys,
+                    &plan,
+                    actual_duration_ms,
+                    target.effective_ms(),
+                    &voice.styles,
+                    1,
+                )
+                .await?;
+                let (revised, _) = select_revision_candidate(
+                    &client,
+                    config,
+                    ffmpeg,
+                    &output,
+                    &plan,
+                    actual_duration_ms,
+                    candidates,
+                    voice,
+                    target,
+                )
+                .await?;
+                plan = revised;
+                speech_plan_revisions = 1;
+            }
+            DurationDecision::TimeStretch { .. } => {}
+            DurationDecision::Reject { .. } => {
+                unreachable!("the first duration decision never rejects")
             }
         }
 
         if !result.fallback {
-            match solve_duration(target, duration_ms(ffmpeg, &output)?, true)? {
+            let mut final_duration_ms = duration_ms(ffmpeg, &output)?;
+            if matches!(
+                solve_duration(target, final_duration_ms, true)?,
+                DurationDecision::Reject { .. }
+            ) && speech_plan_revisions < MAX_SPEECH_PLAN_REVISIONS
+            {
+                progress.event(ProgressEvent::new(
+                    Stage::Tts,
+                    video,
+                    format!(
+                        "Segment {} remains over its timing limit; requesting its final concise revision.",
+                        plan.index
+                    ),
+                ));
+                let candidates = revise_speech_plan(
+                    gemini_keys,
+                    &plan,
+                    final_duration_ms,
+                    target.effective_ms(),
+                    &voice.styles,
+                    2,
+                )
+                .await?;
+                let (revised, revised_duration_ms) = select_revision_candidate(
+                    &client,
+                    config,
+                    ffmpeg,
+                    &output,
+                    &plan,
+                    final_duration_ms,
+                    candidates,
+                    voice,
+                    target,
+                )
+                .await?;
+                plan = revised;
+                speech_plan_revisions = 2;
+                final_duration_ms = revised_duration_ms;
+            }
+            match solve_duration(target, final_duration_ms, true)? {
                 DurationDecision::Accept => {}
                 DurationDecision::TimeStretch { tempo } => progress.event(ProgressEvent::new(
                     Stage::Tts,
@@ -203,7 +274,7 @@ pub async fn generate_all_tts_for_speech_plans(
                     ),
                 )),
                 DurationDecision::Reject { required_tempo } => bail!(
-                    "Natural Voice segment {} still needs {required_tempo:.2}x stretch after its one retry",
+                    "Natural Voice segment {} still needs {required_tempo:.2}x stretch after {speech_plan_revisions} speech-plan revision(s)",
                     plan.index
                 ),
                 DurationDecision::RegenerateWithProsody { .. }
@@ -230,13 +301,14 @@ fn duration_target(
     mode: NaturalMode,
 ) -> Result<DurationTarget> {
     let segment = &segments[position];
-    let slot_ms = ((time_to_seconds(&segment.end)? - time_to_seconds(&segment.start)?) * 1_000.0)
-        .round() as u32;
+    let slot_ms = (((time_to_seconds(&segment.end)? - time_to_seconds(&segment.start)?) * 1_000.0)
+        .round() as u32)
+        .saturating_sub(SEGMENT_HEADROOM_MS);
     let following_silence_ms = segments
         .get(position + 1)
         .map(|next| -> Result<u32> {
             Ok(
-                ((time_to_seconds(&next.start)? - time_to_seconds(&segment.end)? - 0.08).max(0.0)
+                ((time_to_seconds(&next.start)? - time_to_seconds(&segment.end)?).max(0.0)
                     * 1_000.0)
                     .round() as u32,
             )
@@ -246,8 +318,39 @@ fn duration_target(
     Ok(DurationTarget {
         slot_ms,
         following_silence_ms,
+        spillback_ms: 0,
         mode,
     })
+}
+
+/// Return the unused tail after the preceding spoken segment, never its subtitle slot.
+///
+/// The audio builder uses the same conservative assumption: a preceding segment can end no later
+/// than its normal slot. If that segment was itself moved early, this intentionally under-borrows.
+fn available_spillback_ms(
+    ffmpeg: &FfmpegPaths,
+    segments: &[SrtSegment],
+    position: usize,
+    output_dir: &Path,
+) -> Result<u32> {
+    let Some(previous) = position
+        .checked_sub(1)
+        .and_then(|index| segments.get(index))
+    else {
+        return Ok(0);
+    };
+    let current = &segments[position];
+    let previous_start = time_to_seconds(&previous.start)?;
+    let current_start = time_to_seconds(&current.start)?;
+    let previous_slot_end = current_start - f64::from(SEGMENT_HEADROOM_MS) / 1_000.0;
+    let previous_duration = f64::from(duration_ms(
+        ffmpeg,
+        &segment_path(output_dir, previous.index),
+    )?) / 1_000.0;
+    Ok(
+        ((previous_slot_end - (previous_start + previous_duration)).max(0.0) * 1_000.0).round()
+            as u32,
+    )
 }
 
 fn duration_ms(ffmpeg: &FfmpegPaths, path: &Path) -> Result<u32> {
@@ -342,6 +445,18 @@ async fn generate_plan_segment(
     rate_percent: i8,
 ) -> Result<SegmentResult> {
     let output = segment_path(output_dir, plan.index);
+    generate_plan_segment_to_path(client, config, ffmpeg, &output, plan, voice, rate_percent).await
+}
+
+async fn generate_plan_segment_to_path(
+    client: &Client,
+    config: &AzureConfig,
+    ffmpeg: &FfmpegPaths,
+    output: &Path,
+    plan: &SpeechPlan,
+    voice: &AzureVoice,
+    rate_percent: i8,
+) -> Result<SegmentResult> {
     let plan = prepared_speech_plan(plan);
     let ssml = render_speech_plan_ssml_with_rate(voice, &plan, rate_percent)?;
     let cache_key = speech_plan_cache_key_with_rate(voice, &plan, rate_percent)?;
@@ -405,8 +520,109 @@ async fn generate_plan_segment(
     })
 }
 
+async fn select_revision_candidate(
+    client: &Client,
+    config: &AzureConfig,
+    ffmpeg: &FfmpegPaths,
+    output: &Path,
+    current_plan: &SpeechPlan,
+    current_duration_ms: u32,
+    candidates: Vec<SpeechPlan>,
+    voice: &AzureVoice,
+    target: DurationTarget,
+) -> Result<(SpeechPlan, u32)> {
+    let mut best: Option<(SpeechPlan, PathBuf, u32)> = None;
+
+    for (position, candidate) in candidates.into_iter().enumerate() {
+        let candidate_output = revision_candidate_path(output, position);
+        remove_audio_with_cache_key(&candidate_output);
+        let result = generate_plan_segment_to_path(
+            client,
+            config,
+            ffmpeg,
+            &candidate_output,
+            &candidate,
+            voice,
+            0,
+        )
+        .await?;
+        if result.fallback {
+            remove_audio_with_cache_key(&candidate_output);
+            continue;
+        }
+
+        let duration_ms = duration_ms(ffmpeg, &candidate_output)?;
+        if duration_ms >= current_duration_ms {
+            remove_audio_with_cache_key(&candidate_output);
+            continue;
+        }
+        if !matches!(
+            solve_duration(target, duration_ms, true)?,
+            DurationDecision::Reject { .. }
+        ) {
+            promote_revision_candidate(&candidate_output, output, &candidate, voice)?;
+            return Ok((candidate, duration_ms));
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(_, _, best_duration_ms)| duration_ms < *best_duration_ms)
+        {
+            if let Some((_, previous, _)) = best.take() {
+                remove_audio_with_cache_key(&previous);
+            }
+            best = Some((candidate, candidate_output, duration_ms));
+        } else {
+            remove_audio_with_cache_key(&candidate_output);
+        }
+    }
+
+    if let Some((candidate, candidate_output, duration_ms)) = best {
+        promote_revision_candidate(&candidate_output, output, &candidate, voice)?;
+        return Ok((candidate, duration_ms));
+    }
+    Ok((current_plan.clone(), current_duration_ms))
+}
+
+fn revision_candidate_path(output: &Path, position: usize) -> PathBuf {
+    output.with_file_name(format!(
+        "{}.revision-{position}.mp3",
+        output
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("segment")
+    ))
+}
+
+fn cache_key_path(output: &Path) -> PathBuf {
+    let mut path = output.as_os_str().to_owned();
+    path.push(".sha256");
+    PathBuf::from(path)
+}
+
+fn remove_audio_with_cache_key(output: &Path) {
+    let _ = fs::remove_file(output);
+    let _ = fs::remove_file(cache_key_path(output));
+}
+
+fn promote_revision_candidate(
+    candidate_output: &Path,
+    output: &Path,
+    plan: &SpeechPlan,
+    voice: &AzureVoice,
+) -> Result<()> {
+    remove_audio_with_cache_key(output);
+    fs::rename(candidate_output, output)
+        .with_context(|| format!("Failed to promote {}", candidate_output.display()))?;
+    let prepared = prepared_speech_plan(plan);
+    let cache_key = speech_plan_cache_key_with_rate(voice, &prepared, 0)?;
+    write_tts_cache_key(output, &cache_key)?;
+    let _ = fs::remove_file(cache_key_path(candidate_output));
+    Ok(())
+}
+
 fn prepared_speech_plan(plan: &SpeechPlan) -> SpeechPlan {
     let mut prepared = plan.clone();
+    prepared.display_text = prepare_tts_text(&prepared.display_text);
     prepared.spoken_text = prepare_tts_text(&prepared.spoken_text);
     for emphasis in &mut prepared.emphasis {
         emphasis.text = prepare_tts_text(&emphasis.text);
@@ -529,7 +745,7 @@ fn escape_xml(text: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn prepare_tts_text(text: &str) -> String {
+pub(crate) fn prepare_tts_text(text: &str) -> String {
     static IP_ADDRESS: OnceLock<Regex> = OnceLock::new();
     IP_ADDRESS
         .get_or_init(|| {
@@ -821,6 +1037,16 @@ mod tests {
     }
 
     #[test]
+    fn prepared_plan_keeps_validation_consistent_after_ip_expansion() {
+        let mut plan = SpeechPlan::plain(1, "Mở 192.168.0.1 nhé.", 2_000);
+        plan.spoken_text = "Mở 192.168.0.1 nhé.".to_owned();
+
+        let prepared = prepared_speech_plan(&plan);
+
+        prepared.validate(&[]).unwrap();
+    }
+
+    #[test]
     fn renders_only_supported_speech_plan_controls() {
         let ssml = render_speech_plan_ssml(&voice(standard_capabilities()), &plan()).unwrap();
         assert!(ssml.contains("<mstts:express-as style=\"serious\">"));
@@ -870,9 +1096,9 @@ mod tests {
             },
         ];
         let target = duration_target(&segments, 0, NaturalMode::Balanced).unwrap();
-        assert_eq!(target.slot_ms, 2_000);
-        assert_eq!(target.following_silence_ms, 920);
-        assert_eq!(target.effective_ms(), 2_250);
+        assert_eq!(target.slot_ms, 1_920);
+        assert_eq!(target.following_silence_ms, 1_000);
+        assert_eq!(target.effective_ms(), 2_170);
     }
 
     #[test]

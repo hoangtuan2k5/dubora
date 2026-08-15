@@ -1418,8 +1418,9 @@ function App() {
                   <strong>Cách Dubora xử lý:</strong> Gemini tạo Speech Plan (cách nói, điểm nhấn,
                   ngắt câu), Azure chỉ nhận SSML mà voice đang chọn hỗ trợ, rồi Dubora đo thời lượng
                   audio. Chế độ <strong>Cân bằng</strong> chỉ mượn tối đa 250 ms khoảng lặng sau câu.
-                  Mỗi segment chỉ được sinh lại một lần; audio không bao giờ bị ép stretch quá 1.12×.
-                  Nếu vẫn không khớp, job báo lỗi rõ thay vì cắt cụt lời nói.
+                  Nếu vẫn không đủ, Dubora chỉ có thể bắt đầu sớm trong phần im lặng thực sự của câu
+                  ngay trước đó, không chồng lời. Audio không bao giờ bị ép stretch quá 1.13×. Nếu vẫn
+                  không khớp, job báo lỗi rõ thay vì cắt cụt lời nói.
                 </div>
                 <div className="guide-tip">
                   <strong>Chọn voice:</strong> sau khi bấm <strong>Tải danh sách giọng</strong> trong

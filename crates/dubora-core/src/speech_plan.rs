@@ -195,6 +195,119 @@ impl SpeechPlan {
         }
         Ok(())
     }
+
+    /// Recovers an invalid model phrase only when its words can be split into exact substrings.
+    pub(crate) fn repair_model_emphasis(&mut self) {
+        let original = std::mem::take(&mut self.emphasis);
+        let mut repaired = Vec::with_capacity(MAX_EMPHASES);
+
+        for emphasis in original {
+            if repaired.len() == MAX_EMPHASES {
+                break;
+            }
+            let phrase = emphasis.text.trim();
+            if can_add_emphasis(&self.spoken_text, &repaired, phrase) {
+                repaired.push(Emphasis {
+                    text: phrase.to_owned(),
+                    level: emphasis.level,
+                });
+                continue;
+            }
+
+            let split = split_emphasis_phrase(
+                &self.spoken_text,
+                phrase,
+                emphasis.level,
+                MAX_EMPHASES - repaired.len(),
+            );
+            let mut candidate_set = repaired.clone();
+            let mut valid_split = true;
+            for candidate in &split {
+                if can_add_emphasis(&self.spoken_text, &candidate_set, &candidate.text) {
+                    candidate_set.push(candidate.clone());
+                } else {
+                    valid_split = false;
+                    break;
+                }
+            }
+            if valid_split {
+                repaired = candidate_set;
+            }
+        }
+
+        repaired.sort_by_key(|emphasis| {
+            unique_phrase_position(&self.spoken_text, emphasis.text.trim()).unwrap_or(usize::MAX)
+        });
+        self.emphasis = repaired;
+    }
+
+    /// Keeps an LLM's invalidly short or long performance text from changing subtitle meaning.
+    pub(crate) fn repair_model_spoken_length(&mut self) {
+        if validate_spoken_length(
+            self.index,
+            self.display_text.trim(),
+            self.spoken_text.trim(),
+        )
+        .is_err()
+        {
+            self.spoken_text = self.display_text.clone();
+            self.emphasis.clear();
+            self.pauses.clear();
+        }
+    }
+}
+
+fn can_add_emphasis(text: &str, existing: &[Emphasis], phrase: &str) -> bool {
+    let Some(position) = unique_phrase_position(text, phrase) else {
+        return false;
+    };
+    existing.iter().all(|emphasis| {
+        let Some(other_position) = unique_phrase_position(text, emphasis.text.trim()) else {
+            return false;
+        };
+        phrase != emphasis.text.trim()
+            && (position > other_position + emphasis.text.trim().len() + 1
+                || other_position > position + phrase.len() + 1)
+    })
+}
+
+fn split_emphasis_phrase(
+    spoken_text: &str,
+    phrase: &str,
+    level: EmphasisLevel,
+    limit: usize,
+) -> Vec<Emphasis> {
+    let words = phrase
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.len() < 2 || limit == 0 {
+        return Vec::new();
+    }
+
+    let mut used = vec![false; words.len()];
+    let mut recovered = Vec::new();
+    for length in (1..words.len()).rev() {
+        for start in 0..=words.len() - length {
+            let end = start + length;
+            if used[start..end].iter().any(|used| *used) || recovered.len() == limit {
+                continue;
+            }
+            let candidate = words[start..end].join(" ");
+            if unique_phrase_position(spoken_text, &candidate).is_some() {
+                used[start..end].fill(true);
+                recovered.push(Emphasis {
+                    text: candidate,
+                    level,
+                });
+            }
+        }
+    }
+
+    used.iter()
+        .all(|used| *used)
+        .then_some(recovered)
+        .unwrap_or_default()
 }
 
 fn validate_spoken_length(index: usize, display: &str, spoken: &str) -> Result<()> {

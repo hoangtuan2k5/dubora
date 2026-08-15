@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use crate::duration_solver::{MAX_TIME_STRETCH_TOLERANCE_MS, SEGMENT_HEADROOM_MS};
 use crate::ffmpeg::FfmpegPaths;
 use crate::srt::{parse_srt, time_to_seconds};
 
@@ -42,6 +43,7 @@ pub fn build_voiceover_track_with_tempo_cap(
     }
 
     let mut filters = Vec::with_capacity(segments.len());
+    let mut previous_rendered_end = None;
     for (position, (segment, mp3)) in segments.iter().zip(&inputs).enumerate() {
         let start = time_to_seconds(&segment.start)?;
         let slot_end = if let Some(next) = segments.get(position + 1) {
@@ -49,15 +51,20 @@ pub fn build_voiceover_track_with_tempo_cap(
         } else {
             time_to_seconds(&segment.end)?
         };
-        let available = (slot_end - start - 0.08).max(0.1);
-        let tempo = (ffmpeg.audio_duration(mp3)? / available).max(1.0);
-        if let Some(cap) = max_tempo.filter(|cap| tempo > *cap) {
+        let available = (slot_end - start - f64::from(SEGMENT_HEADROOM_MS) / 1_000.0).max(0.1);
+        let duration = ffmpeg.audio_duration(mp3)?;
+        let (render_start, available) =
+            spillback_schedule(start, available, duration, previous_rendered_end, max_tempo);
+        let tempo = (duration / available).max(1.0);
+        if let Some(cap) = max_tempo.filter(|cap| {
+            duration > available * *cap + f64::from(MAX_TIME_STRETCH_TOLERANCE_MS) / 1_000.0
+        }) {
             bail!(
                 "Segment {} requires {tempo:.2}x stretch, above the {cap:.2}x Natural Voice cap",
                 segment.index
             );
         }
-        let delay_ms = (start * 1000.0) as u64;
+        let delay_ms = (render_start * 1000.0) as u64;
 
         let mut chain = Vec::with_capacity(4);
         if tempo > 1.0 {
@@ -69,6 +76,7 @@ pub fn build_voiceover_track_with_tempo_cap(
             format!("adelay={delay_ms}:all=1"),
         ]);
         filters.push(format!("[{position}:a]{}[a{position}]", chain.join(",")));
+        previous_rendered_end = Some(render_start + (duration / tempo).min(available));
     }
 
     let mixed = (0..segments.len())
@@ -97,4 +105,41 @@ pub fn build_voiceover_track_with_tempo_cap(
     ffmpeg
         .checked(&mut command, "build voiceover")
         .with_context(|| format!("Failed to create {}", output_audio.display()))
+}
+
+/// Move a segment into only the real silence left by its immediate predecessor when the cap would
+/// otherwise reject it. Returning the normal schedule is safer when that silence cannot help.
+fn spillback_schedule(
+    start: f64,
+    available: f64,
+    duration: f64,
+    previous_rendered_end: Option<f64>,
+    max_tempo: Option<f64>,
+) -> (f64, f64) {
+    let Some(cap) = max_tempo else {
+        return (start, available);
+    };
+    if duration <= available * cap + f64::from(MAX_TIME_STRETCH_TOLERANCE_MS) / 1_000.0 {
+        return (start, available);
+    }
+    let silence = previous_rendered_end.map_or(0.0, |end| (start - end).max(0.0));
+    let borrowed = (duration - available).max(0.0).min(silence);
+    (start - borrowed, available + borrowed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrows_only_the_preceding_unused_tail_for_an_over_cap_segment() {
+        let (start, available) = spillback_schedule(10.0, 2.0, 4.0, Some(6.5), Some(1.13));
+        assert_eq!((start, available), (8.0, 4.0));
+    }
+
+    #[test]
+    fn keeps_the_subtitle_start_when_the_normal_slot_is_within_cap() {
+        let (start, available) = spillback_schedule(10.0, 2.0, 2.2, Some(6.5), Some(1.13));
+        assert_eq!((start, available), (10.0, 2.0));
+    }
 }
