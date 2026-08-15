@@ -103,14 +103,12 @@ impl AzureVoice {
         secondary_locales: &[String],
     ) -> VoiceCapabilities {
         let model_family = model_family(short_name);
-        let style = if style_metadata_available {
-            if styles.is_empty() {
-                CapabilityState::Unsupported
-            } else {
-                CapabilityState::Supported
-            }
-        } else {
-            CapabilityState::Unknown
+        let style = match model_family {
+            VoiceModelFamily::DragonHd => CapabilityState::Unsupported,
+            VoiceModelFamily::DragonHdOmni => CapabilityState::Supported,
+            _ if style_metadata_available && !styles.is_empty() => CapabilityState::Supported,
+            _ if style_metadata_available => CapabilityState::Unsupported,
+            _ => CapabilityState::Unknown,
         };
         let multilingual = secondary_locales.iter().any(|locale| locale == "vi-VN")
             || short_name.to_ascii_lowercase().contains("multilingual")
@@ -349,7 +347,7 @@ mod tests {
             &[],
         );
         assert_eq!(omni.model_family, VoiceModelFamily::DragonHdOmni);
-        assert_eq!(omni.style, CapabilityState::Unknown);
+        assert_eq!(omni.style, CapabilityState::Supported);
         assert_eq!(omni.manual_prosody, CapabilityState::Unsupported);
     }
 }

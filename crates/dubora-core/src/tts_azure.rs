@@ -13,13 +13,16 @@ use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 use crate::config::AzureConfig;
+use crate::azure_voices::{AzureVoice, CapabilityState};
 use crate::ffmpeg::FfmpegPaths;
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
+use crate::speech_plan::{EmphasisLevel, SpeechPlan};
 use crate::srt::{SrtSegment, parse_srt};
 use crate::tts_cache::{is_fresh_audio_file, tts_cache_key, write_tts_cache_key};
 
 const CONCURRENCY: usize = 4;
 const RETRIES: usize = 3;
+const SPEECH_PLAN_CACHE_PROVIDER: &str = "azure-speech-plan-v1";
 
 pub async fn generate_all_tts(
     config: &AzureConfig,
@@ -352,9 +355,154 @@ fn build_ssml(voice: &str, style: &str, text: &str) -> String {
     )
 }
 
+/// Render a validated Speech Plan using only SSML elements supported by this Azure voice.
+pub fn render_speech_plan_ssml(voice: &AzureVoice, plan: &SpeechPlan) -> Result<String> {
+    plan.validate(&voice.styles)?;
+    if plan.style.is_some() && voice.capabilities.style != CapabilityState::Supported {
+        bail!("Azure voice {} does not support speaking styles", voice.short_name);
+    }
+
+    let supports_emphasis = voice.capabilities.manual_emphasis == CapabilityState::Supported;
+    let supports_prosody = voice.capabilities.manual_prosody == CapabilityState::Supported;
+    let supports_break = voice.capabilities.semantic_break == CapabilityState::Supported;
+    let mut boundaries = vec![0, plan.spoken_text.len()];
+    let mut emphasis = Vec::new();
+    let mut pauses = Vec::new();
+
+    if supports_emphasis {
+        for item in &plan.emphasis {
+            let (start, end) = phrase_span(&plan.spoken_text, &item.text)?;
+            boundaries.extend([start, end]);
+            emphasis.push((start, end, item.level));
+        }
+    }
+    if supports_break {
+        for pause in &plan.pauses {
+            let (_, end) = phrase_span(&plan.spoken_text, &pause.after)?;
+            boundaries.push(end);
+            pauses.push((end, pause.duration_ms));
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut body = String::new();
+    let mut previous = 0;
+    for boundary in boundaries {
+        body.push_str(&escape_xml(&plan.spoken_text[previous..boundary]));
+        for (_, _, level) in emphasis.iter().filter(|(_, end, _)| *end == boundary) {
+            body.push_str("</emphasis>");
+            if *level == EmphasisLevel::Strong && supports_prosody {
+                body.push_str("</prosody>");
+            }
+        }
+        for (_, duration_ms) in pauses.iter().filter(|(end, _)| *end == boundary) {
+            body.push_str(&format!("<break time=\"{duration_ms}ms\"/>"));
+        }
+        for (_, _, level) in emphasis.iter().filter(|(start, _, _)| *start == boundary) {
+            if *level == EmphasisLevel::Strong && supports_prosody {
+                body.push_str("<prosody rate=\"-3%\" pitch=\"+3%\">");
+            }
+            body.push_str(&format!("<emphasis level=\"{}\">", emphasis_level(*level)));
+        }
+        previous = boundary;
+    }
+
+    if let Some(style) = plan.style.as_deref() {
+        body = format!(
+            "<mstts:express-as style=\"{}\">{body}</mstts:express-as>",
+            escape_xml(style)
+        );
+    }
+    Ok(format!(
+        "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"vi-VN\"><voice name=\"{}\">{body}</voice></speak>",
+        escape_xml(&voice.short_name)
+    ))
+}
+
+/// Cache identity for a plan includes the exact capability-aware SSML payload.
+pub fn speech_plan_cache_key(voice: &AzureVoice, plan: &SpeechPlan) -> Result<String> {
+    Ok(tts_cache_key(
+        SPEECH_PLAN_CACHE_PROVIDER,
+        &voice.short_name,
+        "",
+        &render_speech_plan_ssml(voice, plan)?,
+    ))
+}
+
+fn phrase_span(text: &str, phrase: &str) -> Result<(usize, usize)> {
+    let mut matches = text.match_indices(phrase);
+    let (start, matched) = matches
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Speech plan phrase is absent from spoken text"))?;
+    if matches.next().is_some() {
+        bail!("Speech plan phrase occurs more than once in spoken text");
+    }
+    Ok((start, start + matched.len()))
+}
+
+fn emphasis_level(level: EmphasisLevel) -> &'static str {
+    match level {
+        EmphasisLevel::Light => "moderate",
+        EmphasisLevel::Clear | EmphasisLevel::Strong => "strong",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::azure_voices::{VoiceCapabilities, VoiceModelFamily};
+    use crate::speech_plan::{Delivery, Emphasis, Pause, PauseReason};
+
+    fn voice(capabilities: VoiceCapabilities) -> AzureVoice {
+        AzureVoice {
+            short_name: "vi-VN-HoaiMyNeural".to_owned(),
+            display_name: "Hoai My".to_owned(),
+            local_name: "Hoài My".to_owned(),
+            gender: "Female".to_owned(),
+            locale: "vi-VN".to_owned(),
+            locale_name: "Vietnamese".to_owned(),
+            status: "GA".to_owned(),
+            voice_type: "Neural".to_owned(),
+            styles: vec!["serious".to_owned()],
+            secondary_locales: Vec::new(),
+            words_per_minute: Some(150),
+            capabilities,
+        }
+    }
+
+    fn standard_capabilities() -> VoiceCapabilities {
+        VoiceCapabilities {
+            model_family: VoiceModelFamily::Standard,
+            multilingual: false,
+            style: CapabilityState::Supported,
+            manual_emphasis: CapabilityState::Supported,
+            manual_prosody: CapabilityState::Supported,
+            semantic_break: CapabilityState::Supported,
+            pronunciation: CapabilityState::Supported,
+            automatic_delivery: CapabilityState::Unknown,
+        }
+    }
+
+    fn plan() -> SpeechPlan {
+        SpeechPlan {
+            index: 1,
+            display_text: "Spring Boot rất quan trọng.".to_owned(),
+            spoken_text: "Spring Boot rất quan trọng.".to_owned(),
+            target_duration_ms: 2_000,
+            delivery: Delivery::Serious,
+            emphasis: vec![Emphasis {
+                text: "rất quan trọng".to_owned(),
+                level: EmphasisLevel::Strong,
+            }],
+            pauses: vec![Pause {
+                after: "Spring Boot".to_owned(),
+                duration_ms: 180,
+                reason: PauseReason::Transition,
+            }],
+            style: Some("serious".to_owned()),
+        }
+    }
 
     #[test]
     fn escapes_xml_without_changing_pronunciation() {
@@ -391,6 +539,37 @@ mod tests {
         assert_eq!(prepare_tts_text("1:2:3"), "1:2:3");
         let ssml = build_ssml("voice", "chat", "Xin chào");
         assert!(ssml.contains("<mstts:express-as style=\"chat\">Xin chào</mstts:express-as>"));
+    }
+
+    #[test]
+    fn renders_only_supported_speech_plan_controls() {
+        let ssml = render_speech_plan_ssml(&voice(standard_capabilities()), &plan()).unwrap();
+        assert!(ssml.contains("<mstts:express-as style=\"serious\">"));
+        assert!(ssml.contains("<break time=\"180ms\"/>"));
+        assert!(ssml.contains("<emphasis level=\"strong\">rất quan trọng</emphasis>"));
+        assert!(ssml.contains("<prosody rate=\"-3%\" pitch=\"+3%\">"));
+
+        let mut hd = standard_capabilities();
+        hd.model_family = VoiceModelFamily::DragonHd;
+        hd.style = CapabilityState::Unsupported;
+        hd.manual_emphasis = CapabilityState::Unsupported;
+        let mut hd_voice = voice(hd);
+        hd_voice.styles.clear();
+        let mut hd_plan = plan();
+        hd_plan.style = None;
+        let ssml = render_speech_plan_ssml(&hd_voice, &hd_plan).unwrap();
+        assert!(ssml.contains("<break time=\"180ms\"/>"));
+        assert!(!ssml.contains("<emphasis"));
+        assert!(!ssml.contains("<prosody"));
+    }
+
+    #[test]
+    fn speech_plan_cache_key_tracks_rendered_controls() {
+        let voice = voice(standard_capabilities());
+        let key = speech_plan_cache_key(&voice, &plan()).unwrap();
+        let mut changed = plan();
+        changed.pauses[0].duration_ms = 220;
+        assert_ne!(key, speech_plan_cache_key(&voice, &changed).unwrap());
     }
 
     #[test]
