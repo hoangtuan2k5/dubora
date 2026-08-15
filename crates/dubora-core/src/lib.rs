@@ -3,6 +3,7 @@ pub mod build_audio;
 pub mod build_video;
 pub mod clean_rolling;
 pub mod config;
+pub mod duration_solver;
 pub mod ffmpeg;
 pub mod orchestrator;
 pub mod paths;
