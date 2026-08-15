@@ -9,6 +9,28 @@ pub const MAX_TIME_STRETCH_TOLERANCE_MS: u32 = 2;
 pub const MAX_BALANCED_BORROW_MS: u32 = 250;
 pub const SEGMENT_HEADROOM_MS: u32 = 80;
 
+/// Return the audio start and slot after borrowing only real preceding silence.
+///
+/// TTS planning and mixing share this calculation so an approved segment cannot later be
+/// rejected by the mixer for using a different spillback schedule.
+pub fn spillback_schedule(
+    start: f64,
+    available: f64,
+    duration: f64,
+    previous_rendered_end: Option<f64>,
+    max_tempo: Option<f64>,
+) -> (f64, f64) {
+    let Some(cap) = max_tempo else {
+        return (start, available);
+    };
+    if duration <= available * cap + f64::from(MAX_TIME_STRETCH_TOLERANCE_MS) / 1_000.0 {
+        return (start, available);
+    }
+    let silence = previous_rendered_end.map_or(0.0, |end| (start - end).max(0.0));
+    let borrowed = (duration - available).max(0.0).min(silence);
+    (start - borrowed, available + borrowed)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DurationTarget {
     pub slot_ms: u32,
@@ -154,5 +176,34 @@ mod tests {
         let mut target = target(NaturalMode::Balanced);
         target.spillback_ms = 1_500;
         assert_eq!(target.effective_ms(), 2_750);
+    }
+
+    #[test]
+    fn spillback_uses_only_the_preceding_unused_tail_for_an_over_cap_segment() {
+        let (start, available) = spillback_schedule(10.0, 2.0, 4.0, Some(6.5), Some(1.13));
+        assert_eq!((start, available), (8.0, 4.0));
+    }
+
+    #[test]
+    fn spillback_keeps_the_subtitle_start_when_the_normal_slot_is_within_cap() {
+        let (start, available) = spillback_schedule(10.0, 2.0, 2.2, Some(6.5), Some(1.13));
+        assert_eq!((start, available), (10.0, 2.0));
+    }
+
+    #[test]
+    fn tts_and_mixer_accept_the_same_spillback_slot() {
+        let (start, available) = spillback_schedule(10.0, 2.0, 4.0, Some(6.5), Some(1.13));
+        let target = DurationTarget {
+            slot_ms: 2_000,
+            following_silence_ms: 0,
+            spillback_ms: ((available - 2.0) * 1_000.0).round() as u32,
+            mode: NaturalMode::Balanced,
+        };
+
+        assert_eq!(start, 8.0);
+        assert_eq!(
+            solve_duration(target, 4_000, true).unwrap(),
+            DurationDecision::Accept
+        );
     }
 }

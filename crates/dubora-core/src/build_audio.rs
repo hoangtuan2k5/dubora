@@ -3,7 +3,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::duration_solver::{MAX_TIME_STRETCH_TOLERANCE_MS, SEGMENT_HEADROOM_MS};
+use crate::duration_solver::{
+    MAX_TIME_STRETCH_TOLERANCE_MS, SEGMENT_HEADROOM_MS, spillback_schedule,
+};
 use crate::ffmpeg::FfmpegPaths;
 use crate::srt::{parse_srt, time_to_seconds};
 
@@ -105,41 +107,4 @@ pub fn build_voiceover_track_with_tempo_cap(
     ffmpeg
         .checked(&mut command, "build voiceover")
         .with_context(|| format!("Failed to create {}", output_audio.display()))
-}
-
-/// Move a segment into only the real silence left by its immediate predecessor when the cap would
-/// otherwise reject it. Returning the normal schedule is safer when that silence cannot help.
-fn spillback_schedule(
-    start: f64,
-    available: f64,
-    duration: f64,
-    previous_rendered_end: Option<f64>,
-    max_tempo: Option<f64>,
-) -> (f64, f64) {
-    let Some(cap) = max_tempo else {
-        return (start, available);
-    };
-    if duration <= available * cap + f64::from(MAX_TIME_STRETCH_TOLERANCE_MS) / 1_000.0 {
-        return (start, available);
-    }
-    let silence = previous_rendered_end.map_or(0.0, |end| (start - end).max(0.0));
-    let borrowed = (duration - available).max(0.0).min(silence);
-    (start - borrowed, available + borrowed)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn borrows_only_the_preceding_unused_tail_for_an_over_cap_segment() {
-        let (start, available) = spillback_schedule(10.0, 2.0, 4.0, Some(6.5), Some(1.13));
-        assert_eq!((start, available), (8.0, 4.0));
-    }
-
-    #[test]
-    fn keeps_the_subtitle_start_when_the_normal_slot_is_within_cap() {
-        let (start, available) = spillback_schedule(10.0, 2.0, 2.2, Some(6.5), Some(1.13));
-        assert_eq!((start, available), (10.0, 2.0));
-    }
 }

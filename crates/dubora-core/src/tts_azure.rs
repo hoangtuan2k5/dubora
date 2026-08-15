@@ -16,7 +16,8 @@ use tokio::time::sleep;
 use crate::azure_voices::{AzureVoice, CapabilityState};
 use crate::config::AzureConfig;
 use crate::duration_solver::{
-    DurationDecision, DurationTarget, SEGMENT_HEADROOM_MS, solve_duration,
+    DurationDecision, DurationTarget, MAX_TIME_STRETCH_TEMPO, SEGMENT_HEADROOM_MS, solve_duration,
+    spillback_schedule,
 };
 use crate::ffmpeg::FfmpegPaths;
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
@@ -145,6 +146,7 @@ pub async fn generate_all_tts_for_speech_plans(
         format!("Generating {} Natural Voice segments.", segments.len()),
     ));
     let client = Client::new();
+    let mut previous_rendered_end = None;
 
     for (position, segment) in segments.iter().enumerate() {
         let mut plan = plans
@@ -166,11 +168,22 @@ pub async fn generate_all_tts_for_speech_plans(
 
         let output = segment_path(output_dir, plan.index);
         let actual_duration_ms = duration_ms(ffmpeg, &output)?;
+        let start = time_to_seconds(&segment.start)?;
+        let normal_available =
+            (f64::from(target.slot_ms + target.following_silence_ms) / 1_000.0).max(0.1);
+        let initial_schedule = spillback_schedule(
+            start,
+            normal_available,
+            f64::from(actual_duration_ms) / 1_000.0,
+            previous_rendered_end,
+            Some(MAX_TIME_STRETCH_TEMPO),
+        );
         let initial_decision = solve_duration(target, actual_duration_ms, false)?;
         if mode != NaturalMode::Sync
             && matches!(initial_decision, DurationDecision::RegenerateSpeech { .. })
         {
-            target.spillback_ms = available_spillback_ms(ffmpeg, &segments, position, output_dir)?;
+            target.spillback_ms =
+                ((initial_schedule.1 - normal_available).max(0.0) * 1_000.0).round() as u32;
         }
         let decision = solve_duration(target, actual_duration_ms, false)?;
         match decision {
@@ -282,6 +295,17 @@ pub async fn generate_all_tts_for_speech_plans(
                     bail!("Natural Voice duration solver requested more than one retry")
                 }
             }
+            let (render_start, available) = spillback_schedule(
+                start,
+                normal_available,
+                f64::from(final_duration_ms) / 1_000.0,
+                previous_rendered_end,
+                Some(MAX_TIME_STRETCH_TEMPO),
+            );
+            let tempo = (f64::from(final_duration_ms) / 1_000.0 / available).max(1.0);
+            previous_rendered_end = Some(
+                render_start + (f64::from(final_duration_ms) / 1_000.0 / tempo).min(available),
+            );
         }
         progress.event(
             ProgressEvent::new(
@@ -321,36 +345,6 @@ fn duration_target(
         spillback_ms: 0,
         mode,
     })
-}
-
-/// Return the unused tail after the preceding spoken segment, never its subtitle slot.
-///
-/// The audio builder uses the same conservative assumption: a preceding segment can end no later
-/// than its normal slot. If that segment was itself moved early, this intentionally under-borrows.
-fn available_spillback_ms(
-    ffmpeg: &FfmpegPaths,
-    segments: &[SrtSegment],
-    position: usize,
-    output_dir: &Path,
-) -> Result<u32> {
-    let Some(previous) = position
-        .checked_sub(1)
-        .and_then(|index| segments.get(index))
-    else {
-        return Ok(0);
-    };
-    let current = &segments[position];
-    let previous_start = time_to_seconds(&previous.start)?;
-    let current_start = time_to_seconds(&current.start)?;
-    let previous_slot_end = current_start - f64::from(SEGMENT_HEADROOM_MS) / 1_000.0;
-    let previous_duration = f64::from(duration_ms(
-        ffmpeg,
-        &segment_path(output_dir, previous.index),
-    )?) / 1_000.0;
-    Ok(
-        ((previous_slot_end - (previous_start + previous_duration)).max(0.0) * 1_000.0).round()
-            as u32,
-    )
 }
 
 fn duration_ms(ffmpeg: &FfmpegPaths, path: &Path) -> Result<u32> {
@@ -747,7 +741,8 @@ fn escape_xml(text: &str) -> String {
 
 pub(crate) fn prepare_tts_text(text: &str) -> String {
     static IP_ADDRESS: OnceLock<Regex> = OnceLock::new();
-    IP_ADDRESS
+    static TECHNICAL_TOKEN: OnceLock<Regex> = OnceLock::new();
+    let with_spoken_ips = IP_ADDRESS
         .get_or_init(|| {
             Regex::new(r"(?i)(?:[0-9a-f.]*:){2,}[0-9a-f.]*|\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap()
         })
@@ -769,7 +764,32 @@ pub(crate) fn prepare_tts_text(text: &str) -> String {
                 .collect::<Vec<_>>()
                 .join(" chấm ")
         })
+        .into_owned();
+    TECHNICAL_TOKEN
+        .get_or_init(|| {
+            Regex::new(
+                r"https?://[A-Za-z0-9][A-Za-z0-9._~:/?@!$&'()*+=%#-]*[A-Za-z0-9/#]|/[A-Za-z0-9_.-]*[A-Za-z0-9_-](?:/[A-Za-z0-9_.-]*[A-Za-z0-9_-])+|\b[A-Za-z][A-Za-z0-9.-]*:\d+\b|\b[A-Za-z_][A-Za-z0-9_]*(?:[/:;,\x5C][A-Za-z0-9_./:,\x5C-]*[A-Za-z0-9_/-])+",
+            )
+            .unwrap()
+        })
+        .replace_all(&with_spoken_ips, |captures: &regex::Captures<'_>| {
+            spell_technical_token(&captures[0])
+        })
         .into_owned()
+}
+
+fn spell_technical_token(token: &str) -> String {
+    token
+        .replace("\\\\", " hai gạch chéo ngược ")
+        .replace("//", " hai gạch chéo ")
+        .replace('\\', " gạch chéo ngược ")
+        .replace('/', " gạch chéo ")
+        .replace(':', " hai chấm ")
+        .replace(';', " chấm phẩy ")
+        .replace(',', " dấu phẩy ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn spell_digit(digit: char) -> &'static str {
@@ -1037,6 +1057,26 @@ mod tests {
     }
 
     #[test]
+    fn speaks_symbols_only_inside_technical_tokens() {
+        assert_eq!(
+            prepare_tts_text("Mở /var/www/html."),
+            "Mở gạch chéo var gạch chéo www gạch chéo html."
+        );
+        assert_eq!(
+            prepare_tts_text(r"C:\app\logs;localhost:8080"),
+            "C hai chấm gạch chéo ngược app gạch chéo ngược logs chấm phẩy localhost hai chấm 8080"
+        );
+        assert_eq!(
+            prepare_tts_text("https://example.com/docs, rồi lưu."),
+            "https hai chấm hai gạch chéo example.com gạch chéo docs, rồi lưu."
+        );
+        assert_eq!(
+            prepare_tts_text("Lưu ý: hãy lưu lại, nhé."),
+            "Lưu ý: hãy lưu lại, nhé."
+        );
+    }
+
+    #[test]
     fn prepared_plan_keeps_validation_consistent_after_ip_expansion() {
         let mut plan = SpeechPlan::plain(1, "Mở 192.168.0.1 nhé.", 2_000);
         plan.spoken_text = "Mở 192.168.0.1 nhé.".to_owned();
@@ -1044,6 +1084,24 @@ mod tests {
         let prepared = prepared_speech_plan(&plan);
 
         prepared.validate(&[]).unwrap();
+    }
+
+    #[test]
+    fn prepared_plan_keeps_emphasis_after_technical_token_expansion() {
+        let mut plan = SpeechPlan::plain(1, "Mở /var/www/html nhé.", 2_000);
+        plan.spoken_text = "Mở /var/www/html nhé.".to_owned();
+        plan.emphasis = vec![Emphasis {
+            text: "/var/www/html".to_owned(),
+            level: EmphasisLevel::Strong,
+        }];
+
+        let prepared = prepared_speech_plan(&plan);
+
+        prepared.validate(&[]).unwrap();
+        assert_eq!(
+            prepared.emphasis[0].text,
+            "gạch chéo var gạch chéo www gạch chéo html"
+        );
     }
 
     #[test]
