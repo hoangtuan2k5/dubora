@@ -569,6 +569,7 @@ function App() {
   const [youtubeQuality, setYoutubeQuality] = useState("highest");
   const [importingYoutube, setImportingYoutube] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [showGeminiKeys, setShowGeminiKeys] = useState(false);
   const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null);
   const [progress, setProgress] = useState<DubProgress | null>(null);
   const [logs, setLogs] = useState<DubProgress[]>([]);
@@ -1943,10 +1944,20 @@ function App() {
                 <div className="gemini-key-editor">
                   <div className="gemini-key-editor-head">
                     <span><IconKey size={16} /> Key pool</span>
-                    <small>Round Robin</small>
+                    <button
+                      type="button"
+                      className="gemini-key-visibility"
+                      onClick={() => setShowGeminiKeys((current) => !current)}
+                      aria-label={showGeminiKeys ? "Ẩn Gemini API keys" : "Hiện Gemini API keys"}
+                      title={showGeminiKeys ? "Ẩn Gemini API keys" : "Hiện Gemini API keys"}
+                    >
+                      <small>Round Robin</small>
+                      {showGeminiKeys ? <IconEyeOff size={16} /> : <IconEye size={16} />}
+                    </button>
                   </div>
                   <textarea
                     id="gemini-keys"
+                    className={showGeminiKeys ? undefined : "secret-value"}
                     value={config.geminiKeys}
                     onChange={(event) => setConfig({ ...config, geminiKeys: event.target.value })}
                     placeholder="Dán một key mỗi dòng, hoặc phân cách bằng dấu phẩy"

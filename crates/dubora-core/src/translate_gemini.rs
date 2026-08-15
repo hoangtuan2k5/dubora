@@ -125,7 +125,8 @@ pub async fn revise_speech_plan(
         "Revise this one Vietnamese speech performance plan so spokenText fits targetDurationMs. \
          Preserve meaning and displayText. Never add fillers. Keep at most two emphasis phrases \
          and two semantic pauses. Pauses must be 120-800 ms and phrase text must occur exactly \
-         once in spokenText. Use delivery neutral, serious, reflective, or question. Use style \
+         once in spokenText. Each emphasis must be an object with text and level (light, clear, or strong), never a string. \
+         Use delivery neutral, serious, reflective, or question. Use style \
          only from {styles}, otherwise null. Return JSON only with {{\"plans\":[{{\"spokenText\":\"...\",\"delivery\":\"neutral\",\"emphasis\":[],\"pauses\":[],\"style\":null}}]}}. \
          Do not return index, displayText, or targetDurationMs; Dubora keeps them locally. Input JSON: {input}"
     );
@@ -143,8 +144,12 @@ pub async fn revise_speech_plan(
                     "properties": {
                         "spokenText": { "type": "string" },
                         "delivery": { "type": "string" },
-                        "emphasis": { "type": "array" },
-                        "pauses": { "type": "array" },
+                        "emphasis": { "type": "array", "items": { "type": "object", "properties": {
+                            "text": { "type": "string" }, "level": { "type": "string", "enum": ["light", "clear", "strong"] }
+                        }, "required": ["text", "level"] } },
+                        "pauses": { "type": "array", "items": { "type": "object", "properties": {
+                            "after": { "type": "string" }, "durationMs": { "type": "integer" }, "reason": { "type": "string", "enum": ["transition", "conclusion", "punchline", "reflection"] }
+                        }, "required": ["after", "durationMs", "reason"] } },
                         "style": { "type": ["string", "null"] }
                     },
                     "required": ["spokenText"]
@@ -192,6 +197,7 @@ fn parse_revised_speech_plan(
         serde_json::json!(target_duration_ms),
     );
 
+    normalize_legacy_emphasis(&mut response);
     let revised: PlanOutput = serde_json::from_value(response)
         .context("Gemini did not return a usable revised speech plan")?;
     let revised = revised
@@ -309,6 +315,7 @@ async fn plan_batch(
         "Create one speech performance plan for every target subtitle. {translation_instruction} \
          Preserve meaning. Never add fillers. Use at most two emphasis phrases and two semantic pauses. \
          Pauses must be 120-800 ms and phrase text must occur exactly once in spokenText. \
+         Each emphasis must be an object with text and level (light, clear, or strong), never a string. \
          Use delivery neutral, serious, reflective, or question. Use style only from {styles}, otherwise null. \
          Natural mode is {mode:?}. Return JSON only; do not return SSML, markup, explanations, or audio instructions. \
          Input JSON: {input}"
@@ -329,8 +336,12 @@ async fn plan_batch(
                         "spokenText": { "type": "string" },
                         "targetDurationMs": { "type": "integer" },
                         "delivery": { "type": "string" },
-                        "emphasis": { "type": "array" },
-                        "pauses": { "type": "array" },
+                        "emphasis": { "type": "array", "items": { "type": "object", "properties": {
+                            "text": { "type": "string" }, "level": { "type": "string", "enum": ["light", "clear", "strong"] }
+                        }, "required": ["text", "level"] } },
+                        "pauses": { "type": "array", "items": { "type": "object", "properties": {
+                            "after": { "type": "string" }, "durationMs": { "type": "integer" }, "reason": { "type": "string", "enum": ["transition", "conclusion", "punchline", "reflection"] }
+                        }, "required": ["after", "durationMs", "reason"] } },
                         "style": { "type": ["string", "null"] }
                     },
                     "required": ["index", "displayText", "spokenText", "targetDurationMs"]
@@ -350,8 +361,11 @@ fn parse_plan_response(
     translate: bool,
     allowed_styles: &[String],
 ) -> Result<Vec<SpeechPlan>> {
-    let output: PlanOutput =
+    let mut response: serde_json::Value =
         serde_json::from_str(text).context("Gemini did not return speech plan JSON")?;
+    normalize_legacy_emphasis(&mut response);
+    let output: PlanOutput =
+        serde_json::from_value(response).context("Gemini did not return speech plan JSON")?;
     let mut by_index = output
         .plans
         .into_iter()
@@ -379,6 +393,24 @@ fn parse_plan_response(
             Ok(plan)
         })
         .collect()
+}
+
+/// Gemini occasionally returns the old compact emphasis form: ["important phrase"].
+/// Keep accepting that one harmless variation while new requests require the full object.
+fn normalize_legacy_emphasis(response: &mut serde_json::Value) {
+    let Some(plans) = response["plans"].as_array_mut() else {
+        return;
+    };
+    for plan in plans {
+        let Some(emphasis) = plan["emphasis"].as_array_mut() else {
+            continue;
+        };
+        for item in emphasis {
+            if let Some(text) = item.as_str() {
+                *item = serde_json::json!({ "text": text, "level": "clear" });
+            }
+        }
+    }
 }
 
 fn target_duration_ms(segment: &SrtSegment) -> Result<u32> {
@@ -450,7 +482,10 @@ pub fn load_env_keys(root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_keys, parse_plan_response, parse_revised_speech_plan};
-    use crate::{speech_plan::SpeechPlan, srt::SrtSegment};
+    use crate::{
+        speech_plan::{EmphasisLevel, SpeechPlan},
+        srt::SrtSegment,
+    };
 
     #[test]
     fn parses_comma_or_newline_separated_keys() {
@@ -481,6 +516,15 @@ mod tests {
         let json = r#"{"plans":[{"index":1,"displayText":"Spring Boot rất quan trọng.","spokenText":"Spring Boot rất quan trọng.","targetDurationMs":1,"delivery":"serious","emphasis":[{"text":"rất quan trọng","level":"strong"}],"pauses":[],"style":null}]}"#;
         let plans = parse_plan_response(&source, &source, json, true, &[]).unwrap();
         assert_eq!(plans[0].display_text, "Spring Boot rất quan trọng.");
+    }
+
+    #[test]
+    fn accepts_legacy_string_emphasis_from_gemini() {
+        let source = segments();
+        let json = r#"{"plans":[{"index":1,"displayText":"ignored","spokenText":"Spring Boot is very important.","targetDurationMs":1,"emphasis":["very important"]}]}"#;
+        let plans = parse_plan_response(&source, &source, json, false, &[]).unwrap();
+        assert_eq!(plans[0].emphasis[0].text, "very important");
+        assert_eq!(plans[0].emphasis[0].level, EmphasisLevel::Clear);
     }
 
     #[test]

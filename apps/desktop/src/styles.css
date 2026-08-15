@@ -538,8 +538,6 @@ h1 {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(320px, 1fr);
   gap: 12px;
-  flex: 1;
-  min-height: 0;
   align-content: start;
 }
 
@@ -612,6 +610,20 @@ h1 {
   font-size: 11px;
 }
 
+.gemini-key-visibility {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border: 0;
+  color: var(--cyan);
+  background: transparent;
+}
+
+.gemini-key-visibility:hover {
+  color: var(--text);
+}
+
 .gemini-key-editor textarea {
   width: 100%;
   height: 120px;
@@ -629,6 +641,10 @@ h1 {
 
 .gemini-key-editor textarea::placeholder {
   color: var(--quiet);
+}
+
+.gemini-key-editor textarea.secret-value {
+  -webkit-text-security: disc;
 }
 
 .voice-toolbar {
@@ -1020,7 +1036,7 @@ h1 {
   justify-content: flex-end;
   gap: 9px;
   flex: none;
-  margin: 14px 6px 0;
+  margin: 14px 0 0;
   padding-top: 14px;
   border-top: 1px solid var(--line-soft);
 }
