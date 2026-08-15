@@ -152,7 +152,7 @@ pub async fn revise_speech_plan(
                         }, "required": ["after", "durationMs", "reason"] } },
                         "style": { "type": ["string", "null"] }
                     },
-                    "required": ["spokenText"]
+                    "required": ["spokenText", "delivery", "emphasis", "pauses", "style"]
                 } } },
                 "required": ["plans"]
             }
@@ -197,7 +197,6 @@ fn parse_revised_speech_plan(
         serde_json::json!(target_duration_ms),
     );
 
-    normalize_legacy_emphasis(&mut response);
     let revised: PlanOutput = serde_json::from_value(response)
         .context("Gemini did not return a usable revised speech plan")?;
     let revised = revised
@@ -344,7 +343,7 @@ async fn plan_batch(
                         }, "required": ["after", "durationMs", "reason"] } },
                         "style": { "type": ["string", "null"] }
                     },
-                    "required": ["index", "displayText", "spokenText", "targetDurationMs"]
+                    "required": ["index", "displayText", "spokenText", "targetDurationMs", "delivery", "emphasis", "pauses", "style"]
                 }}},
                 "required": ["plans"]
             }
@@ -361,9 +360,8 @@ fn parse_plan_response(
     translate: bool,
     allowed_styles: &[String],
 ) -> Result<Vec<SpeechPlan>> {
-    let mut response: serde_json::Value =
+    let response: serde_json::Value =
         serde_json::from_str(text).context("Gemini did not return speech plan JSON")?;
-    normalize_legacy_emphasis(&mut response);
     let output: PlanOutput =
         serde_json::from_value(response).context("Gemini did not return speech plan JSON")?;
     let mut by_index = output
@@ -393,24 +391,6 @@ fn parse_plan_response(
             Ok(plan)
         })
         .collect()
-}
-
-/// Gemini occasionally returns the old compact emphasis form: ["important phrase"].
-/// Keep accepting that one harmless variation while new requests require the full object.
-fn normalize_legacy_emphasis(response: &mut serde_json::Value) {
-    let Some(plans) = response["plans"].as_array_mut() else {
-        return;
-    };
-    for plan in plans {
-        let Some(emphasis) = plan["emphasis"].as_array_mut() else {
-            continue;
-        };
-        for item in emphasis {
-            if let Some(text) = item.as_str() {
-                *item = serde_json::json!({ "text": text, "level": "clear" });
-            }
-        }
-    }
 }
 
 fn target_duration_ms(segment: &SrtSegment) -> Result<u32> {
@@ -482,10 +462,7 @@ pub fn load_env_keys(root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_keys, parse_plan_response, parse_revised_speech_plan};
-    use crate::{
-        speech_plan::{EmphasisLevel, SpeechPlan},
-        srt::SrtSegment,
-    };
+    use crate::{speech_plan::SpeechPlan, srt::SrtSegment};
 
     #[test]
     fn parses_comma_or_newline_separated_keys() {
@@ -516,15 +493,6 @@ mod tests {
         let json = r#"{"plans":[{"index":1,"displayText":"Spring Boot rất quan trọng.","spokenText":"Spring Boot rất quan trọng.","targetDurationMs":1,"delivery":"serious","emphasis":[{"text":"rất quan trọng","level":"strong"}],"pauses":[],"style":null}]}"#;
         let plans = parse_plan_response(&source, &source, json, true, &[]).unwrap();
         assert_eq!(plans[0].display_text, "Spring Boot rất quan trọng.");
-    }
-
-    #[test]
-    fn accepts_legacy_string_emphasis_from_gemini() {
-        let source = segments();
-        let json = r#"{"plans":[{"index":1,"displayText":"ignored","spokenText":"Spring Boot is very important.","targetDurationMs":1,"emphasis":["very important"]}]}"#;
-        let plans = parse_plan_response(&source, &source, json, false, &[]).unwrap();
-        assert_eq!(plans[0].emphasis[0].text, "very important");
-        assert_eq!(plans[0].emphasis[0].level, EmphasisLevel::Clear);
     }
 
     #[test]
