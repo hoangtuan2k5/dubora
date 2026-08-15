@@ -13,6 +13,18 @@ pub fn build_voiceover_track(
     output_audio: &Path,
     work_dir: &Path,
 ) -> Result<()> {
+    build_voiceover_track_with_tempo_cap(ffmpeg, input_srt, tts_dir, output_audio, work_dir, None)
+}
+
+/// Build a Natural Voice track without permitting the legacy unlimited tempo correction.
+pub fn build_voiceover_track_with_tempo_cap(
+    ffmpeg: &FfmpegPaths,
+    input_srt: &Path,
+    tts_dir: &Path,
+    output_audio: &Path,
+    work_dir: &Path,
+    max_tempo: Option<f64>,
+) -> Result<()> {
     let segments = parse_srt(input_srt)?;
     if segments.is_empty() {
         bail!("No Vietnamese subtitle segments were found");
@@ -39,6 +51,12 @@ pub fn build_voiceover_track(
         };
         let available = (slot_end - start - 0.08).max(0.1);
         let tempo = (ffmpeg.audio_duration(mp3)? / available).max(1.0);
+        if let Some(cap) = max_tempo.filter(|cap| tempo > *cap) {
+            bail!(
+                "Segment {} requires {tempo:.2}x stretch, above the {cap:.2}x Natural Voice cap",
+                segment.index
+            );
+        }
         let delay_ms = (start * 1000.0) as u64;
 
         let mut chain = Vec::with_capacity(4);

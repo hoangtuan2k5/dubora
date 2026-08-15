@@ -1453,6 +1453,31 @@ h1 {
   transform: translateX(-50%) translateY(0);
 }
 
+.natural-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.natural-mode select {
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+}
+
+.voice-capabilities {
+  color: var(--quiet);
+}
+
 [data-tooltip] {
   position: relative;
 }

@@ -9,7 +9,7 @@ use dubora_core::srt::{parse_srt, time_to_seconds};
 use dubora_core::youtube::select_subtitle_language;
 use dubora_core::{
     AZURE_VOICE, AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent,
-    ProgressReporter, Provider, Stage, VideoInfo, create_dubs, delete_input_video,
+    NaturalMode, ProgressReporter, Provider, Stage, VideoInfo, create_dubs, delete_input_video,
     list_azure_voices, rename_input_video, repair_adjacent_youtube_subtitles,
 };
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,10 @@ pub struct StartDubRequest {
     pub force: bool,
     pub force_tts: bool,
     pub translate: bool,
+    #[serde(default)]
+    pub natural_voice: bool,
+    #[serde(default)]
+    pub natural_mode: NaturalMode,
 }
 
 #[derive(Clone, Serialize)]
@@ -563,8 +567,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
         root,
         provider: Provider::Azure,
         azure: Some(azure),
-        gemini: request
-            .translate
+        gemini: (request.translate || request.natural_voice)
             .then(|| {
                 GeminiConfig::new(dubora_core::translate_gemini::parse_keys(
                     &saved.gemini_keys,
@@ -642,6 +645,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
                     force: request.force,
                     force_tts: request.force_tts,
                     translate: request.translate,
+                    natural_mode: request.natural_voice.then_some(request.natural_mode),
                 };
 
                 let result = if request.targets.is_empty() {

@@ -33,6 +33,18 @@ export type AzureVoice = {
   voiceType: string;
   styles: string[];
   secondaryLocales: string[];
+  capabilities: VoiceCapabilities;
+};
+
+export type VoiceCapabilities = {
+  modelFamily: string;
+  multilingual: boolean;
+  style: "supported" | "unsupported" | "unknown";
+  manualEmphasis: "supported" | "unsupported" | "unknown";
+  manualProsody: "supported" | "unsupported" | "unknown";
+  semanticBreak: "supported" | "unsupported" | "unknown";
+  pronunciation: "supported" | "unsupported" | "unknown";
+  automaticDelivery: "supported" | "unsupported" | "unknown";
 };
 
 export const DEFAULT_AZURE_VOICE = "de-DE-Florian:DragonHDLatestNeural";
@@ -99,9 +111,16 @@ export const api = {
   listVoices: (azureKey: string, azureRegion: string) =>
     invoke<AzureVoice[]>("list_voices", { request: { azureKey, azureRegion } }),
   defaultAzureVoice: () => invoke<string>("default_azure_voice"),
-  startDub: (targets: string[], force: boolean, forceTts: boolean, translate: boolean) =>
+  startDub: (
+    targets: string[],
+    force: boolean,
+    forceTts: boolean,
+    translate: boolean,
+    naturalVoice: boolean,
+    naturalMode: "sync" | "balanced" | "natural",
+  ) =>
     invoke<string>("start_dub", {
-      request: { targets, force, forceTts, translate },
+      request: { targets, force, forceTts, translate, naturalVoice, naturalMode },
     }),
   cancelDub: () => invoke<void>("cancel_dub"),
   ffmpegStatus: () => invoke<FfmpegStatus>("get_ffmpeg_status"),

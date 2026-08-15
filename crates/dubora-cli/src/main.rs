@@ -6,7 +6,7 @@ use dubora_core::ffmpeg::FfmpegPaths;
 use dubora_core::translate_gemini::load_env_keys;
 use dubora_core::{
     AzureConfig, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
-    create_dubs,
+    NaturalMode, create_dubs,
 };
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -21,6 +21,24 @@ impl From<ProviderArg> for Provider {
         match value {
             ProviderArg::Azure => Self::Azure,
             ProviderArg::Edge => Self::Edge,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum NaturalModeArg {
+    Sync,
+    #[default]
+    Balanced,
+    Natural,
+}
+
+impl From<NaturalModeArg> for NaturalMode {
+    fn from(value: NaturalModeArg) -> Self {
+        match value {
+            NaturalModeArg::Sync => Self::Sync,
+            NaturalModeArg::Balanced => Self::Balanced,
+            NaturalModeArg::Natural => Self::Natural,
         }
     }
 }
@@ -54,6 +72,14 @@ struct Args {
     /// Translate and polish English SRT to Vietnamese with Gemini.
     #[arg(long)]
     translate: bool,
+
+    /// Use Gemini Speech Plans and capability-aware Azure SSML for more natural delivery.
+    #[arg(long)]
+    natural_voice: bool,
+
+    /// Natural Voice timing preference; only used with --natural-voice.
+    #[arg(long, value_enum, default_value_t)]
+    natural_mode: NaturalModeArg,
 
     /// Gemini API key; repeat this option to round-robin multiple keys.
     #[arg(long)]
@@ -105,8 +131,7 @@ async fn main() -> Result<()> {
         root,
         provider,
         azure: Some(azure),
-        gemini: args
-            .translate
+        gemini: (args.translate || args.natural_voice)
             .then(|| GeminiConfig::new(gemini_keys))
             .transpose()?,
         ffmpeg: FfmpegPaths::resolve(None),
@@ -115,6 +140,7 @@ async fn main() -> Result<()> {
         force: args.force,
         force_tts: args.force_tts,
         translate: args.translate,
+        natural_mode: args.natural_voice.then(|| args.natural_mode.into()),
     };
 
     create_dubs(&config, args.target.as_deref(), options, &StdoutProgress).await?;

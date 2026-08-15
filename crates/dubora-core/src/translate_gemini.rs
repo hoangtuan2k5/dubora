@@ -85,6 +85,59 @@ pub async fn create_speech_plans(
     Ok(SpeechPlanDocument::new(plans))
 }
 
+/// Rephrase one already-planned segment after its first TTS result misses timing by more than
+/// the prosody range. The caller keeps the displayed subtitle stable and allows one retry only.
+pub async fn revise_speech_plan(
+    keys: &[String],
+    plan: &SpeechPlan,
+    target_duration_ms: u32,
+    allowed_styles: &[String],
+) -> Result<SpeechPlan> {
+    if keys.is_empty() {
+        bail!("At least one Gemini API key is required for speech-plan revision");
+    }
+    let input = serde_json::json!({
+        "index": plan.index,
+        "displayText": plan.display_text,
+        "spokenText": plan.spoken_text,
+        "targetDurationMs": target_duration_ms,
+    });
+    let styles = serde_json::to_string(allowed_styles)?;
+    let prompt = format!(
+        "Revise this one Vietnamese speech performance plan so spokenText fits targetDurationMs. \
+         Preserve meaning and displayText. Never add fillers. Keep at most two emphasis phrases \
+         and two semantic pauses. Pauses must be 120-800 ms and phrase text must occur exactly \
+         once in spokenText. Use delivery neutral, serious, reflective, or question. Use style \
+         only from {styles}, otherwise null. Return JSON only with {{\"plans\":[plan]}}. Input JSON: {input}"
+    );
+    let body = serde_json::json!({
+        "model": MODEL,
+        "input": prompt,
+        "store": false,
+        "response_format": {
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": {
+                "type": "object",
+                "properties": { "plans": { "type": "array", "items": { "type": "object" } } },
+                "required": ["plans"]
+            }
+        }
+    });
+    let client = reqwest::Client::new();
+    let key = &keys[plan.index % keys.len()];
+    let text = request_model_output(&client, key, body).await?;
+    let output: PlanOutput = serde_json::from_str(&text).context("Gemini did not return revised speech plan JSON")?;
+    if output.plans.len() != 1 || output.plans[0].index != plan.index {
+        bail!("Gemini must return exactly one revised speech plan for segment {}", plan.index);
+    }
+    let mut revised = output.plans.into_iter().next().expect("one validated plan");
+    revised.display_text = plan.display_text.clone();
+    revised.target_duration_ms = target_duration_ms;
+    revised.validate(allowed_styles)?;
+    Ok(revised)
+}
+
 async fn translate_batch(client: &reqwest::Client, key: &str, batch: &[SrtSegment]) -> Result<Vec<SrtSegment>> {
     let input = serde_json::to_string(
         &batch.iter().map(|segment| InputSegment { index: segment.index, text: &segment.text }).collect::<Vec<_>>(),

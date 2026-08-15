@@ -96,6 +96,25 @@ impl WordsPerMinute {
 }
 
 impl AzureVoice {
+    pub fn from_short_name(short_name: impl Into<String>, styles: Vec<String>) -> Self {
+        let short_name = short_name.into();
+        let capabilities = Self::capabilities(&short_name, &styles, true, &[]);
+        Self {
+            display_name: short_name.clone(),
+            local_name: short_name.clone(),
+            short_name,
+            gender: String::new(),
+            locale: String::new(),
+            locale_name: String::new(),
+            status: String::new(),
+            voice_type: "Neural".to_owned(),
+            styles,
+            secondary_locales: Vec::new(),
+            words_per_minute: None,
+            capabilities,
+        }
+    }
+
     fn capabilities(
         short_name: &str,
         styles: &[String],

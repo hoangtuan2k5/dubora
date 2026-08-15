@@ -563,6 +563,8 @@ function App() {
   const [force, setForce] = useState(false);
   const [forceTts, setForceTts] = useState(false);
   const [translate, setTranslate] = useState(false);
+  const [naturalVoice, setNaturalVoice] = useState(false);
+  const [naturalMode, setNaturalMode] = useState<"sync" | "balanced" | "natural">("balanced");
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [youtubeQuality, setYoutubeQuality] = useState("highest");
   const [importingYoutube, setImportingYoutube] = useState(false);
@@ -1111,7 +1113,7 @@ function App() {
     setProgress(null);
     setNotice("");
     try {
-      await api.startDub(targets, force, forceTts, translate);
+      await api.startDub(targets, force, forceTts, translate, naturalVoice, naturalMode);
     } catch (error) {
       setBusy(false);
       setNotice(`Job thất bại: ${describeError(error)}`);
@@ -1896,6 +1898,11 @@ function App() {
                 ) : (
                   <p className="field-hint">Tải danh sách giọng để xem các tone được Azure hỗ trợ.</p>
                 )}
+                {selectedVoice && (
+                  <p className="field-hint voice-capabilities">
+                    Natural Voice: nhấn mạnh {selectedVoice.capabilities.manualEmphasis}, nhịp/độ cao {selectedVoice.capabilities.manualProsody}, ngắt câu {selectedVoice.capabilities.semanticBreak}, phong cách {selectedVoice.capabilities.style}.
+                  </p>
+                )}
               </article>
 
               <article className="panel config-panel">
@@ -2041,6 +2048,26 @@ function App() {
                     disabled={!config.geminiKeys.trim()}
                     onChange={setTranslate}
                   />
+                  <OptionChip
+                    id="natural-voice"
+                    label="Natural Voice"
+                    title="Lập cách nói tự nhiên?"
+                    body="Gemini lập Speech Plan, Azure nhận SSML theo khả năng giọng và Dubora chỉ kéo giãn âm thanh trong giới hạn an toàn."
+                    hint="Cần ít nhất một Gemini API key. Mặc định Cân bằng: chỉ mượn tối đa 250 ms khoảng lặng sau câu."
+                    checked={naturalVoice}
+                    disabled={!config.geminiKeys.trim()}
+                    onChange={setNaturalVoice}
+                  />
+                  {naturalVoice && (
+                    <label className="natural-mode">
+                      Nhịp Natural Voice
+                      <select value={naturalMode} onChange={(event) => setNaturalMode(event.target.value as typeof naturalMode)}>
+                        <option value="sync">Đồng bộ sát</option>
+                        <option value="balanced">Cân bằng</option>
+                        <option value="natural">Tự nhiên tối đa</option>
+                      </select>
+                    </label>
+                  )}
                 </div>
                 <div className="control-bar-actions">
                   <button

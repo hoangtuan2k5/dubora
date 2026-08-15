@@ -5,17 +5,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::build_audio::build_voiceover_track;
+use crate::build_audio::{build_voiceover_track, build_voiceover_track_with_tempo_cap};
 use crate::build_video::build_dubbed_video;
 use crate::clean_rolling::clean_youtube_rolling_subtitles;
 use crate::config::{DubConfig, DubOptions, Provider};
+use crate::azure_voices::AzureVoice;
+use crate::duration_solver::MAX_TIME_STRETCH_TEMPO;
 use crate::paths::{
     companion_output_srt, find_matching_srt, find_targets, output_path, safe_work_path,
     video_relative_path,
 };
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
-use crate::tts_azure::generate_all_tts;
-use crate::translate_gemini::translate_srt;
+use crate::srt::{SrtSegment, parse_srt, write_srt};
+use crate::tts_azure::{generate_all_tts, generate_all_tts_for_speech_plans};
+use crate::translate_gemini::{create_speech_plans, translate_srt};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,18 +209,68 @@ async fn create_dub_for_video(
         ));
     }
 
-    if options.translate {
-        let gemini = config.gemini.as_ref().context("Missing GEMINI_API_KEYS. Add Gemini API keys before translating")?;
-        translate_srt(&gemini.keys, &clean_srt, &vi_srt).await?;
-    } else {
-        fs::copy(&clean_srt, &vi_srt)?;
-    }
-
     let azure = config
         .azure
         .as_ref()
         .context("Missing AZURE_KEY. Add it to <root>/.env or export it")?;
-    generate_all_tts(azure, &config.ffmpeg, &vi_srt, &tts_dir, &label, progress).await?;
+    if let Some(mode) = options.natural_mode {
+        let gemini = config
+            .gemini
+            .as_ref()
+            .context("Missing GEMINI_API_KEYS. Add Gemini API keys before enabling Natural Voice")?;
+        let styles = (!azure.style.is_empty()).then(|| azure.style.clone()).into_iter().collect();
+        let voice = AzureVoice::from_short_name(azure.voice.clone(), styles);
+        let plans = create_speech_plans(
+            &gemini.keys,
+            &clean_srt,
+            options.translate,
+            mode,
+            &voice.styles,
+        )
+        .await?;
+        let source = parse_srt(&clean_srt)?;
+        let display_segments: Result<Vec<_>> = source
+            .iter()
+            .map(|segment| {
+                let plan = plans
+                    .plans
+                    .iter()
+                    .find(|plan| plan.index == segment.index)
+                    .context("Natural Voice plan is missing a subtitle segment")?;
+                Ok(SrtSegment {
+                    index: segment.index,
+                    start: segment.start.clone(),
+                    end: segment.end.clone(),
+                    text: plan.display_text.clone(),
+                })
+            })
+            .collect();
+        write_srt(&vi_srt, &display_segments?)?;
+        generate_all_tts_for_speech_plans(
+            azure,
+            &config.ffmpeg,
+            &vi_srt,
+            &plans.plans,
+            mode,
+            &gemini.keys,
+            &voice,
+            &tts_dir,
+            &label,
+            progress,
+        )
+        .await?;
+    } else {
+        if options.translate {
+            let gemini = config
+                .gemini
+                .as_ref()
+                .context("Missing GEMINI_API_KEYS. Add Gemini API keys before translating")?;
+            translate_srt(&gemini.keys, &clean_srt, &vi_srt).await?;
+        } else {
+            fs::copy(&clean_srt, &vi_srt)?;
+        }
+        generate_all_tts(azure, &config.ffmpeg, &vi_srt, &tts_dir, &label, progress).await?;
+    }
 
     progress.event(ProgressEvent::new(
         Stage::Audio,
@@ -231,8 +284,20 @@ async fn create_dub_for_video(
         let voiceover = voiceover.clone();
         let job_dir = job_dir.clone();
         let label_audio = label.clone();
+        let natural_mode = options.natural_mode;
         tokio::task::spawn_blocking(move || {
-            build_voiceover_track(&ffmpeg, &vi_srt, &tts_dir, &voiceover, &job_dir)
+            if natural_mode.is_some() {
+                build_voiceover_track_with_tempo_cap(
+                    &ffmpeg,
+                    &vi_srt,
+                    &tts_dir,
+                    &voiceover,
+                    &job_dir,
+                    Some(MAX_TIME_STRETCH_TEMPO),
+                )
+            } else {
+                build_voiceover_track(&ffmpeg, &vi_srt, &tts_dir, &voiceover, &job_dir)
+            }
         })
         .await
         .with_context(|| format!("Voiceover task failed for {label_audio}"))??;

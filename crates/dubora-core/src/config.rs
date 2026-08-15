@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::FfmpegPaths;
+use crate::speech_plan::NaturalMode;
 
 /// Default Azure TTS voice for Vietnamese course dubbing (Florian Dragon HD).
 pub const AZURE_VOICE: &str = "de-DE-Florian:DragonHDLatestNeural";
@@ -132,6 +133,8 @@ pub struct DubOptions {
     pub force: bool,
     pub force_tts: bool,
     pub translate: bool,
+    /// Opt-in Natural Voice processing. `None` preserves the legacy pipeline.
+    pub natural_mode: Option<NaturalMode>,
 }
 
 #[cfg(test)]
