@@ -10,9 +10,9 @@ import requests
 from pathlib import Path
 
 MODEL = os.environ.get("DS_MODEL", "deepseek-v4-flash")
-DS_IN = float(os.environ.get("DS_IN", "0.14"))     # USD/1M tokens, giá không cao điểm
-DS_OUT = float(os.environ.get("DS_OUT", "0.28"))   # USD/1M tokens, giá không cao điểm
-DS_PEAK = float(os.environ.get("DS_PEAK", "2"))    # hệ số giờ cao điểm (Bắc Kinh 09-12, 14-18) = x2
+DS_IN = float(os.environ.get("DS_IN", "0.22"))     # USD/1M tokens, Flash off-peak, cache miss
+DS_OUT = float(os.environ.get("DS_OUT", "0.66"))   # USD/1M tokens, Flash off-peak
+DS_PEAK = float(os.environ.get("DS_PEAK", "2"))    # giờ peak = 2x Flash off-peak
 AZURE_STD = float(os.environ.get("AZURE_STD", "15"))  # USD/1M chars — neural chuẩn
 AZURE_HD = float(os.environ.get("AZURE_HD", "48"))    # USD/1M chars — premium HD (DragonHD)
 

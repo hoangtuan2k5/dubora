@@ -11,8 +11,21 @@ Dữ liệu thô + script tái chạy: `benchmark/` (xem cuối trang).
 | --- | --- | --- |
 | Azure TTS — neural | $15 / 1M chars | Giọng chuẩn |
 | Azure TTS — HD premium | $48 / 1M chars | Giọng `de-DE-Florian:DragonHD` (3.2x neural) |
-| DeepSeek dịch — input | $0.14 / 1M tokens | `deepseek-v4-flash` |
-| DeepSeek dịch — output | $0.28 / 1M tokens | Giờ cao điểm Bắc Kinh x2: $0.28 / $0.56 |
+
+### DeepSeek V4 — dịch SRT
+
+| Model | Loại token | Cũ / 1M | Mới off-peak / 1M | Mới peak / 1M |
+| --- | --- | ---: | ---: | ---: |
+| V4 Flash | Cache hit | $0.0028 | $0.007 | $0.014 |
+| V4 Flash | Input cache miss | $0.14 | $0.22 | $0.44 |
+| V4 Flash | Output | $0.28 | $0.66 | $1.32 |
+| V4 Pro | Cache hit | $0.003625 | $0.022 | $0.044 |
+| V4 Pro | Input cache miss | $0.435 | $0.66 | $1.32 |
+| V4 Pro | Output | $0.87 | $1.98 | $3.96 |
+
+Các bảng lợi nhuận dưới dùng **V4 Flash input cache miss**: mỗi SRT có nội dung khác nhau,
+nên không nên hứa hẹn cache hit. Peak đắt gấp 2x off-peak; batch dịch nên chạy off-peak.
+V4 Pro chưa là mặc định và không được dùng để định giá gói hiện tại.
 
 ### Cố định (trả hàng tháng)
 
@@ -31,14 +44,17 @@ Chi phí `$/phút video` (tách riêng, đã hiệu chỉnh 8 file Serial bị c
 
 | | avg | median | min | max | p95 |
 | --- | --- | --- | --- | --- | --- |
-| AI dịch (base) | 0.0010 | 0.0008 | 0.0002 | 0.0029 | 0.0023 |
-| AI dịch (peak x2) | 0.0020 | 0.0016 | 0.0004 | 0.0058 | 0.0046 |
+| AI dịch Flash (giá cũ) | 0.0010 | 0.0008 | 0.0002 | 0.0029 | 0.0023 |
+| AI dịch Flash (off-peak) | 0.0022 | 0.0017 | 0.0004 | 0.0067 | 0.0053 |
+| AI dịch Flash (peak) | 0.0045 | 0.0034 | 0.0009 | 0.0134 | 0.0106 |
 | TTS neural $15 | 0.0212 | 0.0148 | 0.0046 | 0.0483 | 0.0466 |
 | TTS HD $48 | 0.0679 | 0.0473 | 0.0147 | 0.1545 | 0.1493 |
-| **TỔNG rẻ** (base+neural) | 0.0222 | 0.0156 | 0.0049 | 0.0490 | 0.0475 |
-| **TỔNG đắt** (peak+HD) | 0.0699 | 0.0488 | 0.0154 | 0.1559 | 0.1509 |
+| **TỔNG rẻ** (Flash off-peak + neural) | 0.0235 | 0.0165 | 0.0053 | 0.0513 | 0.0485 |
+| **TỔNG đắt** (Flash peak + HD) | 0.0725 | 0.0507 | 0.0162 | 0.1589 | 0.1531 |
 
-Tổng 625 phút: dịch $0.53–1.05 + TTS $17.2–55 = $12–37.7. **TTS chiếm 97–98%** chi phí.
+Tổng 625 phút: dịch Flash cũ $0.53, mới $1.14 off-peak hoặc $2.28 peak; TTS giữ nguyên
+$17.23 neural hoặc $55.15 HD. Tổng biến đổi mới là **$18.37** (off-peak + neural) đến
+**$57.43** (peak + HD). TTS vẫn chiếm khoảng **94–96%** chi phí.
 
 ## Cách tính giá trong app
 
@@ -68,49 +84,45 @@ Tổng 625 phút: dịch $0.53–1.05 + TTS $17.2–55 = $12–37.7. **TTS chi�
 
 **Quy đổi ra video 10 phút** (mật độ thật: median 968 chars/min, p95 2,716):
 
-| Gói | Giá | Lời/gói | Video 10p NN (median) | Video 10p NN (p95) | Video 10p HD (median) | Video 10p HD (p95) |
+| Gói | Giá | Lời NN (off / peak) | Video 10p NN (median) | Video 10p NN (p95) | Video 10p HD (median) | Video 10p HD (p95) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Starter | $5 | $3.48 | ~10 | ~4 | ~3 | ~1 |
-| Creator | $15 | $9.68 | ~36 | ~13 | ~11 | ~4 |
-| Pro | $30 | $17.84 | ~83 | ~29 | ~26 | ~9 |
-| Pro x2 | $60 | $35.68 | ~165 | ~59 | ~52 | ~18 |
-| Pro x5 | $150 | $89.20 | ~413 | ~147 | ~129 | ~46 |
-| Pro x10 | $300 | $178.40 | ~826 | ~295 | ~258 | ~92 |
-
-Kiểm chứng lời (chi phí biến đổi khi dùng hết credit):
-- Starter $5: neural $1.5 → **lời $3.5** | HD $1.44 → lời $3.56
-- Creator $15: neural $5.25 → **lời $9.75** | HD $5.28 → lời $9.72
-- Pro $30: neural $12 → **lời $18** | HD $12 → lời $18
-- Pro x2/x5/x10: đều lời ~2–3x chi phí
+| Starter | $5 | $3.35 / $3.20 | ~10 | ~4 | ~3 | ~1 |
+| Creator | $15 | $9.23 / $8.71 | ~36 | ~13 | ~11 | ~4 |
+| Pro | $30 | $16.81 / $15.62 | ~83 | ~29 | ~26 | ~9 |
+| Pro x2 | $60 | $33.62 / $31.24 | ~165 | ~59 | ~52 | ~18 |
+| Pro x5 | $150 | $84.05 / $78.09 | ~413 | ~147 | ~129 | ~46 |
+| Pro x10 | $300 | $168.09 / $156.19 | ~826 | ~295 | ~258 | ~92 |
 
 **Chiến lược**: Starter lời mỏng = lures kéo khách; lời thật từ Creator/Pro.
-**Break-even**: ~6–8 khách trả phí/tháng mới bù nổi fixed $76/tháng.
+**Break-even**: phụ thuộc gói, giờ chạy và chi phí phát sinh; bảng bên dưới dùng Flash Neural.
 
-## Lời/lãi từng gói (đã gộp AI dịch ~1.5%)
+## Lời/lãi gộp từng gói
 
-Cost = `chars × rate_TTS + AI dịch (~1.5%)`; dùng credit dùng hết.
+Cost = `chars × rate_TTS + AI dịch Flash`; giả định khách dùng hết credit, SRT cần dịch,
+và input cache miss. Chi phí AI dùng token thực tế benchmark trả về, nên không giả định cache hit.
+Đây là **lãi gộp**, chưa trừ VPS, R2/bandwidth, payment fee hay thuế.
 
-| Gói | Giá | Cost NN | Cost HD | Lời NN | Lời HD | Biên NN | Biên HD |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Starter | $5 | $1.52 | $1.45 | **$3.48** | $3.55 | 70% | 71% |
-| Creator | $15 | $5.32 | $5.30 | **$9.68** | $9.70 | 65% | 65% |
-| Pro | $30 | $12.16 | $12.05 | **$17.84** | $17.95 | 59% | 60% |
-| Pro x2 | $60 | $24.32 | $24.10 | **$35.68** | $35.90 | 59% | 60% |
-| Pro x5 | $150 | $60.80 | $60.25 | **$89.20** | $89.75 | 59% | 60% |
-| Pro x10 | $300 | $121.60 | $120.50 | **$178.40** | $179.50 | 59% | 60% |
+| Gói | Lời NN cũ | NN off-peak | NN peak | Lời HD cũ | HD off-peak | HD peak |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Starter | $3.43 | $3.35 | $3.20 | $3.54 | $3.52 | $3.47 |
+| Creator | $9.51 | $9.23 | $8.71 | $9.64 | $9.56 | $9.39 |
+| Pro | $17.45 | $16.81 | $15.62 | $17.83 | $17.63 | $17.26 |
+| Pro x2 | $34.90 | $33.62 | $31.24 | $35.66 | $35.26 | $34.51 |
+| Pro x5 | $87.25 | $84.05 | $78.09 | $89.14 | $88.14 | $86.28 |
+| Pro x10 | $174.50 | $168.09 | $156.19 | $178.28 | $176.28 | $172.56 |
 
-**Break-even (bù fixed $76/tháng) — số gói cần bán:**
+**Break-even (bù fixed $76/tháng, Flash Neural) — số gói cần bán:**
 
-| Gói | Gói cần bán/tháng |
-| --- | --- |
-| Starter | ~22 |
-| Creator | ~8 |
-| Pro | ~4 |
-| Pro x2 | ~2 |
-| Pro x5 | ~1 |
-| Pro x10 | ~0.4 (tức 5 khách/tháng) |
+| Gói | Off-peak | Peak |
+| --- | ---: | ---: |
+| Starter | 23 | 24 |
+| Creator | 9 | 9 |
+| Pro | 5 | 5 |
+| Pro x2 | 3 | 3 |
+| Pro x5 | 1 | 1 |
+| Pro x10 | 1 | 1 |
 
-Ví dụ hỗn hợp: 2 Creator + 1 Pro + 1 Pro x2 = 2×9.68 + 17.84 + 35.68 = **$72.9** ≈ hòa vốn với **4 khách/tháng**.
+Lãi ròng tháng = tổng lãi gộp − $76 fixed − R2/bandwidth phát sinh − payment fee − thuế.
 
 ---
 
