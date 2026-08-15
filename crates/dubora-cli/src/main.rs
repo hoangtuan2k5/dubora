@@ -5,8 +5,8 @@ use clap::{Parser, ValueEnum};
 use dubora_core::ffmpeg::FfmpegPaths;
 use dubora_core::translate_gemini::load_env_keys;
 use dubora_core::{
-    AzureConfig, DubConfig, DubOptions, GeminiConfig, ProgressEvent, ProgressReporter, Provider,
-    NaturalMode, create_dubs,
+    AzureConfig, DubConfig, DubOptions, GeminiConfig, NaturalMode, ProgressEvent, ProgressReporter,
+    Provider, create_dubs,
 };
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]

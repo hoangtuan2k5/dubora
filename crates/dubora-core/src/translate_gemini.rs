@@ -13,13 +13,21 @@ const TRANSLATE_BATCH_SIZE: usize = 200;
 const PLAN_BATCH_SIZE: usize = 50;
 
 #[derive(Serialize)]
-struct InputSegment<'a> { index: usize, text: &'a str }
+struct InputSegment<'a> {
+    index: usize,
+    text: &'a str,
+}
 
 #[derive(Deserialize)]
-struct Output { segments: Vec<OutputSegment> }
+struct Output {
+    segments: Vec<OutputSegment>,
+}
 
 #[derive(Deserialize)]
-struct OutputSegment { index: usize, text: String }
+struct OutputSegment {
+    index: usize,
+    text: String,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,12 +42,18 @@ struct PlanInputSegment<'a> {
 }
 
 #[derive(Deserialize)]
-struct PlanOutput { plans: Vec<SpeechPlan> }
+struct PlanOutput {
+    plans: Vec<SpeechPlan>,
+}
 
 pub async fn translate_srt(keys: &[String], input: &Path, output: &Path) -> Result<()> {
     let source = parse_srt(input)?;
-    if source.is_empty() { bail!("No subtitle segments were found for translation"); }
-    if keys.is_empty() { bail!("At least one Gemini API key is required"); }
+    if source.is_empty() {
+        bail!("No subtitle segments were found for translation");
+    }
+    if keys.is_empty() {
+        bail!("At least one Gemini API key is required");
+    }
     let client = reqwest::Client::new();
     let mut translated = Vec::with_capacity(source.len());
 
@@ -63,8 +77,12 @@ pub async fn create_speech_plans(
     allowed_styles: &[String],
 ) -> Result<SpeechPlanDocument> {
     let source = parse_srt(input)?;
-    if source.is_empty() { bail!("No subtitle segments were found for speech planning"); }
-    if keys.is_empty() { bail!("At least one Gemini API key is required"); }
+    if source.is_empty() {
+        bail!("No subtitle segments were found for speech planning");
+    }
+    if keys.is_empty() {
+        bail!("At least one Gemini API key is required");
+    }
 
     let client = reqwest::Client::new();
     let mut plans = Vec::with_capacity(source.len());
@@ -108,7 +126,8 @@ pub async fn revise_speech_plan(
          Preserve meaning and displayText. Never add fillers. Keep at most two emphasis phrases \
          and two semantic pauses. Pauses must be 120-800 ms and phrase text must occur exactly \
          once in spokenText. Use delivery neutral, serious, reflective, or question. Use style \
-         only from {styles}, otherwise null. Return JSON only with {{\"plans\":[plan]}}. Input JSON: {input}"
+         only from {styles}, otherwise null. Return JSON only with {{\"plans\":[{{\"spokenText\":\"...\",\"delivery\":\"neutral\",\"emphasis\":[],\"pauses\":[],\"style\":null}}]}}. \
+         Do not return index, displayText, or targetDurationMs; Dubora keeps them locally. Input JSON: {input}"
     );
     let body = serde_json::json!({
         "model": MODEL,
@@ -119,7 +138,17 @@ pub async fn revise_speech_plan(
             "mime_type": "application/json",
             "schema": {
                 "type": "object",
-                "properties": { "plans": { "type": "array", "items": { "type": "object" } } },
+                "properties": { "plans": { "type": "array", "items": {
+                    "type": "object",
+                    "properties": {
+                        "spokenText": { "type": "string" },
+                        "delivery": { "type": "string" },
+                        "emphasis": { "type": "array" },
+                        "pauses": { "type": "array" },
+                        "style": { "type": ["string", "null"] }
+                    },
+                    "required": ["spokenText"]
+                } } },
                 "required": ["plans"]
             }
         }
@@ -127,20 +156,66 @@ pub async fn revise_speech_plan(
     let client = reqwest::Client::new();
     let key = &keys[plan.index % keys.len()];
     let text = request_model_output(&client, key, body).await?;
-    let output: PlanOutput = serde_json::from_str(&text).context("Gemini did not return revised speech plan JSON")?;
-    if output.plans.len() != 1 || output.plans[0].index != plan.index {
-        bail!("Gemini must return exactly one revised speech plan for segment {}", plan.index);
-    }
-    let mut revised = output.plans.into_iter().next().expect("one validated plan");
-    revised.display_text = plan.display_text.clone();
-    revised.target_duration_ms = target_duration_ms;
+    parse_revised_speech_plan(plan, target_duration_ms, allowed_styles, &text)
+}
+
+fn parse_revised_speech_plan(
+    plan: &SpeechPlan,
+    target_duration_ms: u32,
+    allowed_styles: &[String],
+    text: &str,
+) -> Result<SpeechPlan> {
+    let mut response: serde_json::Value =
+        serde_json::from_str(text).context("Gemini did not return revised speech plan JSON")?;
+    let plans = response["plans"]
+        .as_array_mut()
+        .filter(|plans| plans.len() == 1)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Gemini must return exactly one revised speech plan for segment {}",
+                plan.index
+            )
+        })?;
+    let revised = plans[0].as_object_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Gemini returned an invalid revised speech plan for segment {}",
+            plan.index
+        )
+    })?;
+    revised.insert("index".to_owned(), serde_json::json!(plan.index));
+    revised.insert(
+        "displayText".to_owned(),
+        serde_json::json!(plan.display_text),
+    );
+    revised.insert(
+        "targetDurationMs".to_owned(),
+        serde_json::json!(target_duration_ms),
+    );
+
+    let revised: PlanOutput = serde_json::from_value(response)
+        .context("Gemini did not return a usable revised speech plan")?;
+    let revised = revised
+        .plans
+        .into_iter()
+        .next()
+        .expect("one validated plan");
     revised.validate(allowed_styles)?;
     Ok(revised)
 }
 
-async fn translate_batch(client: &reqwest::Client, key: &str, batch: &[SrtSegment]) -> Result<Vec<SrtSegment>> {
+async fn translate_batch(
+    client: &reqwest::Client,
+    key: &str,
+    batch: &[SrtSegment],
+) -> Result<Vec<SrtSegment>> {
     let input = serde_json::to_string(
-        &batch.iter().map(|segment| InputSegment { index: segment.index, text: &segment.text }).collect::<Vec<_>>(),
+        &batch
+            .iter()
+            .map(|segment| InputSegment {
+                index: segment.index,
+                text: &segment.text,
+            })
+            .collect::<Vec<_>>(),
     )?;
     let prompt = format!(
         "{}Input JSON: {input}",
@@ -168,13 +243,28 @@ async fn translate_batch(client: &reqwest::Client, key: &str, batch: &[SrtSegmen
         }
     });
     let text = request_model_output(client, key, body).await?;
-    let output: Output = serde_json::from_str(&text).context("Gemini did not return subtitle JSON")?;
-    let mut by_index = output.segments.into_iter().map(|segment| (segment.index, segment.text.trim().to_owned())).collect::<std::collections::HashMap<_, _>>();
-    batch.iter().map(|segment| {
-        let text = by_index.remove(&segment.index).filter(|text| !text.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Gemini omitted subtitle {}", segment.index))?;
-        Ok(SrtSegment { index: segment.index, start: segment.start.clone(), end: segment.end.clone(), text })
-    }).collect()
+    let output: Output =
+        serde_json::from_str(&text).context("Gemini did not return subtitle JSON")?;
+    let mut by_index = output
+        .segments
+        .into_iter()
+        .map(|segment| (segment.index, segment.text.trim().to_owned()))
+        .collect::<std::collections::HashMap<_, _>>();
+    batch
+        .iter()
+        .map(|segment| {
+            let text = by_index
+                .remove(&segment.index)
+                .filter(|text| !text.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Gemini omitted subtitle {}", segment.index))?;
+            Ok(SrtSegment {
+                index: segment.index,
+                start: segment.start.clone(),
+                end: segment.end.clone(),
+                text,
+            })
+        })
+        .collect()
 }
 
 async fn plan_batch(
@@ -186,19 +276,28 @@ async fn plan_batch(
     mode: NaturalMode,
     allowed_styles: &[String],
 ) -> Result<Vec<SpeechPlan>> {
-    let input = batch.iter().map(|segment| {
-        let position = source.iter().position(|candidate| candidate.index == segment.index)
-            .expect("batch segment must belong to source");
-        Ok(PlanInputSegment {
-            index: segment.index,
-            text: &segment.text,
-            start: &segment.start,
-            end: &segment.end,
-            target_duration_ms: target_duration_ms(segment)?,
-            previous_text: position.checked_sub(1).map(|index| source[index].text.as_str()),
-            next_text: source.get(position + 1).map(|segment| segment.text.as_str()),
+    let input = batch
+        .iter()
+        .map(|segment| {
+            let position = source
+                .iter()
+                .position(|candidate| candidate.index == segment.index)
+                .expect("batch segment must belong to source");
+            Ok(PlanInputSegment {
+                index: segment.index,
+                text: &segment.text,
+                start: &segment.start,
+                end: &segment.end,
+                target_duration_ms: target_duration_ms(segment)?,
+                previous_text: position
+                    .checked_sub(1)
+                    .map(|index| source[index].text.as_str()),
+                next_text: source
+                    .get(position + 1)
+                    .map(|segment| segment.text.as_str()),
+            })
         })
-    }).collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()?;
     let input = serde_json::to_string(&input)?;
     let styles = serde_json::to_string(allowed_styles)?;
     let translation_instruction = if translate {
@@ -251,43 +350,72 @@ fn parse_plan_response(
     translate: bool,
     allowed_styles: &[String],
 ) -> Result<Vec<SpeechPlan>> {
-    let output: PlanOutput = serde_json::from_str(text).context("Gemini did not return speech plan JSON")?;
-    let mut by_index = output.plans.into_iter()
+    let output: PlanOutput =
+        serde_json::from_str(text).context("Gemini did not return speech plan JSON")?;
+    let mut by_index = output
+        .plans
+        .into_iter()
         .map(|plan| (plan.index, plan))
         .collect::<std::collections::HashMap<_, _>>();
     if by_index.len() != batch.len() {
         bail!("Gemini returned duplicate or unexpected speech plans");
     }
 
-    batch.iter().map(|segment| {
-        let mut plan = by_index.remove(&segment.index)
-            .ok_or_else(|| anyhow::anyhow!("Gemini omitted speech plan {}", segment.index))?;
-        let source_segment = source.iter().find(|candidate| candidate.index == segment.index)
-            .expect("batch segment must belong to source");
-        if !translate { plan.display_text = source_segment.text.clone(); }
-        plan.target_duration_ms = target_duration_ms(source_segment)?;
-        plan.validate(allowed_styles)?;
-        Ok(plan)
-    }).collect()
+    batch
+        .iter()
+        .map(|segment| {
+            let mut plan = by_index
+                .remove(&segment.index)
+                .ok_or_else(|| anyhow::anyhow!("Gemini omitted speech plan {}", segment.index))?;
+            let source_segment = source
+                .iter()
+                .find(|candidate| candidate.index == segment.index)
+                .expect("batch segment must belong to source");
+            if !translate {
+                plan.display_text = source_segment.text.clone();
+            }
+            plan.target_duration_ms = target_duration_ms(source_segment)?;
+            plan.validate(allowed_styles)?;
+            Ok(plan)
+        })
+        .collect()
 }
 
 fn target_duration_ms(segment: &SrtSegment) -> Result<u32> {
     let duration = (time_to_seconds(&segment.end)? - time_to_seconds(&segment.start)?) * 1_000.0;
-    if duration < 100.0 { bail!("Subtitle {} is too short for speech planning", segment.index); }
+    if duration < 100.0 {
+        bail!(
+            "Subtitle {} is too short for speech planning",
+            segment.index
+        );
+    }
     Ok(duration.round() as u32)
 }
 
-async fn request_model_output(client: &reqwest::Client, key: &str, body: serde_json::Value) -> Result<String> {
-    let response = client.post(ENDPOINT)
+async fn request_model_output(
+    client: &reqwest::Client,
+    key: &str,
+    body: serde_json::Value,
+) -> Result<String> {
+    let response = client
+        .post(ENDPOINT)
         .header("x-goog-api-key", key)
         .header("content-type", "application/json")
         .body(serde_json::to_vec(&body)?)
-        .send().await.context("Gemini request failed")?;
+        .send()
+        .await
+        .context("Gemini request failed")?;
     let status = response.status();
-    let payload: serde_json::Value = serde_json::from_str(&response.text().await.context("Invalid Gemini response")?)
-        .context("Invalid Gemini JSON response")?;
-    if !status.is_success() { bail!("Gemini request failed with {status}: {}", payload); }
-    Ok(payload["steps"].as_array().into_iter().flatten()
+    let payload: serde_json::Value =
+        serde_json::from_str(&response.text().await.context("Invalid Gemini response")?)
+            .context("Invalid Gemini JSON response")?;
+    if !status.is_success() {
+        bail!("Gemini request failed with {status}: {}", payload);
+    }
+    Ok(payload["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter(|step| step["type"] == "model_output")
         .flat_map(|step| step["content"].as_array().into_iter().flatten())
         .filter(|content| content["type"] == "text")
@@ -296,22 +424,38 @@ async fn request_model_output(client: &reqwest::Client, key: &str, body: serde_j
 }
 
 pub fn parse_keys(raw: &str) -> Vec<String> {
-    raw.split([',', '\n']).map(str::trim).filter(|key| !key.is_empty()).map(str::to_owned).collect()
+    raw.split([',', '\n'])
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 pub fn load_env_keys(root: &Path) -> Vec<String> {
-    std::env::var("GEMINI_API_KEYS").ok().or_else(|| fs::read_to_string(root.join(".env")).ok()
-        .and_then(|contents| contents.lines().find_map(|line| line.strip_prefix("GEMINI_API_KEYS=").map(str::to_owned))))
-        .map(|keys| parse_keys(&keys)).unwrap_or_default()
+    std::env::var("GEMINI_API_KEYS")
+        .ok()
+        .or_else(|| {
+            fs::read_to_string(root.join(".env"))
+                .ok()
+                .and_then(|contents| {
+                    contents
+                        .lines()
+                        .find_map(|line| line.strip_prefix("GEMINI_API_KEYS=").map(str::to_owned))
+                })
+        })
+        .map(|keys| parse_keys(&keys))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_keys, parse_plan_response};
-    use crate::srt::SrtSegment;
+    use super::{parse_keys, parse_plan_response, parse_revised_speech_plan};
+    use crate::{speech_plan::SpeechPlan, srt::SrtSegment};
 
     #[test]
-    fn parses_comma_or_newline_separated_keys() { assert_eq!(parse_keys(" one, two\nthree "), ["one", "two", "three"]); }
+    fn parses_comma_or_newline_separated_keys() {
+        assert_eq!(parse_keys(" one, two\nthree "), ["one", "two", "three"]);
+    }
 
     fn segments() -> Vec<SrtSegment> {
         vec![SrtSegment {
@@ -343,5 +487,16 @@ mod tests {
     fn rejects_missing_speech_plans() {
         let source = segments();
         assert!(parse_plan_response(&source, &source, r#"{"plans":[]}"#, false, &[]).is_err());
+    }
+
+    #[test]
+    fn keeps_local_metadata_when_a_revision_only_returns_delivery_fields() {
+        let plan = SpeechPlan::plain(7, "Spring Boot rất quan trọng.", 2_000);
+        let json = r#"{"plans":[{"spokenText":"Spring Boot rất quan trọng.","delivery":"serious","emphasis":[],"pauses":[],"style":null}]}"#;
+        let revised = parse_revised_speech_plan(&plan, 1_600, &[], json).unwrap();
+
+        assert_eq!(revised.index, 7);
+        assert_eq!(revised.display_text, "Spring Boot rất quan trọng.");
+        assert_eq!(revised.target_duration_ms, 1_600);
     }
 }

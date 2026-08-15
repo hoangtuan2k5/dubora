@@ -8,8 +8,8 @@ use dubora_core::paths::{companion_output_srt, find_matching_srt, output_path};
 use dubora_core::srt::{parse_srt, time_to_seconds};
 use dubora_core::youtube::select_subtitle_language;
 use dubora_core::{
-    AZURE_VOICE, AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, ProgressEvent,
-    NaturalMode, ProgressReporter, Provider, Stage, VideoInfo, create_dubs, delete_input_video,
+    AZURE_VOICE, AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, NaturalMode,
+    ProgressEvent, ProgressReporter, Provider, Stage, VideoInfo, create_dubs, delete_input_video,
     list_azure_voices, rename_input_video, repair_adjacent_youtube_subtitles,
 };
 use serde::{Deserialize, Serialize};

@@ -20,8 +20,8 @@ use crate::ffmpeg::FfmpegPaths;
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
 use crate::speech_plan::{EmphasisLevel, NaturalMode, SpeechPlan};
 use crate::srt::{SrtSegment, parse_srt, time_to_seconds};
-use crate::tts_cache::{is_fresh_audio_file, tts_cache_key, write_tts_cache_key};
 use crate::translate_gemini::revise_speech_plan;
+use crate::tts_cache::{is_fresh_audio_file, tts_cache_key, write_tts_cache_key};
 
 const CONCURRENCY: usize = 4;
 const RETRIES: usize = 3;
@@ -122,7 +122,10 @@ pub async fn generate_all_tts_for_speech_plans(
     progress: &dyn ProgressReporter,
 ) -> Result<()> {
     let segments = parse_srt(input_srt)?;
-    let plans: HashMap<_, _> = plans.iter().map(|plan| (plan.index, plan.clone())).collect();
+    let plans: HashMap<_, _> = plans
+        .iter()
+        .map(|plan| (plan.index, plan.clone()))
+        .collect();
     if segments.len() != plans.len()
         || segments
             .iter()
@@ -146,7 +149,8 @@ pub async fn generate_all_tts_for_speech_plans(
             .expect("plans were matched above")
             .clone();
         let target = duration_target(&segments, position, mode)?;
-        let mut result = generate_plan_segment(&client, config, ffmpeg, output_dir, &plan, voice, 0).await?;
+        let mut result =
+            generate_plan_segment(&client, config, ffmpeg, output_dir, &plan, voice, 0).await?;
         if result.fallback {
             progress.event(ProgressEvent::new(
                 Stage::Tts,
@@ -176,8 +180,11 @@ pub async fn generate_all_tts_for_speech_plans(
             }
             DurationDecision::RegenerateWithProsody { .. }
             | DurationDecision::RegenerateSpeech { .. } => {
-                plan = revise_speech_plan(gemini_keys, &plan, target.effective_ms(), &voice.styles).await?;
-                result = generate_plan_segment(&client, config, ffmpeg, output_dir, &plan, voice, 0).await?;
+                plan = revise_speech_plan(gemini_keys, &plan, target.effective_ms(), &voice.styles)
+                    .await?;
+                result =
+                    generate_plan_segment(&client, config, ffmpeg, output_dir, &plan, voice, 0)
+                        .await?;
             }
             DurationDecision::TimeStretch { .. } | DurationDecision::Reject { .. } => {
                 unreachable!("the first duration decision never stretches or rejects")
@@ -190,7 +197,10 @@ pub async fn generate_all_tts_for_speech_plans(
                 DurationDecision::TimeStretch { tempo } => progress.event(ProgressEvent::new(
                     Stage::Tts,
                     video,
-                    format!("Segment {} uses bounded {tempo:.2}x timing stretch.", plan.index),
+                    format!(
+                        "Segment {} uses bounded {tempo:.2}x timing stretch.",
+                        plan.index
+                    ),
                 )),
                 DurationDecision::Reject { required_tempo } => bail!(
                     "Natural Voice segment {} still needs {required_tempo:.2}x stretch after its one retry",
@@ -214,7 +224,11 @@ pub async fn generate_all_tts_for_speech_plans(
     Ok(())
 }
 
-fn duration_target(segments: &[SrtSegment], position: usize, mode: NaturalMode) -> Result<DurationTarget> {
+fn duration_target(
+    segments: &[SrtSegment],
+    position: usize,
+    mode: NaturalMode,
+) -> Result<DurationTarget> {
     let segment = &segments[position];
     let slot_ms = ((time_to_seconds(&segment.end)? - time_to_seconds(&segment.start)?) * 1_000.0)
         .round() as u32;
@@ -370,12 +384,18 @@ async fn generate_plan_segment(
         bail!(
             "Azure TTS failed for Natural Voice segment {} after {RETRIES} attempts: {}",
             plan.index,
-            attempt_errors.last().map(String::as_str).unwrap_or("unknown error")
+            attempt_errors
+                .last()
+                .map(String::as_str)
+                .unwrap_or("unknown error")
         );
     }
     ffmpeg.create_silence(&output)?;
     if !ffmpeg.is_valid_audio(&output) {
-        bail!("Silent fallback is invalid for Natural Voice segment {}", plan.index);
+        bail!(
+            "Silent fallback is invalid for Natural Voice segment {}",
+            plan.index
+        );
     }
     write_tts_cache_key(&output, &cache_key)?;
     Ok(SegmentResult {
@@ -513,8 +533,7 @@ fn prepare_tts_text(text: &str) -> String {
     static IP_ADDRESS: OnceLock<Regex> = OnceLock::new();
     IP_ADDRESS
         .get_or_init(|| {
-            Regex::new(r"(?i)(?:[0-9a-f.]*:){2,}[0-9a-f.]*|\b(?:\d{1,3}\.){3}\d{1,3}\b")
-                .unwrap()
+            Regex::new(r"(?i)(?:[0-9a-f.]*:){2,}[0-9a-f.]*|\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap()
         })
         .replace_all(text, |captures: &regex::Captures<'_>| {
             let ip = &captures[0];
@@ -599,14 +618,20 @@ pub fn render_speech_plan_ssml_with_rate(
 ) -> Result<String> {
     plan.validate(&voice.styles)?;
     if plan.style.is_some() && voice.capabilities.style != CapabilityState::Supported {
-        bail!("Azure voice {} does not support speaking styles", voice.short_name);
+        bail!(
+            "Azure voice {} does not support speaking styles",
+            voice.short_name
+        );
     }
 
     let supports_emphasis = voice.capabilities.manual_emphasis == CapabilityState::Supported;
     let supports_prosody = voice.capabilities.manual_prosody == CapabilityState::Supported;
     let supports_break = voice.capabilities.semantic_break == CapabilityState::Supported;
     if rate_percent != 0 && !supports_prosody {
-        bail!("Azure voice {} does not support manual rate adjustment", voice.short_name);
+        bail!(
+            "Azure voice {} does not support manual rate adjustment",
+            voice.short_name
+        );
     }
     let mut boundaries = vec![0, plan.spoken_text.len()];
     let mut emphasis = Vec::new();

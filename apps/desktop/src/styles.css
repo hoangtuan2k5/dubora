@@ -569,6 +569,68 @@ h1 {
   text-transform: uppercase;
 }
 
+.gemini-key-editor {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--navy);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.gemini-key-editor:focus-within {
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px var(--cyan-soft);
+}
+
+.gemini-key-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+  background: var(--panel-raised);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.gemini-key-editor-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.gemini-key-editor-head svg {
+  color: var(--amber);
+}
+
+.gemini-key-editor-head small {
+  color: var(--cyan);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 11px;
+}
+
+.gemini-key-editor textarea {
+  width: 100%;
+  height: 120px;
+  display: block;
+  padding: 11px 12px;
+  border: 0;
+  outline: 0;
+  resize: none;
+  color: var(--text);
+  background: transparent;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.gemini-key-editor textarea::placeholder {
+  color: var(--quiet);
+}
+
 .voice-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -958,7 +1020,7 @@ h1 {
   justify-content: flex-end;
   gap: 9px;
   flex: none;
-  margin-top: 14px;
+  margin: 14px 6px 0;
   padding-top: 14px;
   border-top: 1px solid var(--line-soft);
 }

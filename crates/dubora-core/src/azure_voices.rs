@@ -131,7 +131,10 @@ impl AzureVoice {
         };
         let multilingual = secondary_locales.iter().any(|locale| locale == "vi-VN")
             || short_name.to_ascii_lowercase().contains("multilingual")
-            || matches!(model_family, VoiceModelFamily::DragonHd | VoiceModelFamily::DragonHdOmni);
+            || matches!(
+                model_family,
+                VoiceModelFamily::DragonHd | VoiceModelFamily::DragonHdOmni
+            );
         let (manual_emphasis, manual_prosody, semantic_break, pronunciation, automatic_delivery) =
             match model_family {
                 VoiceModelFamily::Standard => (
@@ -205,10 +208,9 @@ pub async fn list_azure_voices(key: &str, region: &str) -> Result<Vec<AzureVoice
             region
         }
     };
-    if !region
-        .chars()
-        .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
-        || region.starts_with('-')
+    if !region.chars().all(|character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+    }) || region.starts_with('-')
         || region.ends_with('-')
     {
         bail!("Invalid AZURE_REGION: use lowercase letters, digits, and hyphens only");
@@ -276,7 +278,10 @@ pub async fn list_azure_voices(key: &str, region: &str) -> Result<Vec<AzureVoice
                 voice_type: row.voice_type.trim().to_owned(),
                 styles,
                 secondary_locales,
-                words_per_minute: row.words_per_minute.as_ref().and_then(WordsPerMinute::parse),
+                words_per_minute: row
+                    .words_per_minute
+                    .as_ref()
+                    .and_then(WordsPerMinute::parse),
                 capabilities,
             })
         })
@@ -334,39 +339,42 @@ mod tests {
             rows[0].secondary_locales.as_ref().unwrap(),
             &vec!["vi-VN".to_owned()]
         );
-        assert_eq!(rows[0].words_per_minute.as_ref().unwrap().parse(), Some(152));
+        assert_eq!(
+            rows[0].words_per_minute.as_ref().unwrap().parse(),
+            Some(152)
+        );
     }
 
     #[test]
     fn derives_effective_capabilities_without_overclaiming_hd_controls() {
-        let standard = AzureVoice::capabilities(
-            "vi-VN-HoaiMyNeural",
-            &["chat".to_owned()],
-            true,
-            &[],
-        );
+        let standard =
+            AzureVoice::capabilities("vi-VN-HoaiMyNeural", &["chat".to_owned()], true, &[]);
         assert_eq!(standard.model_family, VoiceModelFamily::Standard);
         assert_eq!(standard.manual_prosody, CapabilityState::Supported);
 
-        let hd = AzureVoice::capabilities(
-            "de-DE-Florian:DragonHDLatestNeural",
-            &[],
-            true,
-            &[],
-        );
+        let hd = AzureVoice::capabilities("de-DE-Florian:DragonHDLatestNeural", &[], true, &[]);
         assert_eq!(hd.model_family, VoiceModelFamily::DragonHd);
         assert_eq!(hd.manual_emphasis, CapabilityState::Unsupported);
         assert_eq!(hd.manual_prosody, CapabilityState::Unsupported);
         assert_eq!(hd.semantic_break, CapabilityState::Supported);
 
-        let omni = AzureVoice::capabilities(
-            "en-US-Ava-DragonHDOmniLatestNeural",
-            &[],
-            false,
-            &[],
-        );
+        let omni = AzureVoice::capabilities("en-US-Ava-DragonHDOmniLatestNeural", &[], false, &[]);
         assert_eq!(omni.model_family, VoiceModelFamily::DragonHdOmni);
         assert_eq!(omni.style, CapabilityState::Supported);
         assert_eq!(omni.manual_prosody, CapabilityState::Unsupported);
+    }
+
+    #[test]
+    fn creates_a_safe_local_profile_for_the_selected_voice() {
+        let voice = AzureVoice::from_short_name("de-DE-Florian:DragonHDLatestNeural", Vec::new());
+        assert_eq!(voice.capabilities.model_family, VoiceModelFamily::DragonHd);
+        assert_eq!(
+            voice.capabilities.manual_prosody,
+            CapabilityState::Unsupported
+        );
+        assert_eq!(
+            voice.capabilities.semantic_break,
+            CapabilityState::Supported
+        );
     }
 }

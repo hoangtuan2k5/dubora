@@ -27,12 +27,20 @@ pub struct AzureConfig {
 }
 
 #[derive(Clone, Debug)]
-pub struct GeminiConfig { pub keys: Vec<String> }
+pub struct GeminiConfig {
+    pub keys: Vec<String>,
+}
 
 impl GeminiConfig {
     pub fn new(keys: Vec<String>) -> Result<Self> {
-        let keys: Vec<_> = keys.into_iter().map(|key| key.trim().to_owned()).filter(|key| !key.is_empty()).collect();
-        if keys.is_empty() { bail!("Missing GEMINI_API_KEYS. Add one or more Gemini API keys"); }
+        let keys: Vec<_> = keys
+            .into_iter()
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+            .collect();
+        if keys.is_empty() {
+            bail!("Missing GEMINI_API_KEYS. Add one or more Gemini API keys");
+        }
         Ok(Self { keys })
     }
 }
@@ -49,10 +57,9 @@ impl AzureConfig {
         } else {
             region
         };
-        if !region
-            .chars()
-            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
-            || region.starts_with('-')
+        if !region.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        }) || region.starts_with('-')
             || region.ends_with('-')
         {
             bail!("Invalid AZURE_REGION: use lowercase letters, digits, and hyphens only");

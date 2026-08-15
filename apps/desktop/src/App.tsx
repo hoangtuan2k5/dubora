@@ -1266,10 +1266,10 @@ function App() {
                   </li>
                   <li>
                     <div>
-                      <strong>Thêm Gemini key nếu cần dịch</strong>
+                      <strong>Thêm Gemini key nếu cần dịch hoặc Natural Voice</strong>
                       <span>
-                        Với SRT tiếng Anh, tạo key ở Google AI Studio, dán vào mục Gemini API keys
-                        trong Thiết lập, rồi bật <strong>Dịch bằng Gemini</strong> khi chạy dub.
+                        Tạo key ở Google AI Studio, dán vào mục Gemini API keys trong Thiết lập.
+                        Key này cần cho <strong>Dịch bằng Gemini</strong> và <strong>Natural Voice</strong>.
                       </span>
                     </div>
                   </li>
@@ -1370,7 +1370,7 @@ function App() {
                   <span className="number">05</span>
                   <div>
                     <h2>Lấy Gemini API key</h2>
-                    <p className="lead">Chỉ cần khi muốn dịch và tối ưu SRT tiếng Anh.</p>
+                    <p className="lead">Cần cho dịch SRT tiếng Anh và Natural Voice.</p>
                   </div>
                 </div>
                 <ol>
@@ -1395,14 +1395,42 @@ function App() {
                 </ol>
                 <div className="guide-tip">
                   <strong>Khi dùng:</strong> quay lại Thư viện, bật <strong>Dịch bằng Gemini</strong>
-                  {" "}trước khi bấm Dub. App dùng <code>gemini-3.5-flash-lite</code> để dịch và
-                  chỉnh câu SRT.
+                  {" "}hoặc <strong>Natural Voice</strong> trước khi bấm Dub. App dùng
+                  {" "}<code>gemini-3.5-flash-lite</code> để dịch, chỉnh câu SRT và lập Speech Plan.
                 </div>
               </article>
 
               <article className="panel guide-card">
                 <div className="panel-title">
                   <span className="number">06</span>
+                  <div>
+                    <h2>Natural Voice</h2>
+                    <p className="lead">Tạo cách nói tự nhiên hơn nhưng vẫn tôn trọng timing video.</p>
+                  </div>
+                </div>
+                <ol>
+                  <li>Thêm ít nhất một Gemini API key trong <strong>Thiết lập</strong>.</li>
+                  <li>Vào <strong>Thư viện</strong> và bật <strong>Natural Voice</strong>.</li>
+                  <li>Chọn nhịp: <strong>Đồng bộ sát</strong>, <strong>Cân bằng</strong> (mặc định), hoặc <strong>Tự nhiên tối đa</strong>.</li>
+                </ol>
+                <div className="guide-tip">
+                  <strong>Cách Dubora xử lý:</strong> Gemini tạo Speech Plan (cách nói, điểm nhấn,
+                  ngắt câu), Azure chỉ nhận SSML mà voice đang chọn hỗ trợ, rồi Dubora đo thời lượng
+                  audio. Chế độ <strong>Cân bằng</strong> chỉ mượn tối đa 250 ms khoảng lặng sau câu.
+                  Mỗi segment chỉ được sinh lại một lần; audio không bao giờ bị ép stretch quá 1.12×.
+                  Nếu vẫn không khớp, job báo lỗi rõ thay vì cắt cụt lời nói.
+                </div>
+                <div className="guide-tip">
+                  <strong>Chọn voice:</strong> sau khi bấm <strong>Tải danh sách giọng</strong> trong
+                  Thiết lập, app hiển thị khả năng nhấn mạnh, nhịp/độ cao, ngắt câu và phong cách.
+                  Với Dragon HD, Dubora để Azure tự điều khiển delivery và dùng rephrase khi cần,
+                  thay vì gửi prosody không được hỗ trợ.
+                </div>
+              </article>
+
+              <article className="panel guide-card">
+                <div className="panel-title">
+                  <span className="number">07</span>
                   <div>
                     <h2>Dùng màn Thư viện</h2>
                     <p className="lead">Theo dõi video, SRT và output; chạy job dub.</p>
@@ -1447,7 +1475,7 @@ function App() {
 
               <article className="panel guide-card">
                 <div className="panel-title">
-                  <span className="number">07</span>
+                  <span className="number">08</span>
                   <div>
                     <h2>Dubora Hub</h2>
                     <p className="lead">Không gian xem và tổ chức video trong project.</p>
@@ -1466,7 +1494,7 @@ function App() {
 
               <article className="panel guide-card">
                 <div className="panel-title">
-                  <span className="number">08</span>
+                  <span className="number">09</span>
                   <div>
                     <h2>Tác giả</h2>
                     <p className="lead">Thông tin liên hệ và mã nguồn.</p>
@@ -1496,7 +1524,7 @@ function App() {
 
               <article className="panel guide-card">
                 <div className="panel-title">
-                  <span className="number">09</span>
+                  <span className="number">10</span>
                   <div>
                     <h2>Yêu cầu hệ thống &amp; lưu ý</h2>
                     <p className="lead">Những điều cần biết trước khi chạy batch lớn.</p>
@@ -1510,6 +1538,10 @@ function App() {
                   <li>
                     <strong>Phụ đề mặc định là tiếng Việt.</strong> Với SRT tiếng Anh, thêm Gemini
                     API key trong Thiết lập rồi bật <strong>Dịch bằng Gemini</strong> khi chạy.
+                  </li>
+                  <li>
+                    <strong>Natural Voice là opt-in.</strong> Cần Gemini API key; mặc định vẫn là
+                    pipeline Azure nhanh và ổn định như trước.
                   </li>
                   <li>
                     <strong>Cache TTS:</strong> segment đã sinh sẽ được tái dùng nếu text/giọng
@@ -1906,17 +1938,24 @@ function App() {
               </article>
 
               <article className="panel config-panel">
-                <div className="panel-title"><span className="number">03</span><div><h2>Google AI Studio</h2><p>Chỉ cần khi bật dịch phụ đề bằng Gemini.</p></div></div>
+                <div className="panel-title"><span className="number">03</span><div><h2>Google AI Studio</h2><p>Cần cho dịch phụ đề và Natural Voice.</p></div></div>
                 <label htmlFor="gemini-keys">Gemini API keys</label>
-                <textarea
-                  id="gemini-keys"
-                  value={config.geminiKeys}
-                  onChange={(event) => setConfig({ ...config, geminiKeys: event.target.value })}
-                  placeholder="Một key mỗi dòng, hoặc phân cách bằng dấu phẩy"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <p className="field-hint">Dùng <code>gemini-3.5-flash-lite</code>; các key được xoay theo từng batch dịch.</p>
+                <div className="gemini-key-editor">
+                  <div className="gemini-key-editor-head">
+                    <span><IconKey size={16} /> Key pool</span>
+                    <small>Round Robin</small>
+                  </div>
+                  <textarea
+                    id="gemini-keys"
+                    value={config.geminiKeys}
+                    onChange={(event) => setConfig({ ...config, geminiKeys: event.target.value })}
+                    placeholder="Dán một key mỗi dòng, hoặc phân cách bằng dấu phẩy"
+                    rows={5}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <p className="field-hint">Hiển thị 5 key; thêm nhiều hơn thì cuộn xuống. Dùng <code>gemini-3.5-flash-lite</code>; key được xoay theo từng batch.</p>
               </article>
 
               <article className="panel status-panel">

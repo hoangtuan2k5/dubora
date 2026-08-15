@@ -114,7 +114,10 @@ impl SpeechPlan {
         let display_text = self.display_text.trim();
         let spoken_text = self.spoken_text.trim();
         if display_text.is_empty() || spoken_text.is_empty() {
-            bail!("Speech plan {} must include display and spoken text", self.index);
+            bail!(
+                "Speech plan {} must include display and spoken text",
+                self.index
+            );
         }
         if self.target_duration_ms < 100 {
             bail!("Speech plan {} has an invalid target duration", self.index);
@@ -123,10 +126,16 @@ impl SpeechPlan {
         reject_added_fillers(self.index, display_text, spoken_text)?;
 
         if self.emphasis.len() > MAX_EMPHASES {
-            bail!("Speech plan {} has more than {MAX_EMPHASES} emphasis phrases", self.index);
+            bail!(
+                "Speech plan {} has more than {MAX_EMPHASES} emphasis phrases",
+                self.index
+            );
         }
         if self.pauses.len() > MAX_PAUSES {
-            bail!("Speech plan {} has more than {MAX_PAUSES} pauses", self.index);
+            bail!(
+                "Speech plan {} has more than {MAX_PAUSES} pauses",
+                self.index
+            );
         }
 
         let mut emphasis_positions = Vec::with_capacity(self.emphasis.len());
@@ -137,7 +146,10 @@ impl SpeechPlan {
                 bail!("Speech plan {} has an invalid emphasis phrase", self.index);
             }
             let position = unique_phrase_position(spoken_text, phrase).ok_or_else(|| {
-                anyhow::anyhow!("Speech plan {} emphasis phrase must occur exactly once", self.index)
+                anyhow::anyhow!(
+                    "Speech plan {} emphasis phrase must occur exactly once",
+                    self.index
+                )
             })?;
             emphasis_positions.push((position, phrase.len()));
         }
@@ -150,9 +162,16 @@ impl SpeechPlan {
         }
 
         let mut pause_texts = HashSet::new();
-        let total_pause_ms: u32 = self.pauses.iter().map(|pause| pause.duration_ms as u32).sum();
+        let total_pause_ms: u32 = self
+            .pauses
+            .iter()
+            .map(|pause| pause.duration_ms as u32)
+            .sum();
         if total_pause_ms * 100 > self.target_duration_ms * 33 {
-            bail!("Speech plan {} allocates too much time to pauses", self.index);
+            bail!(
+                "Speech plan {} allocates too much time to pauses",
+                self.index
+            );
         }
         for pause in &self.pauses {
             let phrase = pause.after.trim();
@@ -168,7 +187,10 @@ impl SpeechPlan {
         if let Some(style) = self.style.as_deref() {
             let style = style.trim();
             if style.is_empty() || !allowed_styles.iter().any(|allowed| allowed == style) {
-                bail!("Speech plan {} selects an unavailable voice style", self.index);
+                bail!(
+                    "Speech plan {} selects an unavailable voice style",
+                    self.index
+                );
             }
         }
         Ok(())
@@ -176,8 +198,14 @@ impl SpeechPlan {
 }
 
 fn validate_spoken_length(index: usize, display: &str, spoken: &str) -> Result<()> {
-    let display_len = display.chars().filter(|character| !character.is_whitespace()).count();
-    let spoken_len = spoken.chars().filter(|character| !character.is_whitespace()).count();
+    let display_len = display
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count();
+    let spoken_len = spoken
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count();
     if spoken_len * 100 < display_len * MIN_SPOKEN_RATIO_PERCENT
         || spoken_len * 100 > display_len * MAX_SPOKEN_RATIO_PERCENT
     {

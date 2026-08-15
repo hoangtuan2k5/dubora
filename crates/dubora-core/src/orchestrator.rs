@@ -5,11 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::azure_voices::AzureVoice;
 use crate::build_audio::{build_voiceover_track, build_voiceover_track_with_tempo_cap};
 use crate::build_video::build_dubbed_video;
 use crate::clean_rolling::clean_youtube_rolling_subtitles;
 use crate::config::{DubConfig, DubOptions, Provider};
-use crate::azure_voices::AzureVoice;
 use crate::duration_solver::MAX_TIME_STRETCH_TEMPO;
 use crate::paths::{
     companion_output_srt, find_matching_srt, find_targets, output_path, safe_work_path,
@@ -17,8 +17,8 @@ use crate::paths::{
 };
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
 use crate::srt::{SrtSegment, parse_srt, write_srt};
-use crate::tts_azure::{generate_all_tts, generate_all_tts_for_speech_plans};
 use crate::translate_gemini::{create_speech_plans, translate_srt};
+use crate::tts_azure::{generate_all_tts, generate_all_tts_for_speech_plans};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,9 +130,7 @@ async fn create_dub_for_video(
                 progress.event(ProgressEvent::new(
                     Stage::Skip,
                     &label,
-                    format!(
-                        "Skipping {label}, but failed to copy companion SRT: {error}"
-                    ),
+                    format!("Skipping {label}, but failed to copy companion SRT: {error}"),
                 ));
             }
         }
@@ -214,11 +212,13 @@ async fn create_dub_for_video(
         .as_ref()
         .context("Missing AZURE_KEY. Add it to <root>/.env or export it")?;
     if let Some(mode) = options.natural_mode {
-        let gemini = config
-            .gemini
-            .as_ref()
-            .context("Missing GEMINI_API_KEYS. Add Gemini API keys before enabling Natural Voice")?;
-        let styles = (!azure.style.is_empty()).then(|| azure.style.clone()).into_iter().collect();
+        let gemini = config.gemini.as_ref().context(
+            "Missing GEMINI_API_KEYS. Add Gemini API keys before enabling Natural Voice",
+        )?;
+        let styles = (!azure.style.is_empty())
+            .then(|| azure.style.clone())
+            .into_iter()
+            .collect();
         let voice = AzureVoice::from_short_name(azure.voice.clone(), styles);
         let plans = create_speech_plans(
             &gemini.keys,

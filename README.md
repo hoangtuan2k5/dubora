@@ -60,6 +60,31 @@ export GEMINI_API_KEYS=key_1,key_2
 `--translate` to translate and polish English SRT files with Gemini 3.5 Flash-Lite. Multiple
 Gemini keys are used round-robin once per subtitle batch.
 
+### Natural Voice
+
+Natural Voice is opt-in. It asks Gemini for a structured Speech Plan, renders only the SSML
+controls supported by the selected Azure voice, and then measures each synthesized segment before
+mixing it into the video. It requires `GEMINI_API_KEYS` even when the input SRT is already
+Vietnamese.
+
+```bash
+# Balanced is the default: borrow at most 250 ms from following silence.
+./target/release/dubora --natural-voice "course/part/lesson.mp4"
+
+# Prefer tighter sync or use all following silence when it is safe.
+./target/release/dubora --natural-voice --natural-mode sync "course/part/lesson.mp4"
+./target/release/dubora --natural-voice --natural-mode natural "course/part/lesson.mp4"
+
+# Translate English subtitles and use Natural Voice in the same plan request.
+./target/release/dubora --translate --natural-voice "course/part/lesson.mp4"
+```
+
+For each segment, Dubora accepts a duration error up to 5%, makes at most one TTS retry, and only
+uses final time-stretch within `1.12x`. A segment that still cannot fit fails clearly rather than
+being truncated or over-stretched. Standard neural voices may receive a small prosody retry when
+Azure reports support; Dragon HD voices use their automatic delivery and a revised Speech Plan
+instead.
+
 ```bash
 export DUBORA_FFMPEG=/usr/bin/ffmpeg
 export DUBORA_FFPROBE=/usr/bin/ffprobe
@@ -133,7 +158,10 @@ exists. See `THIRD_PARTY_NOTICES.md` before distributing an installer.
 The desktop app stores project root and Azure settings under the local Tauri
 app config directory. UI copy is Vietnamese; icons use Tabler Icons.
 After loading the Azure voice list, selecting a voice exposes its supported expressive
-styles. The `vi-VN` filter also includes multilingual voices that support Vietnamese.
+styles and Natural Voice capabilities (emphasis, prosody, semantic breaks, and style). The `vi-VN`
+filter also includes multilingual voices that support Vietnamese. In **Thư viện**, enable
+**Natural Voice** and choose Sync, Balanced, or Natural timing. Natural Voice needs at least one
+Gemini key stored in **Thiết lập → Google AI Studio**.
 
 Dev UI only (no native shell) from `apps/desktop`:
 

@@ -7,12 +7,7 @@ use anyhow::{Context, Result, bail};
 const VIDEO_EXTENSIONS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
 
 /// Relative directories every project root must have for the desktop app / pipeline.
-pub const PROJECT_LAYOUT_DIRS: [&str; 4] = [
-    "assets/video",
-    "assets/srt",
-    "work",
-    "outputs",
-];
+pub const PROJECT_LAYOUT_DIRS: [&str; 4] = ["assets/video", "assets/srt", "work", "outputs"];
 
 /// Create the standard layout under `root` if missing.
 ///
@@ -164,7 +159,10 @@ pub fn find_matching_srt(root: &Path, video: &Path) -> Result<PathBuf> {
 pub fn repair_adjacent_youtube_subtitles(root: &Path) -> Result<()> {
     for video in list_videos(root)? {
         let relative = video_relative_path(root, &video);
-        let destination = root.join("assets/srt").join(&relative).with_extension("srt");
+        let destination = root
+            .join("assets/srt")
+            .join(&relative)
+            .with_extension("srt");
         if destination.exists() {
             continue;
         }
@@ -180,10 +178,17 @@ pub fn repair_adjacent_youtube_subtitles(root: &Path) -> Result<()> {
             .map(|entry| entry.path())
             .find(|path| {
                 path.extension().and_then(OsStr::to_str) == Some("srt")
-                    && path.file_name().and_then(OsStr::to_str).is_some_and(|name| name.starts_with(&prefix))
+                    && path
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .is_some_and(|name| name.starts_with(&prefix))
             });
         if let Some(subtitle) = subtitle {
-            fs::create_dir_all(destination.parent().context("SRT destination has no parent")?)?;
+            fs::create_dir_all(
+                destination
+                    .parent()
+                    .context("SRT destination has no parent")?,
+            )?;
             fs::rename(subtitle, destination)?;
         }
     }
@@ -239,7 +244,8 @@ pub fn delete_input_video(root: &Path, relative_video: &Path) -> Result<()> {
     let srt = find_matching_srt(root, &video).ok();
     fs::remove_file(&video)?;
     if let Some(srt) = srt {
-        fs::remove_file(srt).context("Video was deleted, but its matching SRT could not be deleted")?;
+        fs::remove_file(srt)
+            .context("Video was deleted, but its matching SRT could not be deleted")?;
     }
     Ok(())
 }
