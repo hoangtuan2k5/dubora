@@ -5,6 +5,7 @@ use crate::speech_plan::NaturalMode;
 pub const ACCEPTABLE_ERROR_RATIO: f64 = 0.05;
 pub const PROSODY_REGEN_ERROR_RATIO: f64 = 0.10;
 pub const MAX_TIME_STRETCH_TEMPO: f64 = 1.13;
+pub const MAX_CONTINUOUS_FALLBACK_TEMPO: f64 = 1.35;
 pub const MAX_TIME_STRETCH_TOLERANCE_MS: u32 = 2;
 pub const MAX_BALANCED_BORROW_MS: u32 = 250;
 pub const SEGMENT_HEADROOM_MS: u32 = 80;

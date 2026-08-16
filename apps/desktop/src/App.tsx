@@ -1417,16 +1417,17 @@ function App() {
                 <div className="guide-tip">
                   <strong>Cách Dubora xử lý:</strong> Gemini tạo Speech Plan (cách nói, điểm nhấn,
                   ngắt câu), Azure chỉ nhận SSML mà voice đang chọn hỗ trợ, rồi Dubora đo thời lượng
-                  audio. Chế độ <strong>Cân bằng</strong> chỉ mượn tối đa 250 ms khoảng lặng sau câu.
-                  Nếu vẫn không đủ, Dubora chỉ có thể bắt đầu sớm trong phần im lặng thực sự của câu
-                  ngay trước đó, không chồng lời. Audio không bao giờ bị ép stretch quá 1.13×. Nếu vẫn
-                  không khớp, job báo lỗi rõ thay vì cắt cụt lời nói.
+                  audio và anchor nội bộ khi voice hỗ trợ timing events. Chế độ <strong>Cân bằng</strong>
+                  chỉ mượn tối đa 250 ms khoảng lặng sau câu. Nếu anchor chưa chứng minh được nhưng
+                  toàn bộ utterance kỹ thuật vẫn nằm trong cửa sổ, Dubora giữ một mạch nói tự nhiên
+                  với fallback có giới hạn 1.35× và hiển thị rõ là fallback; nếu không, chỉ utterance
+                  đó mới tách về các segment với cap 1.13×. Audio không chồng lời và không bị cắt cụt.
                 </div>
                 <div className="guide-tip">
                   <strong>Chọn voice:</strong> sau khi bấm <strong>Tải danh sách giọng</strong> trong
                   Thiết lập, app hiển thị khả năng nhấn mạnh, nhịp/độ cao, ngắt câu và phong cách.
-                  Với Dragon HD, Dubora để Azure tự điều khiển delivery và dùng rephrase khi cần,
-                  thay vì gửi prosody không được hỗ trợ.
+                  Với Dragon HD, Azure tự điều khiển delivery; vì voice này không trả timing events,
+                  Dubora dùng segmented fallback thay vì giả định anchor.
                 </div>
               </article>
 
@@ -1934,7 +1935,7 @@ function App() {
                 )}
                 {selectedVoice && (
                   <p className="field-hint voice-capabilities">
-                    Natural Voice: nhấn mạnh {selectedVoice.capabilities.manualEmphasis}, nhịp/độ cao {selectedVoice.capabilities.manualProsody}, ngắt câu {selectedVoice.capabilities.semanticBreak}, phong cách {selectedVoice.capabilities.style}.
+                    Natural Voice: timing {selectedVoice.capabilities.timingEvents}, nhấn mạnh {selectedVoice.capabilities.manualEmphasis}, nhịp/độ cao {selectedVoice.capabilities.manualProsody}, ngắt câu {selectedVoice.capabilities.semanticBreak}, phong cách {selectedVoice.capabilities.style}.
                   </p>
                 )}
               </article>

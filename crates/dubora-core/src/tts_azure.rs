@@ -8,28 +8,37 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use reqwest::{Client, StatusCode};
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
+use crate::azure_timing::{TimingEvent, synthesize_ssml_with_timing};
 use crate::azure_voices::{AzureVoice, CapabilityState};
 use crate::config::AzureConfig;
 use crate::duration_solver::{
-    DurationDecision, DurationTarget, MAX_TIME_STRETCH_TEMPO, SEGMENT_HEADROOM_MS, solve_duration,
-    spillback_schedule,
+    DurationDecision, DurationTarget, MAX_CONTINUOUS_FALLBACK_TEMPO, MAX_TIME_STRETCH_TEMPO,
+    MAX_TIME_STRETCH_TOLERANCE_MS, SEGMENT_HEADROOM_MS, solve_duration, spillback_schedule,
 };
 use crate::ffmpeg::FfmpegPaths;
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
 use crate::speech_plan::{EmphasisLevel, NaturalMode, SpeechPlan};
 use crate::srt::{SrtSegment, parse_srt, time_to_seconds};
-use crate::translate_gemini::revise_speech_plan;
+use crate::translate_gemini::{
+    SpeechPlanRevisionRequest, revise_speech_plan, revise_speech_plans_batch,
+};
 use crate::tts_cache::{is_fresh_audio_file, tts_cache_key, write_tts_cache_key};
+use crate::utterance::{
+    AlignmentResult, RenderManifest, ScheduledAudio, Utterance, bookmark_name, group_speech_plans,
+    validate_alignment,
+};
 
 const CONCURRENCY: usize = 4;
 const RETRIES: usize = 3;
 const SPEECH_PLAN_CACHE_PROVIDER: &str = "azure-speech-plan-v1";
 const MAX_SPEECH_PLAN_REVISIONS: u8 = 2;
+const UTTERANCE_CACHE_PROVIDER: &str = "azure-natural-utterance-v1";
 
 pub async fn generate_all_tts(
     config: &AzureConfig,
@@ -317,6 +326,486 @@ pub async fn generate_all_tts_for_speech_plans(
         );
     }
     Ok(())
+}
+
+/// Generate grouped utterances for voices that expose reliable Azure timing metadata.
+pub async fn generate_all_tts_for_aligned_utterances(
+    config: &AzureConfig,
+    ffmpeg: &FfmpegPaths,
+    input_srt: &Path,
+    plans: &[SpeechPlan],
+    gemini_keys: &[String],
+    voice: &AzureVoice,
+    output_dir: &Path,
+    manifest_path: &Path,
+    video: &str,
+    progress: &dyn ProgressReporter,
+) -> Result<()> {
+    if voice.capabilities.timing_events != CapabilityState::Supported {
+        bail!(
+            "Azure voice {} does not support aligned timing events",
+            voice.short_name
+        );
+    }
+    let segments = parse_srt(input_srt)?;
+    let utterances = group_speech_plans(&segments, plans)?;
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create {}", output_dir.display()))?;
+    progress.event(ProgressEvent::new(
+        Stage::Tts,
+        video,
+        format!(
+            "Grouped {} subtitle segments into {} aligned utterances.",
+            segments.len(),
+            utterances.len()
+        ),
+    ));
+
+    let mut entries = Vec::with_capacity(utterances.len());
+    let mut fallback_segments = Vec::new();
+    for (position, utterance) in utterances.iter().enumerate() {
+        progress.event(ProgressEvent::new(
+            Stage::Tts,
+            video,
+            format!(
+                "Synthesizing utterance {} from subtitle segments {}-{}.",
+                utterance.id,
+                utterance.parts.first().map_or(0, |part| part.index),
+                utterance.parts.last().map_or(0, |part| part.index)
+            ),
+        ));
+        let mut rate_percent = 0;
+        let mut accepted = None;
+        let mut outcome = "aligned";
+        let utterance_output = output_dir.join(format!("utterance_{}.mp3", utterance.id));
+        for attempt in 0..=1 {
+            let prepared = utterance
+                .parts
+                .iter()
+                .map(|part| prepared_speech_plan(&part.plan))
+                .collect::<Vec<_>>();
+            let bookmarks = utterance
+                .parts
+                .iter()
+                .map(|part| bookmark_name(utterance.id, part.index))
+                .collect::<Vec<_>>();
+            let ssml = render_utterance_ssml(voice, &prepared, &bookmarks, rate_percent)?;
+            let timed = generate_timed_utterance(
+                config,
+                ffmpeg,
+                &utterance_output,
+                &ssml,
+                &voice.short_name,
+                &prepared,
+                &bookmarks,
+            )
+            .await;
+            let (events, duration_ms) = match timed {
+                Ok(value) => value,
+                Err(error) => {
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!(
+                            "Utterance {} timing synthesis failed: {error:#}",
+                            utterance.id
+                        ),
+                    ));
+                    break;
+                }
+            };
+            let alignment = validate_alignment(utterance, &events, duration_ms);
+            if alignment.accepted {
+                progress.event(ProgressEvent::new(
+                    Stage::Tts,
+                    video,
+                    format!(
+                        "Validated {}/{} timing anchors for utterance {}.",
+                        utterance.parts.len(),
+                        utterance.parts.len(),
+                        utterance.id
+                    ),
+                ));
+                accepted = Some((
+                    utterance_output.clone(),
+                    utterance.parts.iter().map(|part| part.index).collect(),
+                ));
+                break;
+            }
+            if attempt == 0 && voice.capabilities.manual_prosody == CapabilityState::Supported {
+                rate_percent = alignment_repair_rate(&alignment, utterance);
+                if rate_percent != 0 {
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!(
+                            "Utterance {} alignment failed; applying one bounded {rate_percent:+}% timing repair.",
+                            utterance.id
+                        ),
+                    ));
+                    continue;
+                }
+            }
+            progress.event(ProgressEvent::new(
+                Stage::Tts,
+                video,
+                format!(
+                    "Utterance {} remains outside timing tolerance; using safe segmented timing ({}).",
+                    utterance.id,
+                    alignment.reason.as_deref().unwrap_or("unknown")
+                    ),
+            ));
+            outcome = "segmented fallback";
+            break;
+        }
+        if let Some((path, source_segments)) = accepted {
+            entries.push(ScheduledAudio {
+                id: format!("utterance-{}", utterance.id),
+                path,
+                start_ms: utterance.start_ms,
+                end_ms: utterance.end_ms,
+                source_segments,
+            });
+        } else if ffmpeg.is_valid_audio(&utterance_output) {
+            let duration_ms = duration_ms(ffmpeg, &utterance_output)?;
+            let available_ms = utterance.end_ms.saturating_sub(utterance.start_ms);
+            if f64::from(duration_ms)
+                <= f64::from(available_ms) * MAX_CONTINUOUS_FALLBACK_TEMPO
+                    + f64::from(MAX_TIME_STRETCH_TOLERANCE_MS)
+            {
+                progress.event(ProgressEvent::new(
+                    Stage::Tts,
+                    video,
+                    format!(
+                        "Utterance {} uses continuous fallback without validated internal anchors.",
+                        utterance.id
+                    ),
+                ));
+                outcome = "continuous fallback";
+                entries.push(ScheduledAudio {
+                    id: format!("utterance-fallback-{}", utterance.id),
+                    path: utterance_output,
+                    start_ms: utterance.start_ms,
+                    end_ms: utterance.end_ms,
+                    source_segments: utterance.parts.iter().map(|part| part.index).collect(),
+                });
+            } else {
+                outcome = "segmented fallback";
+                fallback_segments.extend(
+                    generate_segmented_fallback_for_utterance(
+                        config, ffmpeg, voice, output_dir, utterance, video, progress,
+                    )
+                    .await?,
+                );
+            }
+        } else {
+            // Fall back only for this utterance. Re-running the whole job here would repeat
+            // every Gemini request after one timing miss and quickly exhaust a free-tier key.
+            outcome = "segmented fallback";
+            fallback_segments.extend(
+                generate_segmented_fallback_for_utterance(
+                    config, ffmpeg, voice, output_dir, utterance, video, progress,
+                )
+                .await?,
+            );
+        }
+        progress.event(
+            ProgressEvent::new(
+                Stage::Tts,
+                video,
+                format!("Generated {outcome} for utterance {}", utterance.id),
+            )
+            .progress(position + 1, utterances.len()),
+        );
+    }
+
+    if !fallback_segments.is_empty() && !gemini_keys.is_empty() {
+        let client = Client::new();
+        for revision_number in 1..=2 {
+            let requests = fallback_segments
+                .iter()
+                .filter(|segment| {
+                    !segment.fallback
+                        && f64::from(segment.duration_ms)
+                            > f64::from(segment.target_duration_ms) * MAX_TIME_STRETCH_TEMPO
+                })
+                .map(|segment| SpeechPlanRevisionRequest {
+                    plan: segment.plan.clone(),
+                    actual_duration_ms: segment.duration_ms,
+                    target_duration_ms: segment.target_duration_ms,
+                    allowed_styles: voice.styles.clone(),
+                })
+                .collect::<Vec<_>>();
+            if requests.is_empty() {
+                break;
+            }
+            progress.event(ProgressEvent::new(
+                Stage::Tts,
+                video,
+                format!(
+                    "Requesting batched concise revision {revision_number}/2 for {} overlong fallback segments.",
+                    requests.len()
+                ),
+            ));
+            let revisions = match revise_speech_plans_batch(gemini_keys, &requests, revision_number)
+                .await
+            {
+                Ok(revisions) => revisions,
+                Err(error) => {
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!(
+                            "Batched fallback revision {revision_number}/2 unavailable; keeping original speech: {error:#}"
+                        ),
+                    ));
+                    break;
+                }
+            };
+            let mut applied = 0;
+            for revised in revisions {
+                let Some(segment) = fallback_segments
+                    .iter_mut()
+                    .find(|segment| segment.plan.index == revised.index)
+                else {
+                    continue;
+                };
+                let result = generate_plan_segment_to_path(
+                    &client,
+                    config,
+                    ffmpeg,
+                    &segment.path,
+                    &revised,
+                    voice,
+                    0,
+                )
+                .await?;
+                if !result.fallback {
+                    let revised_duration = duration_ms(ffmpeg, &segment.path)?;
+                    if revised_duration < segment.duration_ms {
+                        segment.plan = revised;
+                        segment.duration_ms = revised_duration;
+                        applied += 1;
+                    }
+                }
+            }
+            progress.event(ProgressEvent::new(
+                Stage::Tts,
+                video,
+                format!(
+                    "Applied {applied}/{} batched fallback revisions.",
+                    requests.len()
+                ),
+            ));
+        }
+        for segment in &mut fallback_segments {
+            if segment.fallback
+                || f64::from(segment.duration_ms)
+                    <= f64::from(segment.target_duration_ms) * MAX_TIME_STRETCH_TEMPO
+            {
+                continue;
+            }
+            let Some(compact) = compact_fallback_plan(&segment.plan, &voice.styles) else {
+                continue;
+            };
+            let result = generate_plan_segment_to_path(
+                &client,
+                config,
+                ffmpeg,
+                &segment.path,
+                &compact,
+                voice,
+                0,
+            )
+            .await?;
+            if !result.fallback {
+                let compact_duration = duration_ms(ffmpeg, &segment.path)?;
+                if compact_duration < segment.duration_ms {
+                    let index = compact.index;
+                    segment.plan = compact;
+                    segment.duration_ms = compact_duration;
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!("Applied deterministic compact fallback for segment {index}."),
+                    ));
+                }
+            }
+        }
+    }
+    entries.extend(fallback_segments.into_iter().map(|segment| ScheduledAudio {
+        id: format!("segment-{}", segment.plan.index),
+        path: segment.path,
+        start_ms: segment.start_ms,
+        end_ms: segment.end_ms,
+        source_segments: vec![segment.plan.index],
+    }));
+
+    let manifest = RenderManifest::new(entries);
+    let expected = segments
+        .iter()
+        .map(|segment| segment.index)
+        .collect::<Vec<_>>();
+    manifest.validate(&expected)?;
+    fs::write(manifest_path, serde_json::to_vec_pretty(&manifest)?).with_context(|| {
+        format!(
+            "Failed to write aligned render manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+async fn generate_segmented_fallback_for_utterance(
+    config: &AzureConfig,
+    ffmpeg: &FfmpegPaths,
+    voice: &AzureVoice,
+    output_dir: &Path,
+    utterance: &Utterance,
+    video: &str,
+    progress: &dyn ProgressReporter,
+) -> Result<Vec<FallbackSegment>> {
+    let client = Client::new();
+    let mut entries = Vec::with_capacity(utterance.parts.len());
+    for part in &utterance.parts {
+        let output = segment_path(output_dir, part.index);
+        let result =
+            generate_plan_segment_to_path(&client, config, ffmpeg, &output, &part.plan, voice, 0)
+                .await?;
+        for message in result.attempt_errors {
+            progress.event(ProgressEvent::new(Stage::Tts, video, message));
+        }
+        if result.fallback {
+            progress.event(ProgressEvent::new(
+                Stage::Tts,
+                video,
+                format!(
+                    "Utterance {} segment {} fell back to silence.",
+                    utterance.id, part.index
+                ),
+            ));
+        }
+        let generated_duration_ms = duration_ms(ffmpeg, &output)?;
+        entries.push(FallbackSegment {
+            plan: part.plan.clone(),
+            path: output,
+            start_ms: part.start_ms,
+            end_ms: part.end_ms,
+            target_duration_ms: part
+                .end_ms
+                .saturating_sub(part.start_ms)
+                .saturating_sub(SEGMENT_HEADROOM_MS)
+                .max(100),
+            duration_ms: generated_duration_ms,
+            fallback: result.fallback,
+        });
+    }
+    Ok(entries)
+}
+
+struct FallbackSegment {
+    plan: SpeechPlan,
+    path: PathBuf,
+    start_ms: u32,
+    end_ms: u32,
+    target_duration_ms: u32,
+    duration_ms: u32,
+    fallback: bool,
+}
+
+fn compact_fallback_plan(plan: &SpeechPlan, allowed_styles: &[String]) -> Option<SpeechPlan> {
+    let mut compact = plan.clone();
+    for phrase in [
+        "Giờ để mình ",
+        "nên mình sẽ ",
+        "Ở đây mình sẽ ",
+        "thì có thể ",
+        "mình sẽ ",
+    ] {
+        compact.spoken_text = compact.spoken_text.replace(phrase, "");
+    }
+    if compact.spoken_text == plan.spoken_text {
+        return None;
+    }
+    compact.emphasis.clear();
+    compact.pauses.clear();
+    (compact.spoken_text.chars().count() < plan.spoken_text.chars().count()
+        && compact.validate(allowed_styles).is_ok())
+    .then_some(compact)
+}
+
+async fn generate_timed_utterance(
+    config: &AzureConfig,
+    ffmpeg: &FfmpegPaths,
+    output: &Path,
+    ssml: &str,
+    voice_name: &str,
+    plans: &[SpeechPlan],
+    bookmarks: &[String],
+) -> Result<(Vec<TimingEvent>, u32)> {
+    let cache_key = tts_cache_key(UTTERANCE_CACHE_PROVIDER, voice_name, "", ssml);
+    let sidecar = timing_sidecar_path(output);
+    if is_fresh_audio_file(ffmpeg, output, &cache_key)
+        && let Ok(cached) = fs::read(&sidecar)
+        && let Ok(cached) = serde_json::from_slice::<TimingSidecar>(&cached)
+        && cached.cache_key == cache_key
+        && cached.bookmarks == bookmarks
+    {
+        let duration_ms = duration_ms(ffmpeg, output)?;
+        return Ok((cached.events, duration_ms));
+    }
+    // Do not let a failed new synthesis accidentally reuse an older voice/SSML render as a
+    // continuous fallback. The caller will create a segmented fallback for this utterance.
+    let _ = fs::remove_file(output);
+    let _ = fs::remove_file(&sidecar);
+    let timed = synthesize_ssml_with_timing(config, ssml).await?;
+    let tmp = temporary_path(output);
+    fs::write(&tmp, &timed.audio).with_context(|| format!("Failed to write {}", tmp.display()))?;
+    if !ffmpeg.is_valid_audio(&tmp) {
+        let _ = fs::remove_file(&tmp);
+        bail!("Azure timing synthesis returned invalid audio");
+    }
+    if output.exists() {
+        fs::remove_file(output)
+            .with_context(|| format!("Failed to replace {}", output.display()))?;
+    }
+    fs::rename(&tmp, output).with_context(|| format!("Failed to promote {}", output.display()))?;
+    write_tts_cache_key(output, &cache_key)?;
+    fs::write(
+        &sidecar,
+        serde_json::to_vec_pretty(&TimingSidecar {
+            cache_key,
+            bookmarks: bookmarks.to_vec(),
+            events: timed.events.clone(),
+            plan_count: plans.len(),
+        })?,
+    )?;
+    let duration_ms = duration_ms(ffmpeg, output)?;
+    Ok((timed.events, duration_ms))
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimingSidecar {
+    cache_key: String,
+    bookmarks: Vec<String>,
+    events: Vec<TimingEvent>,
+    plan_count: usize,
+}
+
+fn timing_sidecar_path(output: &Path) -> PathBuf {
+    let mut path = output.as_os_str().to_owned();
+    path.push(".timing.json");
+    PathBuf::from(path)
+}
+
+fn alignment_repair_rate(alignment: &AlignmentResult, utterance: &Utterance) -> i8 {
+    let Some(drift_ms) = alignment.drift_ms else {
+        return 0;
+    };
+    let duration_ms = utterance.end_ms.saturating_sub(utterance.start_ms).max(1);
+    let raw = ((drift_ms as f64 / f64::from(duration_ms)) * 100.0).round() as i8;
+    raw.clamp(-3, 5)
 }
 
 fn duration_target(
@@ -852,6 +1341,43 @@ pub fn render_speech_plan_ssml_with_rate(
     plan: &SpeechPlan,
     rate_percent: i8,
 ) -> Result<String> {
+    let body = render_speech_plan_body(voice, plan, rate_percent)?;
+    Ok(wrap_voice_ssml(voice, &body))
+}
+
+/// Render one continuous utterance and place a bookmark after each source subtitle part.
+pub fn render_utterance_ssml(
+    voice: &AzureVoice,
+    plans: &[SpeechPlan],
+    bookmarks: &[String],
+    rate_percent: i8,
+) -> Result<String> {
+    if plans.is_empty() || plans.len() != bookmarks.len() {
+        bail!("Utterance plans and timing bookmarks must have the same non-zero length");
+    }
+    let mut body = String::new();
+    for (position, (plan, bookmark)) in plans.iter().zip(bookmarks).enumerate() {
+        if bookmark.is_empty()
+            || !bookmark
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            bail!("Utterance bookmark names must contain only letters, digits, and hyphens");
+        }
+        if position > 0 {
+            body.push(' ');
+        }
+        body.push_str(&render_speech_plan_body(voice, plan, rate_percent)?);
+        body.push_str(&format!("<bookmark mark=\"{}\"/>", escape_xml(bookmark)));
+    }
+    Ok(wrap_voice_ssml(voice, &body))
+}
+
+fn render_speech_plan_body(
+    voice: &AzureVoice,
+    plan: &SpeechPlan,
+    rate_percent: i8,
+) -> Result<String> {
     plan.validate(&voice.styles)?;
     if plan.style.is_some() && voice.capabilities.style != CapabilityState::Supported {
         bail!(
@@ -921,10 +1447,14 @@ pub fn render_speech_plan_ssml_with_rate(
     if rate_percent != 0 {
         body = format!("<prosody rate=\"{rate_percent:+}%\">{body}</prosody>");
     }
-    Ok(format!(
+    Ok(body)
+}
+
+fn wrap_voice_ssml(voice: &AzureVoice, body: &str) -> String {
+    format!(
         "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"vi-VN\"><voice name=\"{}\">{body}</voice></speak>",
         escape_xml(&voice.short_name)
-    ))
+    )
 }
 
 /// Cache identity for a plan includes the exact capability-aware SSML payload.
@@ -990,6 +1520,7 @@ mod tests {
         VoiceCapabilities {
             model_family: VoiceModelFamily::Standard,
             multilingual: false,
+            timing_events: CapabilityState::Supported,
             style: CapabilityState::Supported,
             manual_emphasis: CapabilityState::Supported,
             manual_prosody: CapabilityState::Supported,
@@ -1034,6 +1565,28 @@ mod tests {
         assert!(ssml.contains("<voice name=\"voice\">"));
         assert!(ssml.contains("<voice name=\"voice\">API &amp; SQL</voice>"));
         assert!(!ssml.contains("<prosody"));
+    }
+
+    #[test]
+    fn renders_one_bookmark_after_each_utterance_part() {
+        let first = plan();
+        let mut second = plan();
+        second.index = 2;
+        second.spoken_text = "và phần tiếp theo.".to_owned();
+        second.display_text = second.spoken_text.clone();
+        second.emphasis.clear();
+        second.pauses.clear();
+        second.style = None;
+        let ssml = render_utterance_ssml(
+            &voice(standard_capabilities()),
+            &[first, second],
+            &["dubora-u1-s1-end".to_owned(), "dubora-u1-s2-end".to_owned()],
+            0,
+        )
+        .unwrap();
+        assert_eq!(ssml.matches("<bookmark mark=").count(), 2);
+        assert!(ssml.contains("<bookmark mark=\"dubora-u1-s1-end\"/>"));
+        assert!(ssml.contains("<bookmark mark=\"dubora-u1-s2-end\"/>"));
     }
 
     #[test]

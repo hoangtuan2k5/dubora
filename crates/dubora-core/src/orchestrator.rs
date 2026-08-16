@@ -6,7 +6,10 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::azure_voices::AzureVoice;
-use crate::build_audio::{build_voiceover_track, build_voiceover_track_with_tempo_cap};
+use crate::build_audio::{
+    build_voiceover_track, build_voiceover_track_from_manifest,
+    build_voiceover_track_with_tempo_cap,
+};
 use crate::build_video::build_dubbed_video;
 use crate::clean_rolling::clean_youtube_rolling_subtitles;
 use crate::config::{DubConfig, DubOptions, Provider};
@@ -16,9 +19,20 @@ use crate::paths::{
     video_relative_path,
 };
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
+use crate::speech_plan::SpeechPlanDocument;
 use crate::srt::{SrtSegment, parse_srt, write_srt};
 use crate::translate_gemini::{create_speech_plans, translate_srt};
-use crate::tts_azure::{generate_all_tts, generate_all_tts_for_speech_plans};
+use crate::tts_azure::{
+    generate_all_tts, generate_all_tts_for_aligned_utterances, generate_all_tts_for_speech_plans,
+};
+use crate::tts_cache::tts_cache_key;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpeechPlanCache {
+    cache_key: String,
+    document: SpeechPlanDocument,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,6 +170,8 @@ async fn create_dub_for_video(
     let clean_srt = job_dir.join("clean_final.srt");
     let normalized_srt = job_dir.join("clean_final_tech.srt");
     let vi_srt = job_dir.join("clean_final_vi.srt");
+    let speech_plan_cache = job_dir.join("speech_plans.json");
+    let render_manifest = job_dir.join("render_manifest.json");
     let voiceover = job_dir.join("vietnamese_voiceover.mp3");
 
     {
@@ -220,14 +236,50 @@ async fn create_dub_for_video(
             .into_iter()
             .collect();
         let voice = AzureVoice::from_short_name(azure.voice.clone(), styles);
-        let plans = create_speech_plans(
-            &gemini.keys,
-            &clean_srt,
-            options.translate,
-            mode,
-            &voice.styles,
-        )
-        .await?;
+        let source_for_cache = fs::read(&clean_srt)?;
+        let cache_key = tts_cache_key(
+            "gemini-speech-plan-v2",
+            &format!("{mode:?}:{}", options.translate),
+            &voice.styles.join("|"),
+            &String::from_utf8_lossy(&source_for_cache),
+        );
+        let plans = fs::read(&speech_plan_cache)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SpeechPlanCache>(&bytes).ok())
+            .filter(|cache| cache.cache_key == cache_key)
+            .map(|cache| cache.document)
+            .filter(|document| {
+                document.plans.len() == parse_srt(&clean_srt).map_or(0, |segments| segments.len())
+                    && document
+                        .plans
+                        .iter()
+                        .all(|plan| plan.validate(&voice.styles).is_ok())
+            });
+        let plans = if let Some(plans) = plans {
+            progress.event(ProgressEvent::new(
+                Stage::Tts,
+                &label,
+                "Loaded cached Natural Voice speech plans.".to_owned(),
+            ));
+            plans
+        } else {
+            let plans = create_speech_plans(
+                &gemini.keys,
+                &clean_srt,
+                options.translate,
+                mode,
+                &voice.styles,
+            )
+            .await?;
+            let _ = fs::write(
+                &speech_plan_cache,
+                serde_json::to_vec_pretty(&SpeechPlanCache {
+                    cache_key,
+                    document: plans.clone(),
+                })?,
+            );
+            plans
+        };
         let source = parse_srt(&clean_srt)?;
         let display_segments: Result<Vec<_>> = source
             .iter()
@@ -246,19 +298,36 @@ async fn create_dub_for_video(
             })
             .collect();
         write_srt(&vi_srt, &display_segments?)?;
-        generate_all_tts_for_speech_plans(
-            azure,
-            &config.ffmpeg,
-            &vi_srt,
-            &plans.plans,
-            mode,
-            &gemini.keys,
-            &voice,
-            &tts_dir,
-            &label,
-            progress,
-        )
-        .await?;
+        if voice.capabilities.timing_events == crate::azure_voices::CapabilityState::Supported {
+            generate_all_tts_for_aligned_utterances(
+                azure,
+                &config.ffmpeg,
+                &vi_srt,
+                &plans.plans,
+                &gemini.keys,
+                &voice,
+                &tts_dir,
+                &render_manifest,
+                &label,
+                progress,
+            )
+            .await?;
+        } else {
+            let _ = fs::remove_file(&render_manifest);
+            generate_all_tts_for_speech_plans(
+                azure,
+                &config.ffmpeg,
+                &vi_srt,
+                &plans.plans,
+                mode,
+                &gemini.keys,
+                &voice,
+                &tts_dir,
+                &label,
+                progress,
+            )
+            .await?;
+        }
     } else {
         if options.translate {
             let gemini = config
@@ -283,10 +352,20 @@ async fn create_dub_for_video(
         let tts_dir = tts_dir.clone();
         let voiceover = voiceover.clone();
         let job_dir = job_dir.clone();
+        let render_manifest = render_manifest.clone();
         let label_audio = label.clone();
         let natural_mode = options.natural_mode;
         tokio::task::spawn_blocking(move || {
-            if natural_mode.is_some() {
+            if natural_mode.is_some() && render_manifest.is_file() {
+                build_voiceover_track_from_manifest(
+                    &ffmpeg,
+                    &vi_srt,
+                    &render_manifest,
+                    &voiceover,
+                    &job_dir,
+                    Some(MAX_TIME_STRETCH_TEMPO),
+                )
+            } else if natural_mode.is_some() {
                 build_voiceover_track_with_tempo_cap(
                     &ffmpeg,
                     &vi_srt,

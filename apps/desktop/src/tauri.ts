@@ -39,6 +39,7 @@ export type AzureVoice = {
 export type VoiceCapabilities = {
   modelFamily: string;
   multilingual: boolean;
+  timingEvents: "supported" | "unsupported" | "unknown";
   style: "supported" | "unsupported" | "unknown";
   manualEmphasis: "supported" | "unsupported" | "unknown";
   manualProsody: "supported" | "unsupported" | "unknown";

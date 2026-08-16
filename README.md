@@ -63,8 +63,9 @@ Gemini keys are used round-robin once per subtitle batch.
 ### Natural Voice
 
 Natural Voice is opt-in. It asks Gemini for a structured Speech Plan, renders only the SSML
-controls supported by the selected Azure voice, and then measures each synthesized segment before
-mixing it into the video. It requires `GEMINI_API_KEYS` even when the input SRT is already
+controls supported by the selected Azure voice, groups safe subtitle fragments into utterances,
+and measures each synthesized utterance before mixing it into the video. It requires
+`GEMINI_API_KEYS` even when the input SRT is already
 Vietnamese.
 
 ```bash
@@ -79,12 +80,14 @@ Vietnamese.
 ./target/release/dubora --translate --natural-voice "course/part/lesson.mp4"
 ```
 
-For each segment, Dubora accepts a duration error up to 5%, tries concise Speech Plan revisions
-only when necessary, and only uses final time-stretch within `1.13x`. When a non-Sync segment
-still cannot fit, it may start early inside the immediate previous segment's real unused tail; it
-never overlaps speech. A segment that still cannot fit fails clearly rather than being truncated
-or over-stretched. Standard neural voices may receive a small prosody retry when Azure reports
-support; Dragon HD voices use their automatic delivery and a revised Speech Plan instead.
+Dubora may combine adjacent subtitle fragments into one continuous utterance. It accepts a duration
+error up to 5%, validates internal Azure timing anchors when the voice exposes them, and allows at
+most one bounded timing repair. Accepted utterances use final time-stretch within `1.13x`. If an
+anchor cannot be proven but the complete technical utterance still fits its window, Dubora keeps
+that natural continuous audio as an explicit `1.35x` fallback; otherwise it falls back only that
+utterance's segments and keeps the normal `1.13x` cap. It never overlaps speech or silently
+truncates content. Standard neural voices expose timing events; Dragon HD voices are reported as
+timing-unsupported and use the safe segmented path with Azure automatic delivery.
 
 ```bash
 export DUBORA_FFMPEG=/usr/bin/ffmpeg

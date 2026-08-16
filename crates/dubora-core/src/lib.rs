@@ -1,3 +1,4 @@
+pub mod azure_timing;
 pub mod azure_voices;
 pub mod build_audio;
 pub mod build_video;
@@ -13,6 +14,7 @@ pub mod srt;
 pub mod translate_gemini;
 pub mod tts_azure;
 pub mod tts_cache;
+pub mod utterance;
 pub mod youtube;
 
 pub use azure_voices::{

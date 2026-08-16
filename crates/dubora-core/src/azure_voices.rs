@@ -45,6 +45,7 @@ pub enum VoiceModelFamily {
 pub struct VoiceCapabilities {
     pub model_family: VoiceModelFamily,
     pub multilingual: bool,
+    pub timing_events: CapabilityState,
     pub style: CapabilityState,
     pub manual_emphasis: CapabilityState,
     pub manual_prosody: CapabilityState,
@@ -135,40 +136,51 @@ impl AzureVoice {
                 model_family,
                 VoiceModelFamily::DragonHd | VoiceModelFamily::DragonHdOmni
             );
-        let (manual_emphasis, manual_prosody, semantic_break, pronunciation, automatic_delivery) =
-            match model_family {
-                VoiceModelFamily::Standard => (
-                    CapabilityState::Supported,
-                    CapabilityState::Supported,
-                    CapabilityState::Supported,
-                    CapabilityState::Supported,
-                    CapabilityState::Unknown,
-                ),
-                VoiceModelFamily::DragonHd => (
-                    CapabilityState::Unsupported,
-                    CapabilityState::Unsupported,
-                    CapabilityState::Supported,
-                    CapabilityState::Supported,
-                    CapabilityState::Supported,
-                ),
-                VoiceModelFamily::DragonHdOmni => (
-                    CapabilityState::Unsupported,
-                    CapabilityState::Unsupported,
-                    CapabilityState::Unsupported,
-                    CapabilityState::Supported,
-                    CapabilityState::Supported,
-                ),
-                VoiceModelFamily::DragonHdFlash | VoiceModelFamily::Unknown => (
-                    CapabilityState::Unknown,
-                    CapabilityState::Unknown,
-                    CapabilityState::Unknown,
-                    CapabilityState::Unknown,
-                    CapabilityState::Unknown,
-                ),
-            };
+        let (
+            timing_events,
+            manual_emphasis,
+            manual_prosody,
+            semantic_break,
+            pronunciation,
+            automatic_delivery,
+        ) = match model_family {
+            VoiceModelFamily::Standard => (
+                CapabilityState::Supported,
+                CapabilityState::Supported,
+                CapabilityState::Supported,
+                CapabilityState::Supported,
+                CapabilityState::Supported,
+                CapabilityState::Unknown,
+            ),
+            VoiceModelFamily::DragonHd => (
+                CapabilityState::Unsupported,
+                CapabilityState::Unsupported,
+                CapabilityState::Unsupported,
+                CapabilityState::Supported,
+                CapabilityState::Supported,
+                CapabilityState::Supported,
+            ),
+            VoiceModelFamily::DragonHdOmni => (
+                CapabilityState::Unknown,
+                CapabilityState::Unsupported,
+                CapabilityState::Unsupported,
+                CapabilityState::Unsupported,
+                CapabilityState::Supported,
+                CapabilityState::Supported,
+            ),
+            VoiceModelFamily::DragonHdFlash | VoiceModelFamily::Unknown => (
+                CapabilityState::Unknown,
+                CapabilityState::Unknown,
+                CapabilityState::Unknown,
+                CapabilityState::Unknown,
+                CapabilityState::Unknown,
+                CapabilityState::Unknown,
+            ),
+        };
         VoiceCapabilities {
             model_family,
             multilingual,
+            timing_events,
             style,
             manual_emphasis,
             manual_prosody,
@@ -350,12 +362,14 @@ mod tests {
         let standard =
             AzureVoice::capabilities("vi-VN-HoaiMyNeural", &["chat".to_owned()], true, &[]);
         assert_eq!(standard.model_family, VoiceModelFamily::Standard);
+        assert_eq!(standard.timing_events, CapabilityState::Supported);
         assert_eq!(standard.manual_prosody, CapabilityState::Supported);
 
         let hd = AzureVoice::capabilities("de-DE-Florian:DragonHDLatestNeural", &[], true, &[]);
         assert_eq!(hd.model_family, VoiceModelFamily::DragonHd);
         assert_eq!(hd.manual_emphasis, CapabilityState::Unsupported);
         assert_eq!(hd.manual_prosody, CapabilityState::Unsupported);
+        assert_eq!(hd.timing_events, CapabilityState::Unsupported);
         assert_eq!(hd.semantic_break, CapabilityState::Supported);
 
         let omni = AzureVoice::capabilities("en-US-Ava-DragonHDOmniLatestNeural", &[], false, &[]);
