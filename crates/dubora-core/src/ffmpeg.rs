@@ -103,6 +103,29 @@ impl FfmpegPaths {
         ensure_success(&result, "create silent MP3")
     }
 
+    /// Extract a small, deterministic mono PCM source track for opt-in word timing analysis.
+    pub fn extract_mono_wav(&self, input: &Path, output: &Path) -> Result<()> {
+        let result = self
+            .ffmpeg_command()
+            .args(["-y", "-i"])
+            .arg(input)
+            .args([
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+            ])
+            .arg(output)
+            .output()
+            .with_context(|| format!("Failed to extract source audio from {}", input.display()))?;
+        ensure_success(&result, "extract mono source WAV")
+    }
+
     pub(crate) fn checked(&self, command: &mut Command, label: &str) -> Result<()> {
         let output = command
             .output()

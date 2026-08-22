@@ -6,7 +6,7 @@ use dubora_core::ffmpeg::FfmpegPaths;
 use dubora_core::translate_gemini::load_env_keys;
 use dubora_core::{
     AzureConfig, DubConfig, DubOptions, GeminiConfig, NaturalMode, ProgressEvent, ProgressReporter,
-    Provider, create_dubs,
+    Provider, SourceTiming, create_dubs,
 };
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -39,6 +39,22 @@ impl From<NaturalModeArg> for NaturalMode {
             NaturalModeArg::Sync => Self::Sync,
             NaturalModeArg::Balanced => Self::Balanced,
             NaturalModeArg::Natural => Self::Natural,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum SourceTimingArg {
+    #[default]
+    CaptionDerived,
+    AzureFast,
+}
+
+impl From<SourceTimingArg> for SourceTiming {
+    fn from(value: SourceTimingArg) -> Self {
+        match value {
+            SourceTimingArg::CaptionDerived => Self::CaptionDerived,
+            SourceTimingArg::AzureFast => Self::AzureFast,
         }
     }
 }
@@ -80,6 +96,10 @@ struct Args {
     /// Natural Voice timing preference; only used with --natural-voice.
     #[arg(long, value_enum, default_value_t)]
     natural_mode: NaturalModeArg,
+
+    /// Source timing evidence; azure-fast uploads a temporary mono track for word timestamps.
+    #[arg(long, value_enum, default_value_t)]
+    source_timing: SourceTimingArg,
 
     /// Gemini API key; repeat this option to round-robin multiple keys.
     #[arg(long)]
@@ -141,6 +161,7 @@ async fn main() -> Result<()> {
         force_tts: args.force_tts,
         translate: args.translate,
         natural_mode: args.natural_voice.then(|| args.natural_mode.into()),
+        source_timing: args.source_timing.into(),
     };
 
     create_dubs(&config, args.target.as_deref(), options, &StdoutProgress).await?;

@@ -9,8 +9,8 @@ use dubora_core::srt::{parse_srt, time_to_seconds};
 use dubora_core::youtube::select_subtitle_language;
 use dubora_core::{
     AZURE_VOICE, AzureConfig, AzureVoice, DubConfig, DubOptions, GeminiConfig, NaturalMode,
-    ProgressEvent, ProgressReporter, Provider, Stage, VideoInfo, create_dubs, delete_input_video,
-    list_azure_voices, rename_input_video, repair_adjacent_youtube_subtitles,
+    ProgressEvent, ProgressReporter, Provider, SourceTiming, Stage, VideoInfo, create_dubs,
+    delete_input_video, list_azure_voices, rename_input_video, repair_adjacent_youtube_subtitles,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -646,6 +646,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
                     force_tts: request.force_tts,
                     translate: request.translate,
                     natural_mode: request.natural_voice.then_some(request.natural_mode),
+                    source_timing: SourceTiming::default(),
                 };
 
                 let result = if request.targets.is_empty() {
@@ -654,6 +655,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
                         .map(|_| ())
                 } else {
                     let mut result = Ok(());
+                    let mut failures = Vec::new();
                     for target in request.targets {
                         if reporter.is_cancelled() {
                             result = Err(anyhow::anyhow!("Dub job cancelled"));
@@ -662,9 +664,20 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
                         if let Err(error) =
                             create_dubs(&config, Some(Path::new(&target)), options, &reporter).await
                         {
-                            result = Err(error);
-                            break;
+                            let detail = format!("{error:#}");
+                            if reporter.is_cancelled() || detail.contains("cancelled") {
+                                result = Err(error);
+                                break;
+                            }
+                            failures.push(format!("{target}: {detail}"));
                         }
+                    }
+                    if result.is_ok() && !failures.is_empty() {
+                        result = Err(anyhow::anyhow!(
+                            "Đã xử lý xong danh sách với {} video lỗi hoặc cần kiểm tra:\n- {}",
+                            failures.len(),
+                            failures.join("\n- ")
+                        ));
                     }
                     result
                 };

@@ -18,6 +18,13 @@ pub enum Provider {
     Edge,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SourceTiming {
+    #[default]
+    CaptionDerived,
+    AzureFast,
+}
+
 #[derive(Clone, Debug)]
 pub struct AzureConfig {
     pub key: String,
@@ -142,6 +149,7 @@ pub struct DubOptions {
     pub translate: bool,
     /// Opt-in Natural Voice processing. `None` preserves the legacy pipeline.
     pub natural_mode: Option<NaturalMode>,
+    pub source_timing: SourceTiming,
 }
 
 #[cfg(test)]

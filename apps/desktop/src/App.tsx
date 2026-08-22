@@ -1391,7 +1391,7 @@ function App() {
                   </li>
                   <li>
                     Có thể dán nhiều key, mỗi key một dòng hoặc phân cách bằng dấu phẩy. Dubora
-                    xoay vòng key theo từng batch dịch.
+                    xoay vòng key theo từng request.
                   </li>
                 </ol>
                 <div className="guide-tip">
@@ -1418,16 +1418,33 @@ function App() {
                   <strong>Cách Dubora xử lý:</strong> Gemini tạo Speech Plan (cách nói, điểm nhấn,
                   ngắt câu), Azure chỉ nhận SSML mà voice đang chọn hỗ trợ, rồi Dubora đo thời lượng
                   audio và anchor nội bộ khi voice hỗ trợ timing events. Chế độ <strong>Cân bằng</strong>
-                  chỉ mượn tối đa 250 ms khoảng lặng sau câu. Nếu anchor chưa chứng minh được nhưng
-                  toàn bộ utterance kỹ thuật vẫn nằm trong cửa sổ, Dubora giữ một mạch nói tự nhiên
-                  với fallback có giới hạn 1.35× và hiển thị rõ là fallback; nếu không, chỉ utterance
-                  đó mới tách về các segment với cap 1.13×. Audio không chồng lời và không bị cắt cụt.
+                  cho phép dịch chuyển một block giải thích tối đa 250 ms trong cùng sync island;
+                  action anchor vẫn phải nằm trong cửa sổ 250 ms. Dubora đo toàn island trước khi
+                  chọn đúng một nhánh bổ sung cho mỗi whole utterance: timing repair hoặc một concise
+                  revision theo batch rồi synthesize lại toàn utterance đúng một lần. Nếu vẫn không
+                  đạt, video chuyển sang <strong>reviewRequired</strong> và không xuất đè output cũ.
+                  Aligned path không tách utterance thành các file segment, không có fallback 1.35×,
+                  không chồng lời và không cắt cụt. Work artifact sẽ ghi rõ timing mode:
+                  <strong>granular</strong>, <strong>captionDerived</strong> hoặc <strong>cueOnly</strong>.
+                </div>
+                <div className="guide-tip">
+                  <strong>Nếu cần kiểm tra:</strong> Dubora ghi timeline nguồn, manifest, báo cáo timing
+                  cần review và bộ đếm request/cache không chứa key vào thư mục <code>work/</code>.
+                  Gemini chỉ đề xuất câu nói; Rust giữ quyền quyết định timestamp, anchor và SSML.
+                  Manifest <strong>reviewRequired</strong> sẽ dừng trước FFmpeg để không ghi đè output cũ;
+                  progress và <code>sync_report.json</code> nêu entry cùng khoảng <code>mm:ss.mmm</code>
+                  cần nghe/xem lại.
+                </div>
+                <div className="guide-tip">
+                  <strong>Nguồn timing:</strong> bản desktop hiện dùng <strong>captionDerived</strong>
+                  {" "}hoặc <strong>cueOnly</strong>. Chế độ <strong>granular</strong> hiện chỉ có trên CLI
+                  khi chủ động bật <code>--source-timing azure-fast</code>.
                 </div>
                 <div className="guide-tip">
                   <strong>Chọn voice:</strong> sau khi bấm <strong>Tải danh sách giọng</strong> trong
                   Thiết lập, app hiển thị khả năng nhấn mạnh, nhịp/độ cao, ngắt câu và phong cách.
                   Với Dragon HD, Azure tự điều khiển delivery; vì voice này không trả timing events,
-                  Dubora dùng segmented fallback thay vì giả định anchor.
+                  Dubora dùng per-segment Natural Voice path và không tuyên bố semantic-anchor alignment.
                 </div>
               </article>
 
@@ -2105,7 +2122,7 @@ function App() {
                     label="Natural Voice"
                     title="Lập cách nói tự nhiên?"
                     body="Gemini lập Speech Plan, Azure nhận SSML theo khả năng giọng và Dubora chỉ kéo giãn âm thanh trong giới hạn an toàn."
-                    hint="Cần ít nhất một Gemini API key. Mặc định Cân bằng: chỉ mượn tối đa 250 ms khoảng lặng sau câu."
+                    hint="Cần ít nhất một Gemini API key. Mặc định Cân bằng: block giải thích chỉ được dịch chuyển tối đa 250 ms trong cùng sync island."
                     checked={naturalVoice}
                     disabled={!config.geminiKeys.trim()}
                     onChange={setNaturalVoice}

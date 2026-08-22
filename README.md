@@ -58,36 +58,54 @@ export GEMINI_API_KEYS=key_1,key_2
 `<root>/.env` is also supported (`AZURE_KEY`, `AZURE_REGION`, `AZURE_VOICE`,
 `AZURE_VOICE_STYLE`, `GEMINI_API_KEYS`). Use
 `--translate` to translate and polish English SRT files with Gemini 3.5 Flash-Lite. Multiple
-Gemini keys are used round-robin once per subtitle batch.
+Gemini keys are used round-robin once per logical request.
 
 ### Natural Voice
 
-Natural Voice is opt-in. It asks Gemini for a structured Speech Plan, renders only the SSML
-controls supported by the selected Azure voice, groups safe subtitle fragments into utterances,
-and measures each synthesized utterance before mixing it into the video. It requires
-`GEMINI_API_KEYS` even when the input SRT is already
+Natural Voice is opt-in. Gemini creates structured Speech Plans and Dubora renders only the SSML
+controls supported by the selected Azure voice. Timing-capable voices use source-aligned whole
+utterances; timing-unsupported voices use the per-segment Natural Voice path and do not claim
+semantic-anchor alignment. It requires `GEMINI_API_KEYS` even when the input SRT is already
 Vietnamese.
 
 ```bash
-# Balanced is the default: borrow at most 250 ms from following silence.
+# Balanced is the default: move an elastic block by at most 250 ms inside its sync island.
 ./target/release/dubora --natural-voice "course/part/lesson.mp4"
 
-# Prefer tighter sync or use all following silence when it is safe.
+# Prefer exact starts, or allow up to 500 ms of local movement for elastic explanation.
 ./target/release/dubora --natural-voice --natural-mode sync "course/part/lesson.mp4"
 ./target/release/dubora --natural-voice --natural-mode natural "course/part/lesson.mp4"
 
-# Translate English subtitles and use Natural Voice in the same plan request.
+# Translate English subtitles first, then build the Natural Voice Speech Plan from the indexed
+# Vietnamese SRT.
 ./target/release/dubora --translate --natural-voice "course/part/lesson.mp4"
+
+# Optional source-word timing experiment (uploads a temporary mono track to Azure Speech).
+# The default remains caption-derived and does not upload source audio.
+DUBORA_SOURCE_LOCALE=en-US ./target/release/dubora --natural-voice \
+  --source-timing azure-fast "course/part/lesson.mp4"
 ```
 
-Dubora may combine adjacent subtitle fragments into one continuous utterance. It accepts a duration
-error up to 5%, validates internal Azure timing anchors when the voice exposes them, and allows at
-most one bounded timing repair. Accepted utterances use final time-stretch within `1.13x`. If an
-anchor cannot be proven but the complete technical utterance still fits its window, Dubora keeps
-that natural continuous audio as an explicit `1.35x` fallback; otherwise it falls back only that
-utterance's segments and keeps the normal `1.13x` cap. It never overlaps speech or silently
-truncates content. Standard neural voices expose timing events; Dragon HD voices are reported as
-timing-unsupported and use the safe segmented path with Azure automatic delivery.
+For timing-capable voices, Dubora synthesizes each source-aligned utterance once and measures the
+whole island before choosing a follow-up. A block may use at most one mutually exclusive follow-up:
+a supported timing repair, or one batched concise revision followed by one whole-utterance
+resynthesis. Accepted audio uses final time-stretch within `1.13x`. Unresolved anchors, structural
+timing conflicts, or infeasible islands mark the render `reviewRequired`; the aligned path never
+splits or compacts an utterance into segment files. Dubora never overlaps speech or silently
+truncates content. Source-aligned diagnostics report `granular`, `captionDerived`, or `cueOnly`
+timing evidence. Dragon HD voices are timing-unsupported and use the per-segment Natural Voice path
+with Azure automatic delivery without claiming semantic-anchor alignment.
+
+The source-aligned path keeps one Rust-owned timeline: Gemini chooses wording and delivery only;
+Rust owns source timing, semantic-anchor windows, allocation, and SSML rendering. Each run writes
+`source_timeline.json`, `render_manifest.json`, `sync_report.json`, and secret-free
+`provider_metrics.json` under the ignored `work/` directory. A `reviewRequired` manifest is never
+sent to FFmpeg, so an uncertain island cannot overwrite a previous output.
+The CLI progress event and `sync_report.json` include the affected entry and `mm:ss.mmm` review
+window so the region can be checked in the existing player.
+To calculate a local Gemini estimate, set `DUBORA_GEMINI_INPUT_USD_PER_MILLION` and
+`DUBORA_GEMINI_OUTPUT_USD_PER_MILLION`; otherwise the report explicitly records that provider
+rates are unavailable.
 
 ```bash
 export DUBORA_FFMPEG=/usr/bin/ffmpeg
@@ -95,6 +113,20 @@ export DUBORA_FFPROBE=/usr/bin/ffprobe
 ```
 
 Azure is the Rust provider; Edge TTS remains in the Python reference.
+
+The --source-timing azure-fast option is an explicit CLI-only spike. Dubora extracts a temporary
+16 kHz mono WAV under ignored work/, requests Azure Fast Transcription word timestamps, aligns
+recognized words to the source SRT with bounded matching, and interpolates unmatched spans only
+after the coverage gate passes. It keeps the original subtitle text/timestamps unchanged. The
+transcript is cached by source-video metadata and locale; a provider error or low alignment
+coverage falls back to the normal caption-derived or cue-only timeline and records the reason in
+source_timeline.json.
+For translated or otherwise low-coverage input, the fallback may remain cueOnly and project only a
+unique exact required action anchor; Dubora never reports that projection as granular timing.
+Azure receives the extracted audio only in this opt-in mode, so review the service's retention and
+regional data-processing policy before enabling it. Set DUBORA_AZURE_STT_USD_PER_AUDIO_HOUR when
+you want provider_metrics.json to include a local transcription cost estimate; otherwise it
+reports provider_rate_unavailable and still records audio duration, bytes, latency, and cache hits.
 
 Verify:
 

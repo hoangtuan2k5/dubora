@@ -28,8 +28,17 @@ pub fn write_tts_cache_key(audio_path: &Path, cache_key: &str) -> Result<()> {
 }
 
 pub fn has_matching_tts_cache_key(audio_path: &Path, cache_key: &str) -> bool {
-    fs::read_to_string(tts_cache_key_path(audio_path))
-        .is_ok_and(|stored| stored.trim() == cache_key)
+    read_tts_cache_key(audio_path).is_ok_and(|stored| stored == cache_key)
+}
+
+pub fn read_tts_cache_key(audio_path: &Path) -> Result<String> {
+    let value = fs::read_to_string(tts_cache_key_path(audio_path))
+        .with_context(|| format!("Failed to read cache key for {}", audio_path.display()))?;
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("Empty cache key for {}", audio_path.display());
+    }
+    Ok(value.to_owned())
 }
 
 pub fn is_fresh_audio_file(ffmpeg: &FfmpegPaths, audio_path: &Path, cache_key: &str) -> bool {

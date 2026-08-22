@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use regex::Regex;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -14,31 +14,561 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
-use crate::azure_timing::{TimingEvent, synthesize_ssml_with_timing};
+use crate::azure_timing::{TimingEvent, TimingEventKind, synthesize_ssml_with_timing};
 use crate::azure_voices::{AzureVoice, CapabilityState};
 use crate::config::AzureConfig;
+#[cfg(test)]
+use crate::duration_solver::SEGMENT_HEADROOM_MS;
 use crate::duration_solver::{
-    DurationDecision, DurationTarget, MAX_CONTINUOUS_FALLBACK_TEMPO, MAX_TIME_STRETCH_TEMPO,
-    MAX_TIME_STRETCH_TOLERANCE_MS, SEGMENT_HEADROOM_MS, solve_duration, spillback_schedule,
+    DurationDecision, DurationTarget, MAX_TIME_STRETCH_TEMPO, MAX_TIME_STRETCH_TOLERANCE_MS,
+    solve_duration,
 };
 use crate::ffmpeg::FfmpegPaths;
+use crate::metrics::{
+    record_azure_cache_hit, record_azure_logical_generation, record_gemini_cache_hit,
+};
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
-use crate::speech_plan::{EmphasisLevel, NaturalMode, SpeechPlan};
-use crate::srt::{SrtSegment, parse_srt, time_to_seconds};
+use crate::speech_plan::{EmphasisLevel, NaturalMode, SpeechPlan, unique_phrase_position};
+#[cfg(test)]
+use crate::srt::time_to_seconds;
+use crate::srt::{SrtSegment, parse_srt};
+use crate::sync_timeline::{
+    AllocatedBlock, Coupling, MAX_ANCHOR_DRIFT_MS, MAX_SOFT_BOUNDARY_DRIFT_MS, MeasuredAnchor,
+    SOURCE_TIMELINE_VERSION, SourceTimeline, SyncLayout, allocate_blocks_best_effort,
+    allocate_measured_group, allocate_measured_group_with_anchors, allocate_segments,
+    allocation_groups,
+};
 use crate::translate_gemini::{
-    SpeechPlanRevisionRequest, revise_speech_plan, revise_speech_plans_batch,
+    SpeechPlanRevisionRequest, revise_speech_plan, revise_speech_plans_batch, revision_word_budget,
 };
 use crate::tts_cache::{is_fresh_audio_file, tts_cache_key, write_tts_cache_key};
 use crate::utterance::{
-    AlignmentResult, RenderManifest, ScheduledAudio, Utterance, bookmark_name, group_speech_plans,
-    validate_alignment,
+    AlignmentResult, EntryAlignment, EntryAlignmentStatus, ManifestDiagnostics, RenderManifest,
+    RenderedAnchor, ScheduledAudio, Utterance, bookmark_name, group_source_aligned_utterances,
+    semantic_bookmark_name, validate_bookmark_structure, validate_semantic_alignment,
 };
 
 const CONCURRENCY: usize = 4;
 const RETRIES: usize = 3;
-const SPEECH_PLAN_CACHE_PROVIDER: &str = "azure-speech-plan-v1";
-const MAX_SPEECH_PLAN_REVISIONS: u8 = 2;
-const UTTERANCE_CACHE_PROVIDER: &str = "azure-natural-utterance-v1";
+const SPEECH_PLAN_CACHE_PROVIDER: &str = "azure-speech-plan-v2";
+const MAX_SPEECH_PLAN_REVISIONS: u8 = 1;
+const UTTERANCE_CACHE_PROVIDER: &str = "azure-natural-utterance-v3";
+// Keep one concise-revision pass with bounded payloads. Each block appears in at most one
+// revision request; 20 preserves the lower request count without the instability seen in smaller
+// stochastic batches.
+const CONCISE_REVISION_BATCH_SIZE: usize = 20;
+const DURATION_CALIBRATION_VERSION: u8 = 1;
+const MIN_DURATION_CALIBRATION_SAMPLES: usize = 5;
+const MAX_DURATION_CALIBRATION_SAMPLES: usize = 64;
+const MAX_DURATION_RATE_REPAIR_PERCENT: i8 = 12;
+
+#[cfg(test)]
+type TestRestResponder = Box<dyn Fn(&str) -> Result<Vec<u8>> + Send + Sync>;
+
+#[cfg(test)]
+static TEST_REST_RESPONDER: OnceLock<std::sync::Mutex<Option<TestRestResponder>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct TestRestResponderGuard;
+
+#[cfg(test)]
+pub(crate) fn install_test_rest_responder(responder: TestRestResponder) -> TestRestResponderGuard {
+    *TEST_REST_RESPONDER
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("test Azure REST responder lock poisoned") = Some(responder);
+    TestRestResponderGuard
+}
+
+#[cfg(test)]
+impl Drop for TestRestResponderGuard {
+    fn drop(&mut self) {
+        if let Some(responder) = TEST_REST_RESPONDER.get() {
+            *responder
+                .lock()
+                .expect("test Azure REST responder lock poisoned") = None;
+        }
+    }
+}
+
+fn semantic_anchor_timing_available(timeline: &SourceTimeline) -> bool {
+    timeline.mode != crate::sync_timeline::TimingMode::CueOnly
+        || timeline.has_projected_anchor_timing()
+}
+
+#[derive(Clone)]
+struct PendingUtterance {
+    utterance: Utterance,
+    path: PathBuf,
+    measured_audio_ms: u32,
+    events: Vec<TimingEvent>,
+    semantic_expected: Vec<(String, u32, i64)>,
+    structural_issue: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AlignedFollowUp {
+    Accept,
+    Concise,
+    DurationRepair,
+    Repair,
+    Review,
+}
+
+fn aligned_follow_up(
+    structural_issue: bool,
+    duration_feasible: bool,
+    technically_fit: bool,
+    semantic_repair_feasible: bool,
+    semantic_aligned: bool,
+    duration_rate_repair: bool,
+) -> AlignedFollowUp {
+    if structural_issue {
+        AlignedFollowUp::Review
+    } else if !semantic_aligned && technically_fit && semantic_repair_feasible {
+        AlignedFollowUp::Repair
+    } else if !duration_feasible && duration_rate_repair && semantic_aligned {
+        AlignedFollowUp::DurationRepair
+    } else if !duration_feasible {
+        AlignedFollowUp::Concise
+    } else if !semantic_aligned && semantic_repair_feasible {
+        AlignedFollowUp::Repair
+    } else if semantic_aligned {
+        AlignedFollowUp::Accept
+    } else {
+        AlignedFollowUp::Review
+    }
+}
+
+fn is_provisional_review_reason(reason: &str) -> bool {
+    [
+        ":measured_allocation_infeasible:",
+        ":measured_anchor_allocation_infeasible:",
+        ":concise_revision_unresolved",
+        ":semantic_repair_unavailable",
+        ":semantic_repair_unresolved",
+    ]
+    .iter()
+    .any(|marker| reason.contains(marker))
+}
+
+#[derive(Clone)]
+struct SemanticEvidence {
+    events: Vec<TimingEvent>,
+    expected: Vec<(String, u32, i64)>,
+}
+
+fn rendered_anchor_evidence(
+    events: &[TimingEvent],
+    expected: &[(String, u32, i64)],
+    render_start_ms: u32,
+    tempo: f64,
+) -> (AlignmentResult, Vec<RenderedAnchor>) {
+    let alignment = validate_semantic_alignment(events, expected, render_start_ms, tempo);
+    let anchors = expected
+        .iter()
+        .filter_map(|(name, source_ms, tolerance_ms)| {
+            let mut matches = events.iter().filter(|event| {
+                event.kind == TimingEventKind::Bookmark && event.mark.as_deref() == Some(name)
+            });
+            let event = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            let raw_offset_ms = u32::try_from(event.offset_ms).ok()?;
+            let rendered_ms = u32::try_from(
+                u64::from(render_start_ms)
+                    .saturating_add((f64::from(raw_offset_ms) / tempo.max(1.0)).round() as u64),
+            )
+            .unwrap_or(u32::MAX);
+            Some(RenderedAnchor {
+                id: name
+                    .split_once("-a")
+                    .map_or_else(|| name.clone(), |(_, id)| id.to_owned()),
+                bookmark: name.clone(),
+                source_ms: *source_ms,
+                raw_offset_ms,
+                rendered_ms,
+                drift_ms: i64::from(rendered_ms) - i64::from(*source_ms),
+                tolerance_ms: *tolerance_ms,
+                coupling: Coupling::Anchored,
+            })
+        })
+        .collect();
+    (alignment, anchors)
+}
+
+fn measured_anchors(
+    candidates: &[PendingUtterance],
+    timeline: &SourceTimeline,
+) -> HashMap<String, Vec<MeasuredAnchor>> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.structural_issue.is_none())
+        .filter_map(|candidate| {
+            let mut anchors = candidate
+                .semantic_expected
+                .iter()
+                .filter_map(|(mark, source_ms, tolerance_ms)| {
+                    let event = candidate.events.iter().find(|event| {
+                        event.kind == TimingEventKind::Bookmark
+                            && event.mark.as_deref() == Some(mark)
+                    })?;
+                    let anchor_id = mark.split_once("-a")?.1;
+                    let phrase = timeline
+                        .phrases
+                        .iter()
+                        .find(|phrase| phrase.id == anchor_id)?;
+                    Some(MeasuredAnchor {
+                        source_ms: *source_ms,
+                        raw_offset_ms: u32::try_from(event.offset_ms).ok()?,
+                        tolerance_ms: u32::try_from(*tolerance_ms).ok()?,
+                        confidence: phrase.confidence,
+                        coupling: Coupling::Anchored,
+                    })
+                })
+                .collect::<Vec<_>>();
+            // Display-part bookmarks are soft evidence: they keep a translated block near the
+            // source cue boundary, but their lower confidence and wider window must never make a
+            // cue-only timeline claim semantic alignment.
+            for part in &candidate.utterance.parts {
+                let phrase = timeline.phrases.iter().find(|phrase| {
+                    phrase.owner_index == part.index && phrase.coupling == Coupling::Soft
+                });
+                let Some(phrase) = phrase else { continue };
+                let mark = bookmark_name(candidate.utterance.id, part.index);
+                let Some(event) = candidate.events.iter().find(|event| {
+                    event.kind == TimingEventKind::Bookmark
+                        && event.mark.as_deref() == Some(mark.as_str())
+                }) else {
+                    continue;
+                };
+                let Ok(raw_offset_ms) = u32::try_from(event.offset_ms) else {
+                    continue;
+                };
+                anchors.push(MeasuredAnchor {
+                    source_ms: phrase.preferred_start_ms,
+                    raw_offset_ms,
+                    tolerance_ms: MAX_SOFT_BOUNDARY_DRIFT_MS as u32,
+                    confidence: phrase.confidence,
+                    coupling: Coupling::Soft,
+                });
+            }
+            anchors.sort_by_key(|anchor| (anchor.source_ms, anchor.raw_offset_ms));
+            (!anchors.is_empty()).then(|| (candidate.utterance.block_id.clone(), anchors))
+        })
+        .collect()
+}
+
+fn semantic_expectations(
+    utterance: &Utterance,
+    timeline: &SourceTimeline,
+) -> Vec<(String, u32, i64)> {
+    utterance
+        .parts
+        .iter()
+        .flat_map(|part| {
+            part.plan.semantic_anchors.iter().filter_map(|anchor| {
+                if !timeline.has_semantic_anchor_timing(&anchor.anchor_id) {
+                    return None;
+                }
+                timeline
+                    .phrases
+                    .iter()
+                    .find(|phrase| phrase.id == anchor.anchor_id)
+                    .map(|phrase| {
+                        (
+                            semantic_bookmark_name(utterance.id, &anchor.anchor_id),
+                            phrase.preferred_start_ms,
+                            MAX_ANCHOR_DRIFT_MS,
+                        )
+                    })
+            })
+        })
+        .collect()
+}
+
+fn measured_part_durations(candidate: &PendingUtterance) -> HashMap<usize, u32> {
+    let mut previous = 0_u32;
+    candidate
+        .utterance
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(position, part)| {
+            let mark = bookmark_name(candidate.utterance.id, part.index);
+            let offset = candidate.events.iter().find_map(|event| {
+                (event.kind == TimingEventKind::Bookmark
+                    && event.mark.as_deref() == Some(mark.as_str()))
+                .then(|| u32::try_from(event.offset_ms).ok())
+                .flatten()
+            })?;
+            // Azure's final subtitle bookmark marks the end of the last planned part, not
+            // necessarily the end of the audio payload. Keep the trailing tail with that part;
+            // otherwise a whole utterance can look feasible during revision preflight and only
+            // become over-cap after the final manifest measures the complete file.
+            let duration = if position + 1 == candidate.utterance.parts.len() {
+                candidate
+                    .measured_audio_ms
+                    .saturating_sub(previous)
+                    .max(offset.saturating_sub(previous))
+            } else {
+                offset.saturating_sub(previous)
+            }
+            .max(1);
+            previous = offset;
+            Some((part.index, duration))
+        })
+        .collect()
+}
+
+async fn synthesize_revised_utterance(
+    config: &AzureConfig,
+    ffmpeg: &FfmpegPaths,
+    voice: &AzureVoice,
+    utterance: Utterance,
+    timeline: &SourceTimeline,
+    output: &Path,
+    rate_percent: i8,
+    semantic_delays: &[(String, u16)],
+) -> Result<PendingUtterance> {
+    let prepared = utterance
+        .parts
+        .iter()
+        .map(|part| prepared_speech_plan(&part.plan))
+        .collect::<Vec<_>>();
+    let bookmarks = utterance
+        .parts
+        .iter()
+        .map(|part| bookmark_name(utterance.id, part.index))
+        .collect::<Vec<_>>();
+    let semantic_bookmarks = utterance
+        .parts
+        .iter()
+        .zip(&prepared)
+        .flat_map(|(part, prepared)| {
+            prepared.semantic_anchors.iter().filter_map(|anchor| {
+                timeline
+                    .has_semantic_anchor_timing(&anchor.anchor_id)
+                    .then(|| {
+                        (
+                            part.index,
+                            anchor.spoken_phrase.clone(),
+                            semantic_bookmark_name(utterance.id, &anchor.anchor_id),
+                        )
+                    })
+            })
+        })
+        .collect::<Vec<_>>();
+    let timing_bookmarks = bookmarks
+        .iter()
+        .cloned()
+        .chain(semantic_bookmarks.iter().map(|(_, _, mark)| mark.clone()))
+        .collect::<Vec<_>>();
+    let ssml = render_utterance_ssml_with_semantic_anchors_and_delays(
+        voice,
+        &prepared,
+        &bookmarks,
+        &semantic_bookmarks,
+        semantic_delays,
+        rate_percent,
+    )?;
+    let (events, measured_audio_ms) = generate_timed_utterance(
+        config,
+        ffmpeg,
+        output,
+        &ssml,
+        &voice.short_name,
+        &prepared,
+        &timing_bookmarks,
+    )
+    .await?;
+    let structure = validate_bookmark_structure(&utterance, &events);
+    if !structure.accepted {
+        bail!(
+            "Revised utterance {} has invalid timing events: {}",
+            utterance.id,
+            structure.reason.as_deref().unwrap_or("unknown")
+        );
+    }
+    let semantic_expected = semantic_expectations(&utterance, timeline);
+    if !semantic_bookmarks_are_complete(&events, &semantic_expected) {
+        bail!(
+            "Revised utterance {} omitted a required semantic bookmark",
+            utterance.id
+        );
+    }
+    Ok(PendingUtterance {
+        utterance,
+        path: output.to_owned(),
+        measured_audio_ms,
+        events,
+        semantic_expected,
+        structural_issue: None,
+    })
+}
+
+fn pending_entry(
+    candidate: PendingUtterance,
+    allocation: &AllocatedBlock,
+) -> (ScheduledAudio, Option<(String, SemanticEvidence)>) {
+    let entry_id = format!("utterance-{}", candidate.utterance.id);
+    let slot_ms = allocation
+        .slot_end_ms
+        .saturating_sub(allocation.render_start_ms)
+        .max(1);
+    let (tempo, rendered_audio_ms) = fit_tempo_to_slot(candidate.measured_audio_ms, slot_ms);
+    let evidence = (!candidate.semantic_expected.is_empty()).then(|| {
+        (
+            entry_id.clone(),
+            SemanticEvidence {
+                events: candidate.events.clone(),
+                expected: candidate.semantic_expected.clone(),
+            },
+        )
+    });
+    (
+        ScheduledAudio {
+            id: entry_id,
+            path: candidate.path,
+            start_ms: allocation.render_start_ms,
+            end_ms: allocation.slot_end_ms,
+            source_segments: candidate
+                .utterance
+                .parts
+                .iter()
+                .map(|part| part.index)
+                .collect(),
+            measured_audio_ms: candidate.measured_audio_ms,
+            rendered_audio_ms,
+            tempo,
+            island_id: Some(candidate.utterance.island_id),
+            cache_identity: String::new(),
+            alignment: EntryAlignment::default(),
+        },
+        evidence,
+    )
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DurationCalibration {
+    version: u8,
+    voice: String,
+    style: String,
+    renderer: String,
+    chars_per_second: Vec<f64>,
+}
+
+impl DurationCalibration {
+    fn load(output_dir: &Path, voice: &AzureVoice) -> Self {
+        let path = output_dir.join(".duration-calibration-v1.json");
+        fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
+            .filter(|calibration| {
+                calibration.version == DURATION_CALIBRATION_VERSION
+                    && calibration.voice == voice.short_name
+                    && calibration.style == voice.styles.join("|")
+                    && calibration.renderer == UTTERANCE_CACHE_PROVIDER
+            })
+            .unwrap_or_else(|| Self {
+                version: DURATION_CALIBRATION_VERSION,
+                voice: voice.short_name.clone(),
+                style: voice.styles.join("|"),
+                renderer: UTTERANCE_CACHE_PROVIDER.to_owned(),
+                chars_per_second: Vec::new(),
+            })
+    }
+
+    fn median_chars_per_second(&self) -> Option<f64> {
+        if self.chars_per_second.len() < MIN_DURATION_CALIBRATION_SAMPLES {
+            return None;
+        }
+        let mut values = self.chars_per_second.clone();
+        values.sort_by(f64::total_cmp);
+        values.get(values.len() / 2).copied()
+    }
+
+    fn observe(&mut self, plan: &SpeechPlan, measured_audio_ms: u32) {
+        let prepared = prepared_speech_plan(plan);
+        let chars = prepared
+            .spoken_text
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count();
+        let pauses_ms = prepared
+            .pauses
+            .iter()
+            .map(|pause| u32::from(pause.duration_ms))
+            .sum::<u32>();
+        let spoken_ms = measured_audio_ms.saturating_sub(pauses_ms);
+        if chars < 4 || spoken_ms < 100 {
+            return;
+        }
+        let chars_per_second = chars as f64 * 1_000.0 / f64::from(spoken_ms);
+        if !(2.0..=30.0).contains(&chars_per_second) {
+            return;
+        }
+        self.chars_per_second.push(chars_per_second);
+        if self.chars_per_second.len() > MAX_DURATION_CALIBRATION_SAMPLES {
+            let excess = self.chars_per_second.len() - MAX_DURATION_CALIBRATION_SAMPLES;
+            self.chars_per_second.drain(..excess);
+        }
+    }
+
+    fn write(&self, output_dir: &Path) -> Result<()> {
+        if self.chars_per_second.is_empty() {
+            return Ok(());
+        }
+        fs::write(
+            output_dir.join(".duration-calibration-v1.json"),
+            serde_json::to_vec_pretty(self)?,
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn predict_plan_audio_ms(plan: &SpeechPlan, voice: &AzureVoice) -> u32 {
+    predict_plan_audio_ms_with_calibration(plan, voice, None)
+}
+
+fn predict_plan_audio_ms_with_calibration(
+    plan: &SpeechPlan,
+    voice: &AzureVoice,
+    calibrated_chars_per_second: Option<f64>,
+) -> u32 {
+    let prepared = prepared_speech_plan(plan);
+    let words = prepared.spoken_text.split_whitespace().count().max(1) as u64;
+    let chars = prepared
+        .spoken_text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count()
+        .max(1) as f64;
+    let spoken_ms = calibrated_chars_per_second
+        .filter(|cps| cps.is_finite() && *cps > 0.0)
+        .map(|cps| (chars * 1_000.0 / cps).ceil() as u64)
+        .unwrap_or_else(|| {
+            let words_per_minute = u64::from(voice.words_per_minute.unwrap_or(150).clamp(80, 300));
+            words.saturating_mul(60_000).div_ceil(words_per_minute)
+        });
+    let explicit_pause_ms = prepared
+        .pauses
+        .iter()
+        .map(|pause| u64::from(pause.duration_ms))
+        .sum::<u64>();
+    // A small cold-start margin is deliberately conservative. Actual Azure measurements remain
+    // the only acceptance oracle and replace this estimate in the second allocation pass.
+    u32::try_from(
+        (spoken_ms + explicit_pause_ms)
+            .saturating_mul(105)
+            .div_ceil(100),
+    )
+    .unwrap_or(u32::MAX)
+    .max(100)
+}
 
 pub async fn generate_all_tts(
     config: &AzureConfig,
@@ -128,9 +658,12 @@ pub async fn generate_all_tts_for_speech_plans(
     input_srt: &Path,
     plans: &[SpeechPlan],
     mode: NaturalMode,
+    timeline: &SourceTimeline,
+    layout: &SyncLayout,
     gemini_keys: &[String],
     voice: &AzureVoice,
     output_dir: &Path,
+    manifest_path: &Path,
     video: &str,
     progress: &dyn ProgressReporter,
 ) -> Result<()> {
@@ -146,27 +679,63 @@ pub async fn generate_all_tts_for_speech_plans(
     {
         bail!("Natural Voice plans do not match the subtitle segments");
     }
-
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create {}", output_dir.display()))?;
+    let mut duration_calibration = DurationCalibration::load(output_dir, voice);
+    let calibrated_chars_per_second = duration_calibration.median_chars_per_second();
+    let predicted = segments
+        .iter()
+        .map(|segment| {
+            (
+                segment.index,
+                plans.get(&segment.index).map_or(100, |plan| {
+                    predict_plan_audio_ms_with_calibration(plan, voice, calibrated_chars_per_second)
+                }),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let allocations = allocate_segments(timeline, layout, &segments, &predicted, mode)
+        .map_err(|error| anyhow!("review_required: source timing allocation: {error:#}"))?
+        .into_iter()
+        .map(|allocation| (allocation.segment_index, allocation))
+        .collect::<HashMap<_, _>>();
+
     progress.event(ProgressEvent::new(
         Stage::Tts,
         video,
         format!("Generating {} Natural Voice segments.", segments.len()),
     ));
     let client = Client::new();
-    let mut previous_rendered_end = None;
+    let mut generated_durations = HashMap::new();
+    let mut calibrated_plans = Vec::new();
+    let mut review_required = false;
 
     for (position, segment) in segments.iter().enumerate() {
+        if progress.is_cancelled() {
+            bail!("Dub job cancelled");
+        }
         let mut plan = plans
             .get(&segment.index)
             .expect("plans were matched above")
             .clone();
-        let mut target = duration_target(&segments, position, mode)?;
+        let allocation = allocations
+            .get(&segment.index)
+            .with_context(|| format!("Missing source allocation for segment {}", segment.index))?;
+        let target = DurationTarget {
+            slot_ms: allocation
+                .slot_end_ms
+                .saturating_sub(allocation.render_start_ms)
+                .max(100),
+            following_silence_ms: 0,
+            spillback_ms: 0,
+            mode,
+        };
         let mut speech_plan_revisions = 0;
         let mut result =
             generate_plan_segment(&client, config, ffmpeg, output_dir, &plan, voice, 0).await?;
         if result.fallback {
+            let output = segment_path(output_dir, plan.index);
+            generated_durations.insert(plan.index, duration_ms(ffmpeg, &output)?);
             progress.event(ProgressEvent::new(
                 Stage::Tts,
                 video,
@@ -177,23 +746,6 @@ pub async fn generate_all_tts_for_speech_plans(
 
         let output = segment_path(output_dir, plan.index);
         let actual_duration_ms = duration_ms(ffmpeg, &output)?;
-        let start = time_to_seconds(&segment.start)?;
-        let normal_available =
-            (f64::from(target.slot_ms + target.following_silence_ms) / 1_000.0).max(0.1);
-        let initial_schedule = spillback_schedule(
-            start,
-            normal_available,
-            f64::from(actual_duration_ms) / 1_000.0,
-            previous_rendered_end,
-            Some(MAX_TIME_STRETCH_TEMPO),
-        );
-        let initial_decision = solve_duration(target, actual_duration_ms, false)?;
-        if mode != NaturalMode::Sync
-            && matches!(initial_decision, DurationDecision::RegenerateSpeech { .. })
-        {
-            target.spillback_ms =
-                ((initial_schedule.1 - normal_available).max(0.0) * 1_000.0).round() as u32;
-        }
         let decision = solve_duration(target, actual_duration_ms, false)?;
         match decision {
             DurationDecision::Accept => {}
@@ -295,26 +847,32 @@ pub async fn generate_all_tts_for_speech_plans(
                         plan.index
                     ),
                 )),
-                DurationDecision::Reject { required_tempo } => bail!(
-                    "Natural Voice segment {} still needs {required_tempo:.2}x stretch after {speech_plan_revisions} speech-plan revision(s)",
-                    plan.index
-                ),
+                DurationDecision::Reject { required_tempo } => {
+                    review_required = true;
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!(
+                            "Segment {} still needs {required_tempo:.2}x stretch after {speech_plan_revisions} speech-plan revision(s); marking the video review-required.",
+                            plan.index
+                        ),
+                    ));
+                }
                 DurationDecision::RegenerateWithProsody { .. }
                 | DurationDecision::RegenerateSpeech { .. } => {
-                    bail!("Natural Voice duration solver requested more than one retry")
+                    review_required = true;
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!(
+                            "Segment {} requested another timing retry; marking the video review-required.",
+                            plan.index
+                        ),
+                    ));
                 }
             }
-            let (render_start, available) = spillback_schedule(
-                start,
-                normal_available,
-                f64::from(final_duration_ms) / 1_000.0,
-                previous_rendered_end,
-                Some(MAX_TIME_STRETCH_TEMPO),
-            );
-            let tempo = (f64::from(final_duration_ms) / 1_000.0 / available).max(1.0);
-            previous_rendered_end = Some(
-                render_start + (f64::from(final_duration_ms) / 1_000.0 / tempo).min(available),
-            );
+            generated_durations.insert(plan.index, final_duration_ms);
+            calibrated_plans.push((plan.clone(), final_duration_ms));
         }
         progress.event(
             ProgressEvent::new(
@@ -325,6 +883,77 @@ pub async fn generate_all_tts_for_speech_plans(
             .progress(position + 1, segments.len()),
         );
     }
+    for (plan, measured_audio_ms) in calibrated_plans {
+        duration_calibration.observe(&plan, measured_audio_ms);
+    }
+    duration_calibration.write(output_dir)?;
+    let mut entries = segments
+        .iter()
+        .map(|segment| {
+            let allocation = allocations
+                .get(&segment.index)
+                .expect("allocations cover every segment");
+            let measured_audio_ms = generated_durations
+                .get(&segment.index)
+                .copied()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Missing generated duration for segment {}", segment.index)
+                })?;
+            let slot_ms = allocation
+                .slot_end_ms
+                .saturating_sub(allocation.render_start_ms);
+            let tempo = (f64::from(measured_audio_ms) / f64::from(slot_ms.max(1))).max(1.0);
+            if tempo > MAX_TIME_STRETCH_TEMPO + f64::EPSILON {
+                review_required = true;
+                progress.event(ProgressEvent::new(
+                    Stage::Tts,
+                    video,
+                    format!(
+                        "Segment {} requires {tempo:.2}x stretch; marking the video review-required instead of publishing it.",
+                        segment.index
+                    ),
+                ));
+            }
+            Ok(ScheduledAudio {
+                id: format!("segment-{}", segment.index),
+                path: segment_path(output_dir, segment.index),
+                start_ms: allocation.render_start_ms,
+                end_ms: allocation.slot_end_ms,
+                source_segments: vec![segment.index],
+                measured_audio_ms,
+                rendered_audio_ms: (f64::from(measured_audio_ms) / tempo).ceil() as u32,
+                tempo,
+                island_id: Some(allocation.island_id.clone()),
+                cache_identity: String::new(),
+                alignment: EntryAlignment::default(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| (entry.start_ms, entry.source_segments[0]));
+    let manifest = if review_required {
+        RenderManifest::new(entries).review_required()
+    } else {
+        RenderManifest::new(entries)
+    }
+    .with_semantic_alignment_support(false)
+    .with_source_timeline(timeline, layout)?
+    .with_audio_cache_identities()?;
+    let expected = segments
+        .iter()
+        .map(|segment| segment.index)
+        .collect::<Vec<_>>();
+    manifest
+        .validate(&expected)
+        .map_err(|error| anyhow!("review_required: Natural Voice manifest: {error:#}"))?;
+    manifest
+        .validate_source_timeline(timeline, layout)
+        .map_err(|error| anyhow!("review_required: Natural Voice source alignment: {error:#}"))?;
+    fs::write(manifest_path, serde_json::to_vec_pretty(&manifest)?).with_context(|| {
+        format!(
+            "Failed to write render manifest {}",
+            manifest_path.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -334,6 +963,9 @@ pub async fn generate_all_tts_for_aligned_utterances(
     ffmpeg: &FfmpegPaths,
     input_srt: &Path,
     plans: &[SpeechPlan],
+    mode: NaturalMode,
+    timeline: &SourceTimeline,
+    layout: &SyncLayout,
     gemini_keys: &[String],
     voice: &AzureVoice,
     output_dir: &Path,
@@ -348,9 +980,37 @@ pub async fn generate_all_tts_for_aligned_utterances(
         );
     }
     let segments = parse_srt(input_srt)?;
-    let utterances = group_speech_plans(&segments, plans)?;
+    let utterances = group_source_aligned_utterances(&segments, plans, timeline, layout)?;
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create {}", output_dir.display()))?;
+    let mut duration_calibration = DurationCalibration::load(output_dir, voice);
+    let calibrated_chars_per_second = duration_calibration.median_chars_per_second();
+    let predicted = utterances
+        .iter()
+        .map(|utterance| {
+            (
+                utterance.block_id.clone(),
+                utterance
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        predict_plan_audio_ms_with_calibration(
+                            &part.plan,
+                            voice,
+                            calibrated_chars_per_second,
+                        )
+                    })
+                    .sum::<u32>()
+                    .max(100),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let (allocated_blocks, failed_islands) = allocate_blocks_best_effort(layout, &predicted, mode)
+        .map_err(|error| anyhow!("review_required: source timing allocation: {error:#}"))?;
+    let allocations = allocated_blocks
+        .into_iter()
+        .map(|allocation| (allocation.block_id.clone(), allocation))
+        .collect::<HashMap<_, _>>();
     progress.event(ProgressEvent::new(
         Stage::Tts,
         video,
@@ -360,10 +1020,47 @@ pub async fn generate_all_tts_for_aligned_utterances(
             utterances.len()
         ),
     ));
+    let mut utterance_order = (0..utterances.len()).collect::<Vec<_>>();
+    utterance_order.sort_by_key(|index| {
+        let utterance = &utterances[*index];
+        let allocation = allocations
+            .get(&utterance.block_id)
+            .expect("allocations cover every aligned utterance");
+        (
+            allocation
+                .slot_end_ms
+                .saturating_sub(allocation.render_start_ms)
+                .saturating_sub(allocation.rendered_audio_ms),
+            allocation.island_id.clone(),
+            utterance.id,
+        )
+    });
+    progress.event(ProgressEvent::new(
+        Stage::Tts,
+        video,
+        "Synthesizing tighter sync islands first; source order remains the render clock."
+            .to_owned(),
+    ));
 
     let mut entries = Vec::with_capacity(utterances.len());
-    let mut fallback_segments = Vec::new();
-    for (position, utterance) in utterances.iter().enumerate() {
+    let mut semantic_evidence = HashMap::<String, SemanticEvidence>::new();
+    let mut pending_utterances = Vec::with_capacity(utterances.len());
+    let mut diagnostics = ManifestDiagnostics::default();
+    if !failed_islands.is_empty() {
+        progress.event(ProgressEvent::new(
+            Stage::Tts,
+            video,
+            format!(
+                "Preflight timing is tight for {}; measuring real speech before deciding review.",
+                failed_islands.join(", ")
+            ),
+        ));
+    }
+    for (position, utterance_index) in utterance_order.iter().enumerate() {
+        let utterance = &utterances[*utterance_index];
+        if progress.is_cancelled() {
+            bail!("Dub job cancelled");
+        }
         progress.event(ProgressEvent::new(
             Stage::Tts,
             video,
@@ -374,279 +1071,687 @@ pub async fn generate_all_tts_for_aligned_utterances(
                 utterance.parts.last().map_or(0, |part| part.index)
             ),
         ));
-        let mut rate_percent = 0;
-        let mut accepted = None;
-        let mut outcome = "aligned";
         let utterance_output = output_dir.join(format!("utterance_{}.mp3", utterance.id));
-        for attempt in 0..=1 {
-            let prepared = utterance
+        let candidate_output = revision_candidate_path(&utterance_output, 20_000);
+        let prepared = utterance
+            .parts
+            .iter()
+            .map(|part| prepared_speech_plan(&part.plan))
+            .collect::<Vec<_>>();
+        let bookmarks = utterance
+            .parts
+            .iter()
+            .map(|part| bookmark_name(utterance.id, part.index))
+            .collect::<Vec<_>>();
+        let semantic_bookmarks = if semantic_anchor_timing_available(timeline) {
+            utterance
                 .parts
                 .iter()
-                .map(|part| prepared_speech_plan(&part.plan))
-                .collect::<Vec<_>>();
-            let bookmarks = utterance
-                .parts
-                .iter()
-                .map(|part| bookmark_name(utterance.id, part.index))
-                .collect::<Vec<_>>();
-            let ssml = render_utterance_ssml(voice, &prepared, &bookmarks, rate_percent)?;
-            let timed = generate_timed_utterance(
-                config,
-                ffmpeg,
-                &utterance_output,
-                &ssml,
-                &voice.short_name,
-                &prepared,
-                &bookmarks,
-            )
-            .await;
-            let (events, duration_ms) = match timed {
-                Ok(value) => value,
-                Err(error) => {
-                    progress.event(ProgressEvent::new(
-                        Stage::Tts,
-                        video,
-                        format!(
-                            "Utterance {} timing synthesis failed: {error:#}",
-                            utterance.id
-                        ),
-                    ));
-                    break;
-                }
-            };
-            let alignment = validate_alignment(utterance, &events, duration_ms);
-            if alignment.accepted {
-                progress.event(ProgressEvent::new(
-                    Stage::Tts,
-                    video,
-                    format!(
-                        "Validated {}/{} timing anchors for utterance {}.",
-                        utterance.parts.len(),
-                        utterance.parts.len(),
-                        utterance.id
-                    ),
-                ));
-                accepted = Some((
-                    utterance_output.clone(),
-                    utterance.parts.iter().map(|part| part.index).collect(),
-                ));
-                break;
+                .zip(&prepared)
+                .flat_map(|(part, prepared)| {
+                    prepared.semantic_anchors.iter().filter_map(|anchor| {
+                        timeline
+                            .has_semantic_anchor_timing(&anchor.anchor_id)
+                            .then(|| {
+                                (
+                                    part.index,
+                                    anchor.spoken_phrase.clone(),
+                                    semantic_bookmark_name(utterance.id, &anchor.anchor_id),
+                                )
+                            })
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let timing_bookmarks = bookmarks
+            .iter()
+            .cloned()
+            .chain(semantic_bookmarks.iter().map(|(_, _, mark)| mark.clone()))
+            .collect::<Vec<_>>();
+        let ssml = render_utterance_ssml_with_semantic_anchors(
+            voice,
+            &prepared,
+            &bookmarks,
+            &semantic_bookmarks,
+            0,
+        )?;
+        let (events, duration_ms) = match generate_timed_utterance(
+            config,
+            ffmpeg,
+            &candidate_output,
+            &ssml,
+            &voice.short_name,
+            &prepared,
+            &timing_bookmarks,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                remove_audio_artifacts(&candidate_output);
+                bail!(
+                    "review_required: utterance {} produced no valid timed audio draft: {error:#}",
+                    utterance.id
+                );
             }
-            if attempt == 0 && voice.capabilities.manual_prosody == CapabilityState::Supported {
-                rate_percent = alignment_repair_rate(&alignment, utterance);
-                if rate_percent != 0 {
-                    progress.event(ProgressEvent::new(
-                        Stage::Tts,
-                        video,
-                        format!(
-                            "Utterance {} alignment failed; applying one bounded {rate_percent:+}% timing repair.",
-                            utterance.id
-                        ),
-                    ));
-                    continue;
-                }
+        };
+        let display_alignment = match timeline.mode {
+            crate::sync_timeline::TimingMode::CueOnly => AlignmentResult {
+                accepted: true,
+                worst_anchor: None,
+                expected_ms: None,
+                actual_ms: None,
+                drift_ms: None,
+                reason: Some(if timeline.has_projected_anchor_timing() {
+                    "cue_only_display_boundaries".to_owned()
+                } else {
+                    "cue_only_timing".to_owned()
+                }),
+            },
+            crate::sync_timeline::TimingMode::CaptionDerived
+            | crate::sync_timeline::TimingMode::Granular => {
+                validate_bookmark_structure(utterance, &events)
             }
+        };
+        let semantic_expected = semantic_expectations(utterance, timeline);
+        let structural_issue = if !display_alignment.accepted {
+            display_alignment.reason
+        } else if !semantic_bookmarks_are_complete(&events, &semantic_expected) {
+            Some("semantic_bookmark_missing_or_duplicated".to_owned())
+        } else {
+            None
+        };
+        if structural_issue.is_some() {
             progress.event(ProgressEvent::new(
                 Stage::Tts,
                 video,
                 format!(
-                    "Utterance {} remains outside timing tolerance; using safe segmented timing ({}).",
-                    utterance.id,
-                    alignment.reason.as_deref().unwrap_or("unknown")
-                    ),
+                    "Utterance {} has incomplete timing evidence; keeping one review draft.",
+                    utterance.id
+                ),
             ));
-            outcome = "segmented fallback";
-            break;
         }
-        if let Some((path, source_segments)) = accepted {
-            entries.push(ScheduledAudio {
-                id: format!("utterance-{}", utterance.id),
-                path,
-                start_ms: utterance.start_ms,
-                end_ms: utterance.end_ms,
-                source_segments,
-            });
-        } else if ffmpeg.is_valid_audio(&utterance_output) {
-            let duration_ms = duration_ms(ffmpeg, &utterance_output)?;
-            let available_ms = utterance.end_ms.saturating_sub(utterance.start_ms);
-            if f64::from(duration_ms)
-                <= f64::from(available_ms) * MAX_CONTINUOUS_FALLBACK_TEMPO
-                    + f64::from(MAX_TIME_STRETCH_TOLERANCE_MS)
-            {
-                progress.event(ProgressEvent::new(
-                    Stage::Tts,
-                    video,
-                    format!(
-                        "Utterance {} uses continuous fallback without validated internal anchors.",
-                        utterance.id
-                    ),
-                ));
-                outcome = "continuous fallback";
-                entries.push(ScheduledAudio {
-                    id: format!("utterance-fallback-{}", utterance.id),
-                    path: utterance_output,
-                    start_ms: utterance.start_ms,
-                    end_ms: utterance.end_ms,
-                    source_segments: utterance.parts.iter().map(|part| part.index).collect(),
-                });
-            } else {
-                outcome = "segmented fallback";
-                fallback_segments.extend(
-                    generate_segmented_fallback_for_utterance(
-                        config, ffmpeg, voice, output_dir, utterance, video, progress,
-                    )
-                    .await?,
-                );
-            }
-        } else {
-            // Fall back only for this utterance. Re-running the whole job here would repeat
-            // every Gemini request after one timing miss and quickly exhaust a free-tier key.
-            outcome = "segmented fallback";
-            fallback_segments.extend(
-                generate_segmented_fallback_for_utterance(
-                    config, ffmpeg, voice, output_dir, utterance, video, progress,
-                )
-                .await?,
-            );
-        }
+        pending_utterances.push(PendingUtterance {
+            utterance: utterance.clone(),
+            path: candidate_output,
+            measured_audio_ms: duration_ms,
+            events,
+            semantic_expected,
+            structural_issue,
+        });
         progress.event(
             ProgressEvent::new(
                 Stage::Tts,
                 video,
-                format!("Generated {outcome} for utterance {}", utterance.id),
+                format!(
+                    "Generated base audio for utterance {}; queued for measured island allocation.",
+                    utterance.id
+                ),
             )
             .progress(position + 1, utterances.len()),
         );
     }
 
-    if !fallback_segments.is_empty() && !gemini_keys.is_empty() {
-        let client = Client::new();
-        for revision_number in 1..=2 {
-            let requests = fallback_segments
-                .iter()
-                .filter(|segment| {
-                    !segment.fallback
-                        && f64::from(segment.duration_ms)
-                            > f64::from(segment.target_duration_ms) * MAX_TIME_STRETCH_TEMPO
-                })
-                .map(|segment| SpeechPlanRevisionRequest {
-                    plan: segment.plan.clone(),
-                    actual_duration_ms: segment.duration_ms,
-                    target_duration_ms: segment.target_duration_ms,
-                    allowed_styles: voice.styles.clone(),
-                })
-                .collect::<Vec<_>>();
-            if requests.is_empty() {
-                break;
+    for candidate in &pending_utterances {
+        let part_durations = measured_part_durations(candidate);
+        for part in &candidate.utterance.parts {
+            if let Some(measured_audio_ms) = part_durations.get(&part.index) {
+                duration_calibration.observe(&part.plan, *measured_audio_ms);
             }
-            progress.event(ProgressEvent::new(
-                Stage::Tts,
-                video,
-                format!(
-                    "Requesting batched concise revision {revision_number}/2 for {} overlong fallback segments.",
-                    requests.len()
-                ),
-            ));
-            let revisions = match revise_speech_plans_batch(gemini_keys, &requests, revision_number)
-                .await
-            {
-                Ok(revisions) => revisions,
-                Err(error) => {
+        }
+    }
+    duration_calibration.write(output_dir)?;
+
+    // Second pass: replace preflight slots with actual Azure durations, allocation group by
+    // allocation group.  A group may cross only artificial duration caps; confirmed source
+    // barriers remain independent clocks.  A group is reallocated only when every block has a
+    // whole-utterance candidate; otherwise its original schedule remains the safe fallback clock.
+    let measured_by_block = pending_utterances
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.utterance.block_id.clone(),
+                candidate.measured_audio_ms,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut measured_anchor_map = measured_anchors(&pending_utterances, timeline);
+    for (block_id, measured_audio_ms) in &measured_by_block {
+        if let Some(allocation) = allocations.get(block_id) {
+            diagnostics
+                .prediction_errors_ms
+                .push(i64::from(*measured_audio_ms) - i64::from(allocation.predicted_audio_ms));
+        }
+    }
+    let mut pending_by_block = pending_utterances
+        .into_iter()
+        .map(|candidate| (candidate.utterance.block_id.clone(), candidate))
+        .collect::<HashMap<_, _>>();
+    let mut render_allocations = allocations.clone();
+    let mut concise_candidates = Vec::new();
+    for group in allocation_groups(layout) {
+        let block_ids = &group.block_ids;
+        let complete = block_ids
+            .iter()
+            .all(|block_id| pending_by_block.contains_key(block_id));
+        let measured = block_ids
+            .iter()
+            .filter_map(|block_id| {
+                pending_by_block
+                    .get(block_id)
+                    .map(|candidate| (block_id.clone(), candidate.measured_audio_ms))
+            })
+            .collect::<HashMap<_, _>>();
+        let duration_feasible = complete
+            && match allocate_measured_group(layout, &group.id, &measured, mode) {
+                Ok(values) => {
+                    for value in &values {
+                        render_allocations.insert(value.block_id.clone(), value.clone());
+                    }
                     progress.event(ProgressEvent::new(
                         Stage::Tts,
                         video,
                         format!(
-                            "Batched fallback revision {revision_number}/2 unavailable; keeping original speech: {error:#}"
+                            "Reallocated measured durations for {} ({} blocks).",
+                            group.id,
+                            values.len()
                         ),
                     ));
-                    break;
+                    true
+                }
+                Err(error) => {
+                    diagnostics.review_reasons.push(format!(
+                        "{}:measured_allocation_infeasible:{error}",
+                        group.id
+                    ));
+                    false
                 }
             };
-            let mut applied = 0;
-            for revised in revisions {
-                let Some(segment) = fallback_segments
-                    .iter_mut()
-                    .find(|segment| segment.plan.index == revised.index)
-                else {
-                    continue;
-                };
-                let result = generate_plan_segment_to_path(
-                    &client,
-                    config,
-                    ffmpeg,
-                    &segment.path,
-                    &revised,
-                    voice,
-                    0,
-                )
-                .await?;
-                if !result.fallback {
-                    let revised_duration = duration_ms(ffmpeg, &segment.path)?;
-                    if revised_duration < segment.duration_ms {
-                        segment.plan = revised;
-                        segment.duration_ms = revised_duration;
-                        applied += 1;
+        if duration_feasible {
+            match allocate_measured_group_with_anchors(
+                layout,
+                &group.id,
+                &measured,
+                &measured_anchor_map,
+                mode,
+            ) {
+                Ok(values) => {
+                    for value in values {
+                        render_allocations.insert(value.block_id.clone(), value);
                     }
                 }
+                Err(error) => diagnostics.review_reasons.push(format!(
+                    "{}:measured_anchor_allocation_infeasible:{error}",
+                    group.id
+                )),
             }
-            progress.event(ProgressEvent::new(
-                Stage::Tts,
-                video,
-                format!(
-                    "Applied {applied}/{} batched fallback revisions.",
-                    requests.len()
-                ),
-            ));
         }
-        for segment in &mut fallback_segments {
-            if segment.fallback
-                || f64::from(segment.duration_ms)
-                    <= f64::from(segment.target_duration_ms) * MAX_TIME_STRETCH_TEMPO
-            {
-                continue;
-            }
-            let Some(compact) = compact_fallback_plan(&segment.plan, &voice.styles) else {
+
+        for block_id in block_ids {
+            let Some(base) = pending_by_block.remove(block_id) else {
                 continue;
             };
-            let result = generate_plan_segment_to_path(
-                &client,
-                config,
-                ffmpeg,
-                &segment.path,
-                &compact,
-                voice,
-                0,
-            )
-            .await?;
-            if !result.fallback {
-                let compact_duration = duration_ms(ffmpeg, &segment.path)?;
-                if compact_duration < segment.duration_ms {
-                    let index = compact.index;
-                    segment.plan = compact;
-                    segment.duration_ms = compact_duration;
+            let allocation = render_allocations
+                .get(block_id)
+                .cloned()
+                .with_context(|| format!("Missing final allocation for {block_id}"))?;
+            let slot_ms = allocation
+                .slot_end_ms
+                .saturating_sub(allocation.render_start_ms)
+                .max(1);
+            let tempo = (f64::from(base.measured_audio_ms) / f64::from(slot_ms)).max(1.0);
+            let rendered_audio_ms = (f64::from(base.measured_audio_ms) / tempo).ceil() as u32;
+            let technically_fit =
+                tempo <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON && rendered_audio_ms <= slot_ms;
+            let semantic_alignment = if base.semantic_expected.is_empty() {
+                AlignmentResult {
+                    accepted: true,
+                    worst_anchor: None,
+                    expected_ms: None,
+                    actual_ms: None,
+                    drift_ms: None,
+                    reason: None,
+                }
+            } else {
+                validate_semantic_alignment(
+                    &base.events,
+                    &base.semantic_expected,
+                    allocation.render_start_ms,
+                    tempo,
+                )
+            };
+            let semantic_delays = if voice.capabilities.semantic_break == CapabilityState::Supported
+                && tempo <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+            {
+                semantic_anchor_delay_repairs(
+                    &base.events,
+                    &base.semantic_expected,
+                    allocation.render_start_ms,
+                    tempo,
+                )
+            } else {
+                Vec::new()
+            };
+            let semantic_repair_feasible = semantic_delays.is_empty()
+                || u64::from(base.measured_audio_ms).saturating_add(
+                    semantic_delays
+                        .iter()
+                        .map(|(_, delay)| u64::from(*delay))
+                        .sum::<u64>(),
+                ) <= (f64::from(slot_ms) * MAX_TIME_STRETCH_TEMPO).floor() as u64;
+            let duration_rate_repair = semantic_alignment.accepted
+                && semantic_delays.is_empty()
+                && voice.capabilities.manual_prosody == CapabilityState::Supported
+                && duration_repair_rate(base.measured_audio_ms, slot_ms).is_some();
+            let follow_up = aligned_follow_up(
+                base.structural_issue.is_some(),
+                duration_feasible && technically_fit,
+                technically_fit,
+                semantic_repair_feasible,
+                semantic_alignment.accepted,
+                duration_rate_repair,
+            );
+            match follow_up {
+                AlignedFollowUp::Accept => {
+                    let (entry, evidence) = pending_entry(base, &allocation);
+                    if let Some((id, evidence)) = evidence {
+                        semantic_evidence.insert(id, evidence);
+                    }
+                    entries.push(entry);
+                }
+                AlignedFollowUp::Concise => concise_candidates.push(base),
+                AlignedFollowUp::Review => {
+                    diagnostics.review_reasons.push(format!(
+                        "utterance-{}:timing_structure:{}",
+                        base.utterance.id,
+                        base.structural_issue.as_deref().unwrap_or("unknown")
+                    ));
+                    let (entry, evidence) = pending_entry(base, &allocation);
+                    if let Some((id, evidence)) = evidence {
+                        semantic_evidence.insert(id, evidence);
+                    }
+                    entries.push(entry);
+                }
+                AlignedFollowUp::DurationRepair | AlignedFollowUp::Repair => {
+                    let duration_repair = follow_up == AlignedFollowUp::DurationRepair;
+                    let rate_percent = if duration_repair {
+                        duration_repair_rate(base.measured_audio_ms, slot_ms).unwrap_or(0)
+                    } else if semantic_delays.is_empty()
+                        && voice.capabilities.manual_prosody == CapabilityState::Supported
+                    {
+                        alignment_repair_rate(&semantic_alignment, &base.utterance)
+                    } else {
+                        0
+                    };
+                    if semantic_delays.is_empty() && rate_percent == 0 {
+                        diagnostics.review_reasons.push(format!(
+                            "utterance-{}:{}_repair_unavailable",
+                            base.utterance.id,
+                            if duration_repair {
+                                "duration"
+                            } else {
+                                "semantic"
+                            },
+                        ));
+                        let (entry, evidence) = pending_entry(base, &allocation);
+                        if let Some((id, evidence)) = evidence {
+                            semantic_evidence.insert(id, evidence);
+                        }
+                        entries.push(entry);
+                        continue;
+                    }
                     progress.event(ProgressEvent::new(
                         Stage::Tts,
                         video,
-                        format!("Applied deterministic compact fallback for segment {index}."),
+                        format!(
+                            "Applying one measured {} timing repair to utterance {}.",
+                            if duration_repair {
+                                "duration"
+                            } else {
+                                "semantic"
+                            },
+                            base.utterance.id,
+                        ),
                     ));
+                    let candidate_path = revision_candidate_path(
+                        &output_dir.join(format!("utterance_{}.mp3", base.utterance.id)),
+                        if duration_repair { 20_002 } else { 20_001 },
+                    );
+                    let repair = synthesize_revised_utterance(
+                        config,
+                        ffmpeg,
+                        voice,
+                        base.utterance.clone(),
+                        timeline,
+                        &candidate_path,
+                        rate_percent,
+                        &semantic_delays,
+                    )
+                    .await;
+                    let repaired = match repair {
+                        Ok(candidate) => {
+                            let repaired_tempo = (f64::from(candidate.measured_audio_ms)
+                                / f64::from(slot_ms))
+                            .max(1.0);
+                            let accepted = repaired_tempo <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+                                && validate_semantic_alignment(
+                                    &candidate.events,
+                                    &candidate.semantic_expected,
+                                    allocation.render_start_ms,
+                                    repaired_tempo,
+                                )
+                                .accepted;
+                            if accepted { Some(candidate) } else { None }
+                        }
+                        Err(error) => {
+                            progress.event(ProgressEvent::new(
+                                Stage::Tts,
+                                video,
+                                format!(
+                                    "Semantic repair for utterance {} was discarded: {error:#}",
+                                    base.utterance.id
+                                ),
+                            ));
+                            None
+                        }
+                    };
+                    if let Some(repaired) = repaired {
+                        for (id, anchors) in
+                            measured_anchors(std::slice::from_ref(&repaired), timeline)
+                        {
+                            measured_anchor_map.insert(id, anchors);
+                        }
+                        let (entry, evidence) = pending_entry(repaired, &allocation);
+                        if let Some((id, evidence)) = evidence {
+                            semantic_evidence.insert(id, evidence);
+                        }
+                        entries.push(entry);
+                    } else {
+                        diagnostics.review_reasons.push(format!(
+                            "utterance-{}:{}_repair_unresolved",
+                            base.utterance.id,
+                            if duration_repair {
+                                "duration"
+                            } else {
+                                "semantic"
+                            },
+                        ));
+                        let (entry, evidence) = pending_entry(base, &allocation);
+                        if let Some((id, evidence)) = evidence {
+                            semantic_evidence.insert(id, evidence);
+                        }
+                        entries.push(entry);
+                    }
                 }
             }
         }
     }
-    entries.extend(fallback_segments.into_iter().map(|segment| ScheduledAudio {
-        id: format!("segment-{}", segment.plan.index),
-        path: segment.path,
-        start_ms: segment.start_ms,
-        end_ms: segment.end_ms,
-        source_segments: vec![segment.plan.index],
-    }));
 
-    let manifest = RenderManifest::new(entries);
+    let revision_cache_path = output_dir.join(".gemini-whole-revisions-v3.json");
+    let mut revision_cache = fs::read(&revision_cache_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RevisionCache>(&bytes).ok())
+        .unwrap_or_default();
+    let mut revision_cache_dirty = false;
+    let mut requests = Vec::new();
+    for candidate in &concise_candidates {
+        let allocation = render_allocations
+            .get(&candidate.utterance.block_id)
+            .with_context(|| {
+                format!(
+                    "Missing concise allocation for {}",
+                    candidate.utterance.block_id
+                )
+            })?;
+        let slot_ms = allocation
+            .slot_end_ms
+            .saturating_sub(allocation.render_start_ms)
+            .max(1);
+        let measured_parts = measured_part_durations(candidate);
+        let measured_total = measured_parts
+            .values()
+            .map(|value| u64::from(*value))
+            .sum::<u64>();
+        for part in &candidate.utterance.parts {
+            let actual = measured_parts.get(&part.index).copied().unwrap_or_else(|| {
+                let predicted = predict_plan_audio_ms_with_calibration(
+                    &part.plan,
+                    voice,
+                    calibrated_chars_per_second,
+                );
+                let predicted_total = candidate
+                    .utterance
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        u64::from(predict_plan_audio_ms_with_calibration(
+                            &part.plan,
+                            voice,
+                            calibrated_chars_per_second,
+                        ))
+                    })
+                    .sum::<u64>()
+                    .max(1);
+                u32::try_from(
+                    u64::from(candidate.measured_audio_ms) * u64::from(predicted) / predicted_total,
+                )
+                .unwrap_or(candidate.measured_audio_ms)
+                .max(1)
+            });
+            let target = if measured_total == 0 {
+                slot_ms
+            } else {
+                u32::try_from(u64::from(slot_ms) * u64::from(actual) / measured_total)
+                    .unwrap_or(slot_ms)
+                    .max(100)
+            };
+            if f64::from(actual)
+                > f64::from(target) * MAX_TIME_STRETCH_TEMPO
+                    + f64::from(MAX_TIME_STRETCH_TOLERANCE_MS)
+            {
+                requests.push(SpeechPlanRevisionRequest {
+                    plan: part.plan.clone(),
+                    actual_duration_ms: actual,
+                    target_duration_ms: target,
+                    allowed_styles: voice.styles.clone(),
+                    maximum_words: revision_word_budget(
+                        &part.plan,
+                        actual,
+                        target,
+                        voice.words_per_minute.unwrap_or(130),
+                    ),
+                });
+            }
+        }
+    }
+    let mut revised_by_index = HashMap::new();
+    if !requests.is_empty() && !gemini_keys.is_empty() {
+        progress.event(ProgressEvent::new(
+            Stage::Tts,
+            video,
+            format!(
+                "Requesting one batched concise revision pass for {} overlong speech parts.",
+                requests.len()
+            ),
+        ));
+        for request_batch in requests.chunks(CONCISE_REVISION_BATCH_SIZE) {
+            let cache_key = revision_cache_key(request_batch, 1)?;
+            let revisions = if let Some(cached) = revision_cache.entries.get(&cache_key) {
+                record_gemini_cache_hit();
+                cached.clone()
+            } else {
+                match revise_speech_plans_batch(gemini_keys, request_batch, 1).await {
+                    Ok(revisions) => {
+                        revision_cache.entries.insert(cache_key, revisions.clone());
+                        revision_cache_dirty = true;
+                        revisions
+                    }
+                    Err(error) => {
+                        progress.event(ProgressEvent::new(
+                            Stage::Tts,
+                            video,
+                            format!(
+                                "Batched concise revision unavailable; preserving base audio: {error:#}"
+                            ),
+                        ));
+                        Vec::new()
+                    }
+                }
+            };
+            revised_by_index.extend(
+                revisions
+                    .into_iter()
+                    .map(|revision| (revision.index, revision)),
+            );
+        }
+    }
+    if revision_cache_dirty {
+        fs::write(
+            &revision_cache_path,
+            serde_json::to_vec_pretty(&revision_cache)?,
+        )?;
+    }
+    for mut base in concise_candidates {
+        let allocation = render_allocations
+            .get(&base.utterance.block_id)
+            .cloned()
+            .with_context(|| format!("Missing final allocation for {}", base.utterance.block_id))?;
+        let mut revised_utterance = base.utterance.clone();
+        let mut changed = false;
+        for part in &mut revised_utterance.parts {
+            if let Some(revision) = revised_by_index.get(&part.index) {
+                part.plan = revision.clone();
+                changed = true;
+            }
+        }
+        let mut revision_applied = false;
+        if changed {
+            let candidate_path = revision_candidate_path(
+                &output_dir.join(format!("utterance_{}.mp3", base.utterance.id)),
+                30_000,
+            );
+            match synthesize_revised_utterance(
+                config,
+                ffmpeg,
+                voice,
+                revised_utterance,
+                timeline,
+                &candidate_path,
+                0,
+                &[],
+            )
+            .await
+            {
+                Ok(revision) if revision.measured_audio_ms < base.measured_audio_ms => {
+                    base = revision;
+                    revision_applied = true;
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!(
+                            "Applied one whole-utterance concise revision for utterance {}.",
+                            base.utterance.id
+                        ),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    remove_audio_artifacts(&candidate_path);
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!(
+                            "Concise revision for utterance {} was discarded: {error:#}",
+                            base.utterance.id
+                        ),
+                    ));
+                }
+            }
+        }
+        if !revision_applied {
+            diagnostics.review_reasons.push(format!(
+                "utterance-{}:concise_revision_unresolved",
+                base.utterance.id
+            ));
+        } else {
+            let part_durations = measured_part_durations(&base);
+            for part in &base.utterance.parts {
+                if let Some(measured_audio_ms) = part_durations.get(&part.index) {
+                    duration_calibration.observe(&part.plan, *measured_audio_ms);
+                }
+            }
+        }
+        for (block_id, anchors) in measured_anchors(std::slice::from_ref(&base), timeline) {
+            measured_anchor_map.insert(block_id, anchors);
+        }
+        let (entry, evidence) = pending_entry(base, &allocation);
+        if let Some((id, evidence)) = evidence {
+            semantic_evidence.insert(id, evidence);
+        }
+        entries.push(entry);
+    }
+    duration_calibration.write(output_dir)?;
+    // Reallocate once more after concise revisions. Revisions may change measured durations
+    // substantially, so a pre-revision infeasibility is only provisional evidence.
+    let final_failed_groups = finalize_measured_schedule(
+        layout,
+        &mut entries,
+        &mut render_allocations,
+        &measured_anchor_map,
+        mode,
+    );
+    diagnostics
+        .review_reasons
+        .retain(|reason| !is_provisional_review_reason(reason));
+    let mut review_required = diagnostics
+        .review_reasons
+        .iter()
+        .any(|reason| reason.contains(":timing_structure:"));
+    if !final_failed_groups.is_empty() {
+        review_required = true;
+        diagnostics.review_reasons.extend(
+            final_failed_groups
+                .iter()
+                .map(|group| format!("{group}:measured_allocation_infeasible_after_revision")),
+        );
+    }
+
+    for entry in &entries {
+        if entry.tempo > MAX_TIME_STRETCH_TEMPO + f64::EPSILON {
+            review_required = true;
+            diagnostics.review_reasons.push(format!(
+                "{}:final_timing:required={:.3}:allowed={MAX_TIME_STRETCH_TEMPO:.2}",
+                entry.id, entry.tempo
+            ));
+        }
+    }
+
+    if apply_final_semantic_evidence(&mut entries, &semantic_evidence, &mut diagnostics) {
+        review_required = true;
+    }
+    entries.sort_by_key(|entry| (entry.start_ms, entry.source_segments[0]));
+
+    let manifest = if review_required {
+        RenderManifest::new(entries).review_required()
+    } else {
+        RenderManifest::new(entries)
+    }
+    .with_semantic_alignment_support(true)
+    .with_diagnostics(diagnostics)
+    .with_source_timeline(timeline, layout)?
+    .with_audio_cache_identities()?;
     let expected = segments
         .iter()
         .map(|segment| segment.index)
         .collect::<Vec<_>>();
-    manifest.validate(&expected)?;
+    manifest
+        .validate(&expected)
+        .map_err(|error| anyhow!("review_required: Natural Voice manifest: {error:#}"))?;
+    manifest
+        .validate_source_timeline(timeline, layout)
+        .map_err(|error| anyhow!("review_required: Natural Voice source alignment: {error:#}"))?;
     fs::write(manifest_path, serde_json::to_vec_pretty(&manifest)?).with_context(|| {
         format!(
             "Failed to write aligned render manifest {}",
@@ -656,82 +1761,179 @@ pub async fn generate_all_tts_for_aligned_utterances(
     Ok(())
 }
 
-async fn generate_segmented_fallback_for_utterance(
-    config: &AzureConfig,
-    ffmpeg: &FfmpegPaths,
-    voice: &AzureVoice,
-    output_dir: &Path,
-    utterance: &Utterance,
-    video: &str,
-    progress: &dyn ProgressReporter,
-) -> Result<Vec<FallbackSegment>> {
-    let client = Client::new();
-    let mut entries = Vec::with_capacity(utterance.parts.len());
-    for part in &utterance.parts {
-        let output = segment_path(output_dir, part.index);
-        let result =
-            generate_plan_segment_to_path(&client, config, ffmpeg, &output, &part.plan, voice, 0)
-                .await?;
-        for message in result.attempt_errors {
-            progress.event(ProgressEvent::new(Stage::Tts, video, message));
+fn apply_final_semantic_evidence(
+    entries: &mut [ScheduledAudio],
+    evidence: &HashMap<String, SemanticEvidence>,
+    diagnostics: &mut ManifestDiagnostics,
+) -> bool {
+    diagnostics.anchor_drifts_ms.clear();
+    diagnostics
+        .review_reasons
+        .retain(|reason| !reason.contains(":final_semantic_anchor:"));
+    let mut review_required = false;
+    for entry in entries {
+        let Some(evidence) = evidence.get(&entry.id) else {
+            entry.alignment = EntryAlignment::default();
+            continue;
+        };
+        if evidence.expected.is_empty() {
+            entry.alignment = EntryAlignment::default();
+            continue;
         }
-        if result.fallback {
-            progress.event(ProgressEvent::new(
-                Stage::Tts,
-                video,
-                format!(
-                    "Utterance {} segment {} fell back to silence.",
-                    utterance.id, part.index
-                ),
-            ));
-        }
-        let generated_duration_ms = duration_ms(ffmpeg, &output)?;
-        entries.push(FallbackSegment {
-            plan: part.plan.clone(),
-            path: output,
-            start_ms: part.start_ms,
-            end_ms: part.end_ms,
-            target_duration_ms: part
-                .end_ms
-                .saturating_sub(part.start_ms)
-                .saturating_sub(SEGMENT_HEADROOM_MS)
-                .max(100),
-            duration_ms: generated_duration_ms,
-            fallback: result.fallback,
-        });
+        let (alignment, anchors) = rendered_anchor_evidence(
+            &evidence.events,
+            &evidence.expected,
+            entry.start_ms,
+            entry.tempo,
+        );
+        diagnostics
+            .anchor_drifts_ms
+            .extend(anchors.iter().map(|anchor| anchor.drift_ms));
+        entry.alignment = EntryAlignment {
+            status: if alignment.accepted {
+                EntryAlignmentStatus::Aligned
+            } else {
+                review_required = true;
+                diagnostics.review_reasons.push(format!(
+                    "{}:final_semantic_anchor:{}",
+                    entry.id,
+                    alignment.reason.as_deref().unwrap_or("outside_tolerance")
+                ));
+                EntryAlignmentStatus::ReviewRequired
+            },
+            anchors,
+        };
     }
-    Ok(entries)
+    review_required
 }
 
-struct FallbackSegment {
-    plan: SpeechPlan,
-    path: PathBuf,
-    start_ms: u32,
-    end_ms: u32,
-    target_duration_ms: u32,
-    duration_ms: u32,
-    fallback: bool,
+fn finalize_measured_schedule(
+    layout: &crate::sync_timeline::SyncLayout,
+    entries: &mut [ScheduledAudio],
+    allocations: &mut HashMap<String, AllocatedBlock>,
+    measured_anchors: &HashMap<String, Vec<MeasuredAnchor>>,
+    mode: NaturalMode,
+) -> Vec<String> {
+    let mut failed_groups = Vec::new();
+    for group in allocation_groups(layout) {
+        let mut measured = HashMap::<String, u32>::new();
+        for entry in entries.iter() {
+            if let Some(block) = layout
+                .blocks
+                .iter()
+                .find(|block| block.source_segments == entry.source_segments)
+            {
+                measured.insert(block.id.clone(), entry.measured_audio_ms);
+            }
+        }
+        let complete = group
+            .block_ids
+            .iter()
+            .all(|block_id| measured.contains_key(block_id));
+        if !complete {
+            failed_groups.push(group.id);
+            continue;
+        }
+        // Duration feasibility is authoritative for a group. Display-boundary anchors are soft
+        // objectives and must not turn an otherwise safe schedule into reviewRequired; only a
+        // hard semantic anchor conflict remains a final allocation failure.
+        let duration_values = match allocate_measured_group(layout, &group.id, &measured, mode) {
+            Ok(values) => values,
+            Err(_) => {
+                failed_groups.push(group.id);
+                continue;
+            }
+        };
+        for value in duration_values {
+            allocations.insert(value.block_id.clone(), value);
+        }
+        match allocate_measured_group_with_anchors(
+            layout,
+            &group.id,
+            &measured,
+            measured_anchors,
+            mode,
+        ) {
+            Ok(values) => {
+                for value in values {
+                    allocations.insert(value.block_id.clone(), value);
+                }
+            }
+            Err(_) if group_has_hard_measured_anchor(&group.block_ids, measured_anchors) => {
+                failed_groups.push(group.id);
+                continue;
+            }
+            Err(_) => {}
+        }
+        for entry in entries.iter_mut() {
+            let Some(block) = layout
+                .blocks
+                .iter()
+                .find(|block| block.source_segments == entry.source_segments)
+            else {
+                continue;
+            };
+            let Some(allocation) = allocations.get(&block.id) else {
+                continue;
+            };
+            entry.start_ms = allocation.render_start_ms;
+            entry.end_ms = allocation.slot_end_ms;
+            let (tempo, rendered) = fit_tempo_to_slot(
+                entry.measured_audio_ms,
+                entry.end_ms.saturating_sub(entry.start_ms).max(1),
+            );
+            entry.tempo = tempo;
+            entry.rendered_audio_ms = rendered;
+        }
+    }
+    failed_groups
 }
 
-fn compact_fallback_plan(plan: &SpeechPlan, allowed_styles: &[String]) -> Option<SpeechPlan> {
-    let mut compact = plan.clone();
-    for phrase in [
-        "Giờ để mình ",
-        "nên mình sẽ ",
-        "Ở đây mình sẽ ",
-        "thì có thể ",
-        "mình sẽ ",
-    ] {
-        compact.spoken_text = compact.spoken_text.replace(phrase, "");
-    }
-    if compact.spoken_text == plan.spoken_text {
-        return None;
-    }
-    compact.emphasis.clear();
-    compact.pauses.clear();
-    (compact.spoken_text.chars().count() < plan.spoken_text.chars().count()
-        && compact.validate(allowed_styles).is_ok())
-    .then_some(compact)
+fn group_has_hard_measured_anchor(
+    block_ids: &[String],
+    measured_anchors: &HashMap<String, Vec<MeasuredAnchor>>,
+) -> bool {
+    block_ids.iter().any(|block_id| {
+        measured_anchors.get(block_id).is_some_and(|anchors| {
+            anchors
+                .iter()
+                .any(|anchor| anchor.coupling == Coupling::Anchored)
+        })
+    })
+}
+
+fn fit_tempo_to_slot(measured_audio_ms: u32, slot_ms: u32) -> (f64, u32) {
+    let slot_ms = slot_ms.max(1);
+    let tempo = (f64::from(measured_audio_ms) / f64::from(slot_ms)).max(1.0);
+    (tempo, measured_audio_ms.min(slot_ms))
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct RevisionCache {
+    entries: HashMap<String, Vec<SpeechPlan>>,
+}
+
+fn revision_cache_key(
+    requests: &[SpeechPlanRevisionRequest],
+    revision_number: u8,
+) -> Result<String> {
+    let material = requests
+        .iter()
+        .map(|request| {
+            serde_json::json!({
+                "plan": request.plan,
+                "actualDurationMs": request.actual_duration_ms,
+                "targetDurationMs": request.target_duration_ms,
+                "allowedStyles": request.allowed_styles,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(tts_cache_key(
+        "gemini-whole-revision-v3",
+        &revision_number.to_string(),
+        "",
+        &serde_json::to_string(&material)?,
+    ))
 }
 
 async fn generate_timed_utterance(
@@ -743,7 +1945,8 @@ async fn generate_timed_utterance(
     plans: &[SpeechPlan],
     bookmarks: &[String],
 ) -> Result<(Vec<TimingEvent>, u32)> {
-    let cache_key = tts_cache_key(UTTERANCE_CACHE_PROVIDER, voice_name, "", ssml);
+    let cache_material = format!("source-timeline-v{SOURCE_TIMELINE_VERSION}\n{ssml}");
+    let cache_key = tts_cache_key(UTTERANCE_CACHE_PROVIDER, voice_name, "", &cache_material);
     let sidecar = timing_sidecar_path(output);
     if is_fresh_audio_file(ffmpeg, output, &cache_key)
         && let Ok(cached) = fs::read(&sidecar)
@@ -751,11 +1954,11 @@ async fn generate_timed_utterance(
         && cached.cache_key == cache_key
         && cached.bookmarks == bookmarks
     {
+        record_azure_cache_hit();
         let duration_ms = duration_ms(ffmpeg, output)?;
         return Ok((cached.events, duration_ms));
     }
-    // Do not let a failed new synthesis accidentally reuse an older voice/SSML render as a
-    // continuous fallback. The caller will create a segmented fallback for this utterance.
+    // Do not let a failed new synthesis accidentally reuse audio from another voice or SSML.
     let _ = fs::remove_file(output);
     let _ = fs::remove_file(&sidecar);
     let timed = synthesize_ssml_with_timing(config, ssml).await?;
@@ -808,6 +2011,76 @@ fn alignment_repair_rate(alignment: &AlignmentResult, utterance: &Utterance) -> 
     raw.clamp(-3, 5)
 }
 
+fn duration_repair_rate(measured_audio_ms: u32, slot_ms: u32) -> Option<i8> {
+    let required_tempo = f64::from(measured_audio_ms) / f64::from(slot_ms.max(1));
+    if required_tempo <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON {
+        return None;
+    }
+    let rate = ((required_tempo / MAX_TIME_STRETCH_TEMPO - 1.0) * 100.0).ceil() as i8;
+    (1..=MAX_DURATION_RATE_REPAIR_PERCENT)
+        .contains(&rate)
+        .then_some(rate)
+}
+
+fn semantic_bookmarks_are_complete(
+    events: &[TimingEvent],
+    expected: &[(String, u32, i64)],
+) -> bool {
+    expected.iter().all(|(name, _, _)| {
+        events
+            .iter()
+            .filter(|event| {
+                event.kind == TimingEventKind::Bookmark && event.mark.as_deref() == Some(name)
+            })
+            .count()
+            == 1
+    })
+}
+
+/// Return one bounded delay per early semantic anchor.  The first TTS pass supplies the only
+/// provider measurement; Rust converts that measurement into deterministic SSML for the single
+/// allowed repair.  Keep the total small so an anchor cannot turn a natural pause into a second
+/// narration track.
+fn semantic_anchor_delay_repairs(
+    events: &[TimingEvent],
+    expected: &[(String, u32, i64)],
+    render_start_ms: u32,
+    tempo: f64,
+) -> Vec<(String, u16)> {
+    let mut candidates = expected
+        .iter()
+        .filter_map(|(name, source_ms, tolerance)| {
+            let event = events.iter().find(|event| {
+                event.kind == TimingEventKind::Bookmark && event.mark.as_deref() == Some(name)
+            })?;
+            let rendered = u32::try_from(
+                u64::from(render_start_ms)
+                    .saturating_add((event.offset_ms as f64 / tempo.max(1.0)).round() as u64),
+            )
+            .unwrap_or(u32::MAX);
+            let drift = i64::from(rendered) - i64::from(*source_ms);
+            if drift >= -*tolerance {
+                return None;
+            }
+            let delay = u16::try_from((-drift).clamp(120, 700)).unwrap_or(700);
+            Some((name.clone(), delay, drift.abs()))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+    let mut remaining = 800_u16;
+    let mut repairs = Vec::new();
+    for (name, delay, _) in candidates {
+        if remaining == 0 {
+            break;
+        }
+        let delay = delay.min(remaining);
+        repairs.push((name, delay));
+        remaining = remaining.saturating_sub(delay);
+    }
+    repairs
+}
+
+#[cfg(test)]
 fn duration_target(
     segments: &[SrtSegment],
     position: usize,
@@ -861,12 +2134,14 @@ async fn generate_segment(
     let text = prepare_tts_text(&segment.text);
     let cache_key = tts_cache_key("azure", &config.voice, &config.style, &text);
     if is_fresh_audio_file(ffmpeg, &output, &cache_key) {
+        record_azure_cache_hit();
         return Ok(SegmentResult {
             index: segment.index,
             fallback: false,
             attempt_errors: Vec::new(),
         });
     }
+    record_azure_logical_generation();
 
     let tmp = temporary_path(&output);
     let mut attempt_errors = Vec::new();
@@ -944,12 +2219,14 @@ async fn generate_plan_segment_to_path(
     let ssml = render_speech_plan_ssml_with_rate(voice, &plan, rate_percent)?;
     let cache_key = speech_plan_cache_key_with_rate(voice, &plan, rate_percent)?;
     if is_fresh_audio_file(ffmpeg, &output, &cache_key) {
+        record_azure_cache_hit();
         return Ok(SegmentResult {
             index: plan.index,
             fallback: false,
             attempt_errors: Vec::new(),
         });
     }
+    record_azure_logical_generation();
 
     let tmp = temporary_path(&output);
     let mut attempt_errors = Vec::new();
@@ -1018,7 +2295,7 @@ async fn select_revision_candidate(
 
     for (position, candidate) in candidates.into_iter().enumerate() {
         let candidate_output = revision_candidate_path(output, position);
-        remove_audio_with_cache_key(&candidate_output);
+        remove_audio_artifacts(&candidate_output);
         let result = generate_plan_segment_to_path(
             client,
             config,
@@ -1030,20 +2307,20 @@ async fn select_revision_candidate(
         )
         .await?;
         if result.fallback {
-            remove_audio_with_cache_key(&candidate_output);
+            remove_audio_artifacts(&candidate_output);
             continue;
         }
 
         let duration_ms = duration_ms(ffmpeg, &candidate_output)?;
         if duration_ms >= current_duration_ms {
-            remove_audio_with_cache_key(&candidate_output);
+            remove_audio_artifacts(&candidate_output);
             continue;
         }
         if !matches!(
             solve_duration(target, duration_ms, true)?,
             DurationDecision::Reject { .. }
         ) {
-            promote_revision_candidate(&candidate_output, output, &candidate, voice)?;
+            promote_audio_candidate(&candidate_output, output)?;
             return Ok((candidate, duration_ms));
         }
         if best
@@ -1051,16 +2328,16 @@ async fn select_revision_candidate(
             .is_none_or(|(_, _, best_duration_ms)| duration_ms < *best_duration_ms)
         {
             if let Some((_, previous, _)) = best.take() {
-                remove_audio_with_cache_key(&previous);
+                remove_audio_artifacts(&previous);
             }
             best = Some((candidate, candidate_output, duration_ms));
         } else {
-            remove_audio_with_cache_key(&candidate_output);
+            remove_audio_artifacts(&candidate_output);
         }
     }
 
     if let Some((candidate, candidate_output, duration_ms)) = best {
-        promote_revision_candidate(&candidate_output, output, &candidate, voice)?;
+        promote_audio_candidate(&candidate_output, output)?;
         return Ok((candidate, duration_ms));
     }
     Ok((current_plan.clone(), current_duration_ms))
@@ -1082,24 +2359,87 @@ fn cache_key_path(output: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn remove_audio_with_cache_key(output: &Path) {
+fn remove_audio_artifacts(output: &Path) {
     let _ = fs::remove_file(output);
     let _ = fs::remove_file(cache_key_path(output));
+    let _ = fs::remove_file(timing_sidecar_path(output));
 }
 
-fn promote_revision_candidate(
-    candidate_output: &Path,
-    output: &Path,
-    plan: &SpeechPlan,
-    voice: &AzureVoice,
-) -> Result<()> {
-    remove_audio_with_cache_key(output);
-    fs::rename(candidate_output, output)
-        .with_context(|| format!("Failed to promote {}", candidate_output.display()))?;
-    let prepared = prepared_speech_plan(plan);
-    let cache_key = speech_plan_cache_key_with_rate(voice, &prepared, 0)?;
-    write_tts_cache_key(output, &cache_key)?;
-    let _ = fs::remove_file(cache_key_path(candidate_output));
+fn promote_audio_candidate(candidate_output: &Path, output: &Path) -> Result<()> {
+    let candidate_cache = cache_key_path(candidate_output);
+    if !candidate_output.is_file() || !candidate_cache.is_file() {
+        bail!(
+            "Incomplete audio candidate cannot replace {}",
+            output.display()
+        );
+    }
+    let backup = output.with_file_name(format!(
+        "{}.previous",
+        output
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("audio")
+    ));
+    remove_audio_artifacts(&backup);
+    let output_cache = cache_key_path(output);
+    let output_timing = timing_sidecar_path(output);
+    if output.is_file() != output_cache.is_file() {
+        bail!(
+            "Existing audio/cache pair is incomplete: {}",
+            output.display()
+        );
+    }
+    let backup_result = (|| -> Result<()> {
+        if output.is_file() {
+            fs::rename(output, &backup)?;
+            fs::rename(&output_cache, cache_key_path(&backup))?;
+        }
+        if output_timing.is_file() {
+            fs::rename(&output_timing, timing_sidecar_path(&backup))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = backup_result {
+        if backup.is_file() {
+            let _ = fs::rename(&backup, output);
+        }
+        if cache_key_path(&backup).is_file() {
+            let _ = fs::rename(cache_key_path(&backup), &output_cache);
+        }
+        if timing_sidecar_path(&backup).is_file() {
+            let _ = fs::rename(timing_sidecar_path(&backup), &output_timing);
+        }
+        return Err(error);
+    }
+
+    let candidate_timing = timing_sidecar_path(candidate_output);
+    let promoted = (|| -> Result<()> {
+        fs::rename(candidate_output, output)
+            .with_context(|| format!("Failed to promote {}", candidate_output.display()))?;
+        fs::rename(candidate_cache, &output_cache).with_context(|| {
+            format!("Failed to promote cache identity for {}", output.display())
+        })?;
+        if candidate_timing.is_file() {
+            fs::rename(&candidate_timing, &output_timing).with_context(|| {
+                format!("Failed to promote timing metadata for {}", output.display())
+            })?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = promoted {
+        remove_audio_artifacts(output);
+        if backup.is_file() {
+            let _ = fs::rename(&backup, output);
+        }
+        if cache_key_path(&backup).is_file() {
+            let _ = fs::rename(cache_key_path(&backup), &output_cache);
+        }
+        if timing_sidecar_path(&backup).is_file() {
+            let _ = fs::rename(timing_sidecar_path(&backup), &output_timing);
+        }
+        return Err(error);
+    }
+    remove_audio_artifacts(&backup);
     Ok(())
 }
 
@@ -1112,6 +2452,9 @@ fn prepared_speech_plan(plan: &SpeechPlan) -> SpeechPlan {
     }
     for pause in &mut prepared.pauses {
         pause.after = prepare_tts_text(&pause.after);
+    }
+    for anchor in &mut prepared.semantic_anchors {
+        anchor.spoken_phrase = prepare_tts_text(&anchor.spoken_phrase);
     }
     prepared
 }
@@ -1138,6 +2481,34 @@ async fn synthesize_ssml_once(
     output: &Path,
     cache_key: &str,
 ) -> std::result::Result<(), SynthesisError> {
+    crate::metrics::record_azure_request(ssml.chars().count());
+    #[cfg(test)]
+    if let Some(responder) = TEST_REST_RESPONDER
+        .get()
+        .and_then(|responder| responder.lock().ok())
+        .and_then(|responder| responder.as_ref().map(|responder| responder(ssml)))
+    {
+        let bytes = responder.map_err(SynthesisError::fatal)?;
+        fs::write(tmp, bytes)
+            .with_context(|| format!("Failed to write {}", tmp.display()))
+            .map_err(SynthesisError::fatal)?;
+        if !ffmpeg.is_valid_audio(tmp) {
+            return Err(SynthesisError {
+                error: anyhow::anyhow!("Test Azure REST responder returned invalid audio"),
+                fallback_allowed: true,
+            });
+        }
+        if output.exists() {
+            fs::remove_file(output)
+                .with_context(|| format!("Failed to replace {}", output.display()))
+                .map_err(SynthesisError::fatal)?;
+        }
+        fs::rename(tmp, output)
+            .with_context(|| format!("Failed to replace {}", output.display()))
+            .map_err(SynthesisError::fatal)?;
+        write_tts_cache_key(output, cache_key).map_err(SynthesisError::fatal)?;
+        return Ok(());
+    }
     let url = format!(
         "https://{}.tts.speech.microsoft.com/cognitiveservices/v1",
         config.region
@@ -1352,6 +2723,34 @@ pub fn render_utterance_ssml(
     bookmarks: &[String],
     rate_percent: i8,
 ) -> Result<String> {
+    render_utterance_ssml_with_semantic_anchors(voice, plans, bookmarks, &[], rate_percent)
+}
+
+pub fn render_utterance_ssml_with_semantic_anchors(
+    voice: &AzureVoice,
+    plans: &[SpeechPlan],
+    bookmarks: &[String],
+    semantic_bookmarks: &[(usize, String, String)],
+    rate_percent: i8,
+) -> Result<String> {
+    render_utterance_ssml_with_semantic_anchors_and_delays(
+        voice,
+        plans,
+        bookmarks,
+        semantic_bookmarks,
+        &[],
+        rate_percent,
+    )
+}
+
+pub fn render_utterance_ssml_with_semantic_anchors_and_delays(
+    voice: &AzureVoice,
+    plans: &[SpeechPlan],
+    bookmarks: &[String],
+    semantic_bookmarks: &[(usize, String, String)],
+    semantic_delays: &[(String, u16)],
+    rate_percent: i8,
+) -> Result<String> {
     if plans.is_empty() || plans.len() != bookmarks.len() {
         bail!("Utterance plans and timing bookmarks must have the same non-zero length");
     }
@@ -1367,7 +2766,23 @@ pub fn render_utterance_ssml(
         if position > 0 {
             body.push(' ');
         }
-        body.push_str(&render_speech_plan_body(voice, plan, rate_percent)?);
+        let anchors = semantic_bookmarks
+            .iter()
+            .filter(|(index, _, _)| *index == plan.index)
+            .map(|(_, phrase, mark)| {
+                let delay = semantic_delays
+                    .iter()
+                    .find(|(candidate, _)| candidate == mark)
+                    .map_or(0, |(_, delay)| *delay);
+                (phrase.clone(), mark.clone(), delay)
+            })
+            .collect::<Vec<_>>();
+        body.push_str(&render_speech_plan_body_with_semantic_bookmarks_and_delays(
+            voice,
+            plan,
+            &anchors,
+            rate_percent,
+        )?);
         body.push_str(&format!("<bookmark mark=\"{}\"/>", escape_xml(bookmark)));
     }
     Ok(wrap_voice_ssml(voice, &body))
@@ -1376,6 +2791,33 @@ pub fn render_utterance_ssml(
 fn render_speech_plan_body(
     voice: &AzureVoice,
     plan: &SpeechPlan,
+    rate_percent: i8,
+) -> Result<String> {
+    render_speech_plan_body_with_semantic_bookmarks(voice, plan, &[], rate_percent)
+}
+
+fn render_speech_plan_body_with_semantic_bookmarks(
+    voice: &AzureVoice,
+    plan: &SpeechPlan,
+    semantic_bookmarks: &[(String, String)],
+    rate_percent: i8,
+) -> Result<String> {
+    let semantic_bookmarks = semantic_bookmarks
+        .iter()
+        .map(|(phrase, mark)| (phrase.clone(), mark.clone(), 0))
+        .collect::<Vec<_>>();
+    render_speech_plan_body_with_semantic_bookmarks_and_delays(
+        voice,
+        plan,
+        &semantic_bookmarks,
+        rate_percent,
+    )
+}
+
+fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
+    voice: &AzureVoice,
+    plan: &SpeechPlan,
+    semantic_bookmarks: &[(String, String, u16)],
     rate_percent: i8,
 ) -> Result<String> {
     plan.validate(&voice.styles)?;
@@ -1398,6 +2840,7 @@ fn render_speech_plan_body(
     let mut boundaries = vec![0, plan.spoken_text.len()];
     let mut emphasis = Vec::new();
     let mut pauses = Vec::new();
+    let mut semantic_marks = Vec::new();
 
     if supports_emphasis {
         for item in &plan.emphasis {
@@ -1412,6 +2855,21 @@ fn render_speech_plan_body(
             boundaries.push(end);
             pauses.push((end, pause.duration_ms));
         }
+    }
+    for (phrase, mark, delay) in semantic_bookmarks {
+        if mark.is_empty()
+            || !mark
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            bail!("Semantic bookmark names must contain only letters, digits, and hyphens");
+        }
+        let (start, end) = phrase_span(&plan.spoken_text, phrase)?;
+        boundaries.extend([start, end]);
+        // The source anchor represents the onset of the action phrase, so bookmark its first
+        // spoken character rather than its end. This keeps "click Run" aligned to the click
+        // explanation, not to the sentence tail that follows it.
+        semantic_marks.push((start, mark, *delay));
     }
     boundaries.sort_unstable();
     boundaries.dedup();
@@ -1428,6 +2886,12 @@ fn render_speech_plan_body(
         }
         for (_, duration_ms) in pauses.iter().filter(|(end, _)| *end == boundary) {
             body.push_str(&format!("<break time=\"{duration_ms}ms\"/>"));
+        }
+        for (_, mark, delay) in semantic_marks.iter().filter(|(end, _, _)| *end == boundary) {
+            if *delay > 0 && supports_break {
+                body.push_str(&format!("<break time=\"{}ms\"/>", delay));
+            }
+            body.push_str(&format!("<bookmark mark=\"{}\"/>", escape_xml(mark)));
         }
         for (_, _, level) in emphasis.iter().filter(|(start, _, _)| *start == boundary) {
             if *level == EmphasisLevel::Strong && supports_prosody {
@@ -1476,14 +2940,10 @@ fn speech_plan_cache_key_with_rate(
 }
 
 fn phrase_span(text: &str, phrase: &str) -> Result<(usize, usize)> {
-    let mut matches = text.match_indices(phrase);
-    let (start, matched) = matches
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Speech plan phrase is absent from spoken text"))?;
-    if matches.next().is_some() {
-        bail!("Speech plan phrase occurs more than once in spoken text");
-    }
-    Ok((start, start + matched.len()))
+    let start = unique_phrase_position(text, phrase).ok_or_else(|| {
+        anyhow::anyhow!("Speech plan phrase is absent or not unique in spoken text")
+    })?;
+    Ok((start, start + phrase.len()))
 }
 
 fn emphasis_level(level: EmphasisLevel) -> &'static str {
@@ -1497,7 +2957,7 @@ fn emphasis_level(level: EmphasisLevel) -> &'static str {
 mod tests {
     use super::*;
     use crate::azure_voices::{VoiceCapabilities, VoiceModelFamily};
-    use crate::speech_plan::{Delivery, Emphasis, Pause, PauseReason};
+    use crate::speech_plan::{Delivery, Emphasis, Pause, PauseReason, SemanticAnchor};
 
     fn voice(capabilities: VoiceCapabilities) -> AzureVoice {
         AzureVoice {
@@ -1547,6 +3007,8 @@ mod tests {
                 reason: PauseReason::Transition,
             }],
             style: Some("serious".to_owned()),
+            semantic_anchors: Vec::new(),
+            semantic_anchor_invalid: false,
         }
     }
 
@@ -1587,6 +3049,70 @@ mod tests {
         assert_eq!(ssml.matches("<bookmark mark=").count(), 2);
         assert!(ssml.contains("<bookmark mark=\"dubora-u1-s1-end\"/>"));
         assert!(ssml.contains("<bookmark mark=\"dubora-u1-s2-end\"/>"));
+    }
+
+    #[test]
+    fn renders_semantic_bookmark_inside_the_exact_target_phrase() {
+        let mut first = plan();
+        first.semantic_anchors = vec![SemanticAnchor {
+            anchor_id: "p-1-action-1".to_owned(),
+            spoken_phrase: "Spring Boot".to_owned(),
+        }];
+        let ssml = render_utterance_ssml_with_semantic_anchors(
+            &voice(standard_capabilities()),
+            &[first],
+            &["dubora-u1-s1-end".to_owned()],
+            &[(
+                1,
+                "Spring Boot".to_owned(),
+                "dubora-u1-ap-1-action-1".to_owned(),
+            )],
+            0,
+        )
+        .unwrap();
+        let phrase = ssml.find("Spring Boot").unwrap();
+        let bookmark = ssml
+            .find("bookmark mark=\"dubora-u1-ap-1-action-1\"")
+            .unwrap();
+        assert!(bookmark < phrase);
+    }
+
+    #[test]
+    fn renders_one_bounded_delay_before_an_early_semantic_anchor() {
+        let mut first = plan();
+        first.semantic_anchors = vec![SemanticAnchor {
+            anchor_id: "p-1-action-1".to_owned(),
+            spoken_phrase: "Spring Boot".to_owned(),
+        }];
+        let ssml = render_utterance_ssml_with_semantic_anchors_and_delays(
+            &voice(standard_capabilities()),
+            &[first],
+            &["dubora-u1-s1-end".to_owned()],
+            &[(
+                1,
+                "Spring Boot".to_owned(),
+                "dubora-u1-ap-1-action-1".to_owned(),
+            )],
+            &[("dubora-u1-ap-1-action-1".to_owned(), 240)],
+            0,
+        )
+        .unwrap();
+        let delay = ssml.find("<break time=\"240ms\"/>").unwrap();
+        let bookmark = ssml
+            .find("bookmark mark=\"dubora-u1-ap-1-action-1\"")
+            .unwrap();
+        let phrase = ssml.find("Spring Boot").unwrap();
+        assert!(delay < bookmark && bookmark < phrase);
+    }
+
+    #[test]
+    fn phrase_span_does_not_confuse_a_short_phrase_with_a_word_prefix() {
+        let (start, end) =
+            phrase_span("có kiểu t, nhưng kiểu trả về vẫn giữ nguyên", "kiểu t").unwrap();
+        assert_eq!(
+            &"có kiểu t, nhưng kiểu trả về vẫn giữ nguyên"[start..end],
+            "kiểu t"
+        );
     }
 
     #[test]
@@ -1722,10 +3248,454 @@ mod tests {
     }
 
     #[test]
+    fn duration_prediction_uses_spoken_words_and_voice_rate_not_the_srt_slot() {
+        let voice = voice(standard_capabilities());
+        let mut short = SpeechPlan::plain(1, "một hai", 500);
+        let mut same_words_different_slot = short.clone();
+        same_words_different_slot.target_duration_ms = 20_000;
+        let long = SpeechPlan::plain(2, "một hai ba bốn năm sáu", 500);
+
+        assert_eq!(
+            predict_plan_audio_ms(&short, &voice),
+            predict_plan_audio_ms(&same_words_different_slot, &voice)
+        );
+        assert!(predict_plan_audio_ms(&long, &voice) > predict_plan_audio_ms(&short, &voice));
+
+        short.pauses.push(Pause {
+            after: "một".to_owned(),
+            duration_ms: 300,
+            reason: PauseReason::Transition,
+        });
+        assert!(predict_plan_audio_ms(&short, &voice) > 1_000);
+    }
+
+    #[test]
+    fn duration_prediction_uses_a_robust_voice_calibration_after_enough_samples() {
+        let voice = voice(standard_capabilities());
+        let plan = SpeechPlan::plain(1, "một hai ba bốn", 500);
+        let calibration = DurationCalibration {
+            version: DURATION_CALIBRATION_VERSION,
+            voice: voice.short_name.clone(),
+            style: voice.styles.join("|"),
+            renderer: UTTERANCE_CACHE_PROVIDER.to_owned(),
+            chars_per_second: vec![10.0, 11.0, 12.0, 13.0, 90.0],
+        };
+        assert_eq!(calibration.median_chars_per_second(), Some(12.0));
+        assert!(
+            predict_plan_audio_ms_with_calibration(
+                &plan,
+                &voice,
+                calibration.median_chars_per_second()
+            ) < predict_plan_audio_ms(&plan, &voice)
+        );
+    }
+
+    #[test]
     fn only_segment_specific_bad_requests_allow_silence() {
         assert!(status_allows_fallback(StatusCode::BAD_REQUEST));
         assert!(!status_allows_fallback(StatusCode::UNAUTHORIZED));
         assert!(!status_allows_fallback(StatusCode::TOO_MANY_REQUESTS));
         assert!(!status_allows_fallback(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
+    fn final_schedule_keeps_the_bookmark_derived_anchor_start() {
+        let block_id = "block-1-1".to_owned();
+        let layout = crate::sync_timeline::SyncLayout {
+            blocks: vec![crate::sync_timeline::NarrationBlock {
+                id: block_id.clone(),
+                start_ms: 0,
+                end_ms: 5_000,
+                preferred_start_ms: 2_000,
+                source_segments: vec![1],
+                anchor_ids: vec!["p-1-action-1".to_owned()],
+                island_id: "island-1".to_owned(),
+            }],
+            islands: vec![crate::sync_timeline::SyncIsland {
+                id: "island-1".to_owned(),
+                start_ms: 0,
+                end_ms: 5_000,
+                block_ids: vec![block_id.clone()],
+                hard_boundary_before: false,
+            }],
+        };
+        let mut entries = vec![ScheduledAudio {
+            id: "utterance-1".to_owned(),
+            path: PathBuf::from("utterance-1.mp3"),
+            start_ms: 2_000,
+            end_ms: 3_000,
+            source_segments: vec![1],
+            measured_audio_ms: 1_000,
+            rendered_audio_ms: 1_000,
+            tempo: 1.0,
+            island_id: Some("island-1".to_owned()),
+            cache_identity: "cache".to_owned(),
+            alignment: EntryAlignment::default(),
+        }];
+        let mut allocations = HashMap::from([(
+            block_id.clone(),
+            AllocatedBlock {
+                block_id: block_id.clone(),
+                island_id: "island-1".to_owned(),
+                render_start_ms: 2_000,
+                slot_end_ms: 3_000,
+                predicted_audio_ms: 1_000,
+                rendered_audio_ms: 1_000,
+                tempo: 1.0,
+            },
+        )]);
+        let anchors = HashMap::from([(
+            block_id,
+            vec![MeasuredAnchor {
+                source_ms: 1_500,
+                raw_offset_ms: 1_000,
+                tolerance_ms: MAX_ANCHOR_DRIFT_MS as u32,
+                confidence: crate::sync_timeline::TimingConfidence::Granular,
+                coupling: Coupling::Anchored,
+            }],
+        )]);
+
+        let failed = finalize_measured_schedule(
+            &layout,
+            &mut entries,
+            &mut allocations,
+            &anchors,
+            NaturalMode::Natural,
+        );
+
+        assert!(failed.is_empty());
+        assert!(entries[0].start_ms.abs_diff(500) <= MAX_ANCHOR_DRIFT_MS as u32);
+    }
+
+    #[test]
+    fn final_anchor_gate_uses_the_final_start_and_tempo() {
+        let bookmark = "dubora-u1-ap-1-action-1".to_owned();
+        let evidence = HashMap::from([(
+            "utterance-1".to_owned(),
+            SemanticEvidence {
+                events: vec![TimingEvent {
+                    kind: TimingEventKind::Bookmark,
+                    offset_ms: 1_000,
+                    duration_ms: 0,
+                    mark: Some(bookmark.clone()),
+                    text: None,
+                }],
+                expected: vec![(bookmark, 1_000, MAX_ANCHOR_DRIFT_MS)],
+            },
+        )]);
+        let mut entries = vec![ScheduledAudio {
+            id: "utterance-1".to_owned(),
+            path: PathBuf::from("utterance-1.mp3"),
+            start_ms: 0,
+            end_ms: 1_000,
+            source_segments: vec![1],
+            measured_audio_ms: 1_000,
+            rendered_audio_ms: 1_000,
+            tempo: 1.0,
+            island_id: Some("island-1".to_owned()),
+            cache_identity: "cache".to_owned(),
+            alignment: EntryAlignment::default(),
+        }];
+        let mut diagnostics = ManifestDiagnostics::default();
+
+        assert!(!apply_final_semantic_evidence(
+            &mut entries,
+            &evidence,
+            &mut diagnostics
+        ));
+        assert_eq!(entries[0].alignment.status, EntryAlignmentStatus::Aligned);
+        assert_eq!(entries[0].alignment.anchors[0].rendered_ms, 1_000);
+
+        entries[0].start_ms = 400;
+        entries[0].tempo = 1.0;
+        assert!(apply_final_semantic_evidence(
+            &mut entries,
+            &evidence,
+            &mut diagnostics
+        ));
+        assert_eq!(
+            entries[0].alignment.status,
+            EntryAlignmentStatus::ReviewRequired
+        );
+        assert_eq!(entries[0].alignment.anchors[0].drift_ms, 400);
+    }
+
+    #[test]
+    fn final_anchor_gate_leaves_unanchored_entries_not_applicable() {
+        let mut entries = vec![ScheduledAudio {
+            id: "utterance-1".to_owned(),
+            path: PathBuf::from("utterance-1.mp3"),
+            start_ms: 0,
+            end_ms: 1_000,
+            source_segments: vec![1],
+            measured_audio_ms: 1_000,
+            rendered_audio_ms: 1_000,
+            tempo: 1.0,
+            island_id: Some("island-1".to_owned()),
+            cache_identity: "cache".to_owned(),
+            alignment: EntryAlignment::default(),
+        }];
+        let mut diagnostics = ManifestDiagnostics::default();
+
+        assert!(!apply_final_semantic_evidence(
+            &mut entries,
+            &HashMap::new(),
+            &mut diagnostics
+        ));
+        assert_eq!(
+            entries[0].alignment.status,
+            EntryAlignmentStatus::NotApplicable
+        );
+        assert!(entries[0].alignment.anchors.is_empty());
+    }
+
+    #[test]
+    fn measured_outcome_selects_one_follow_up_branch() {
+        let cases = [
+            (
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                AlignedFollowUp::Review,
+            ),
+            (
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                AlignedFollowUp::Concise,
+            ),
+            (
+                false,
+                true,
+                true,
+                true,
+                false,
+                false,
+                AlignedFollowUp::Repair,
+            ),
+            (
+                false,
+                true,
+                true,
+                true,
+                true,
+                false,
+                AlignedFollowUp::Accept,
+            ),
+            (
+                false,
+                false,
+                false,
+                true,
+                true,
+                true,
+                AlignedFollowUp::DurationRepair,
+            ),
+        ];
+        for (
+            structural,
+            duration_feasible,
+            technically_fit,
+            semantic_repair_feasible,
+            semantic_aligned,
+            duration_rate_repair,
+            expected,
+        ) in cases
+        {
+            let decision = aligned_follow_up(
+                structural,
+                duration_feasible,
+                technically_fit,
+                semantic_repair_feasible,
+                semantic_aligned,
+                duration_rate_repair,
+            );
+            assert_eq!(decision, expected);
+            let logical_generations = 1 + usize::from(matches!(
+                decision,
+                AlignedFollowUp::Concise
+                    | AlignedFollowUp::DurationRepair
+                    | AlignedFollowUp::Repair
+            ));
+            assert!(logical_generations <= 2);
+        }
+        assert_eq!(
+            aligned_follow_up(false, false, true, false, false, false),
+            AlignedFollowUp::Concise
+        );
+        assert_eq!(
+            aligned_follow_up(false, false, true, true, false, false),
+            AlignedFollowUp::Repair
+        );
+        assert_eq!(
+            aligned_follow_up(false, false, false, true, true, true),
+            AlignedFollowUp::DurationRepair
+        );
+        assert_eq!(duration_repair_rate(1_242, 1_000), Some(10));
+        assert!(duration_repair_rate(1_400, 1_000).is_none());
+    }
+
+    #[test]
+    fn measured_part_durations_assigns_trailing_audio_to_the_last_part() {
+        let candidate = PendingUtterance {
+            utterance: Utterance {
+                id: 1,
+                start_ms: 0,
+                end_ms: 4_000,
+                parts: vec![
+                    crate::utterance::UtterancePart {
+                        index: 1,
+                        start_ms: 0,
+                        end_ms: 2_000,
+                        plan: SpeechPlan::plain(1, "Phần một.", 2_000),
+                    },
+                    crate::utterance::UtterancePart {
+                        index: 2,
+                        start_ms: 2_000,
+                        end_ms: 4_000,
+                        plan: SpeechPlan::plain(2, "Phần hai.", 2_000),
+                    },
+                ],
+                block_id: "block-1".to_owned(),
+                island_id: "island-1".to_owned(),
+                anchor_ids: Vec::new(),
+            },
+            path: PathBuf::from("utterance-1.mp3"),
+            measured_audio_ms: 4_000,
+            events: vec![
+                TimingEvent {
+                    kind: TimingEventKind::Bookmark,
+                    offset_ms: 1_000,
+                    duration_ms: 0,
+                    mark: Some("dubora-u1-s1-end".to_owned()),
+                    text: None,
+                },
+                TimingEvent {
+                    kind: TimingEventKind::Bookmark,
+                    offset_ms: 3_000,
+                    duration_ms: 0,
+                    mark: Some("dubora-u1-s2-end".to_owned()),
+                    text: None,
+                },
+            ],
+            semantic_expected: Vec::new(),
+            structural_issue: None,
+        };
+
+        let durations = measured_part_durations(&candidate);
+        assert_eq!(durations.get(&1), Some(&1_000));
+        assert_eq!(durations.get(&2), Some(&3_000));
+        assert_eq!(durations.values().sum::<u32>(), candidate.measured_audio_ms);
+    }
+
+    #[test]
+    fn provisional_failures_do_not_survive_the_final_gate() {
+        for reason in [
+            "island-1:measured_allocation_infeasible:base",
+            "island-1:measured_anchor_allocation_infeasible:anchor",
+            "utterance-1:concise_revision_unresolved",
+            "utterance-1:semantic_repair_unavailable",
+            "utterance-1:semantic_repair_unresolved",
+        ] {
+            assert!(is_provisional_review_reason(reason));
+        }
+        assert!(!is_provisional_review_reason(
+            "utterance-1:timing_structure:bookmark_missing"
+        ));
+        assert!(!is_provisional_review_reason(
+            "island-1:measured_allocation_infeasible_after_revision"
+        ));
+    }
+
+    #[test]
+    fn duration_fit_with_incompatible_anchors_selects_repair() {
+        let block_id = "block-1-1".to_owned();
+        let layout = SyncLayout {
+            blocks: vec![crate::sync_timeline::NarrationBlock {
+                id: block_id.clone(),
+                start_ms: 0,
+                end_ms: 5_000,
+                preferred_start_ms: 1_000,
+                source_segments: vec![1],
+                anchor_ids: vec!["first".to_owned(), "second".to_owned()],
+                island_id: "island-1".to_owned(),
+            }],
+            islands: vec![crate::sync_timeline::SyncIsland {
+                id: "island-1".to_owned(),
+                start_ms: 0,
+                end_ms: 5_000,
+                block_ids: vec![block_id.clone()],
+                hard_boundary_before: false,
+            }],
+        };
+        let measured = HashMap::from([(block_id.clone(), 1_000)]);
+        let anchors = HashMap::from([(
+            block_id,
+            vec![
+                MeasuredAnchor {
+                    source_ms: 1_000,
+                    raw_offset_ms: 0,
+                    tolerance_ms: 250,
+                    confidence: crate::sync_timeline::TimingConfidence::Granular,
+                    coupling: Coupling::Anchored,
+                },
+                MeasuredAnchor {
+                    source_ms: 4_000,
+                    raw_offset_ms: 0,
+                    tolerance_ms: 250,
+                    confidence: crate::sync_timeline::TimingConfidence::Granular,
+                    coupling: Coupling::Anchored,
+                },
+            ],
+        )]);
+
+        assert!(
+            allocate_measured_group(&layout, "island-1", &measured, NaturalMode::Natural).is_ok()
+        );
+        assert!(
+            allocate_measured_group_with_anchors(
+                &layout,
+                "island-1",
+                &measured,
+                &anchors,
+                NaturalMode::Natural,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            aligned_follow_up(false, true, true, true, false, false),
+            AlignedFollowUp::Repair
+        );
+    }
+
+    #[test]
+    fn promotes_audio_cache_and_timing_metadata_together() {
+        let directory =
+            std::env::temp_dir().join(format!("dubora-fallback-candidate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("segment.mp3");
+        let candidate_path = directory.join("segment.revision.mp3");
+        fs::write(&output, b"old-audio").unwrap();
+        fs::write(cache_key_path(&output), b"old-cache").unwrap();
+        fs::write(timing_sidecar_path(&output), b"old-timing").unwrap();
+        fs::write(&candidate_path, b"new-audio").unwrap();
+        fs::write(cache_key_path(&candidate_path), b"new-cache").unwrap();
+        fs::write(timing_sidecar_path(&candidate_path), b"new-timing").unwrap();
+        promote_audio_candidate(&candidate_path, &output).unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), b"new-audio");
+        assert_eq!(fs::read(cache_key_path(&output)).unwrap(), b"new-cache");
+        assert_eq!(
+            fs::read(timing_sidecar_path(&output)).unwrap(),
+            b"new-timing"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 }

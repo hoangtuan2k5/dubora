@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub const SPEECH_PLAN_VERSION: u8 = 1;
+pub const SPEECH_PLAN_VERSION: u8 = 2;
 const MAX_EMPHASES: usize = 2;
 const MAX_PAUSES: usize = 2;
 const MIN_PAUSE_MS: u16 = 120;
@@ -62,6 +62,14 @@ pub struct Pause {
     pub reason: PauseReason,
 }
 
+/// A source phrase mapped to one exact phrase in the Vietnamese performance text.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticAnchor {
+    pub anchor_id: String,
+    pub spoken_phrase: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeechPlan {
@@ -77,6 +85,14 @@ pub struct SpeechPlan {
     pub pauses: Vec<Pause>,
     #[serde(default)]
     pub style: Option<String>,
+    #[serde(default)]
+    pub semantic_anchors: Vec<SemanticAnchor>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub semantic_anchor_invalid: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -84,6 +100,8 @@ pub struct SpeechPlan {
 pub struct SpeechPlanDocument {
     pub version: u8,
     pub plans: Vec<SpeechPlan>,
+    #[serde(default)]
+    pub review_required: bool,
 }
 
 impl SpeechPlanDocument {
@@ -91,6 +109,7 @@ impl SpeechPlanDocument {
         Self {
             version: SPEECH_PLAN_VERSION,
             plans,
+            review_required: false,
         }
     }
 }
@@ -107,6 +126,8 @@ impl SpeechPlan {
             emphasis: Vec::new(),
             pauses: Vec::new(),
             style: None,
+            semantic_anchors: Vec::new(),
+            semantic_anchor_invalid: false,
         }
     }
 
@@ -253,8 +274,124 @@ impl SpeechPlan {
             self.spoken_text = self.display_text.clone();
             self.emphasis.clear();
             self.pauses.clear();
+            self.semantic_anchors.clear();
         }
     }
+
+    /// Remove only optional conversational framing that delays a required visual action.  The
+    /// displayed subtitle remains untouched; this keeps phrases such as "nhấn Finish" close to
+    /// the source action without asking Gemini for another paid revision.
+    pub(crate) fn compact_anchor_leads(&mut self) {
+        if self.semantic_anchors.is_empty() {
+            return;
+        }
+        for prefix in [
+            "Sau đó, bạn có thể ",
+            "sau đó, bạn có thể ",
+            "Bạn có thể ",
+            "bạn có thể ",
+            "Bạn hãy ",
+            "bạn hãy ",
+            "Giờ bạn có thể ",
+            "giờ bạn có thể ",
+        ] {
+            if self.spoken_text.starts_with(prefix) {
+                let candidate = self.spoken_text[prefix.len()..].trim_start().to_owned();
+                if self.semantic_anchors.iter().all(|anchor| {
+                    unique_phrase_position(&candidate, &anchor.spoken_phrase).is_some()
+                }) {
+                    self.spoken_text = candidate;
+                    self.emphasis.clear();
+                    self.pauses.clear();
+                }
+                break;
+            }
+        }
+    }
+
+    /// Validate the structured planner's source-anchor mappings after text normalization.
+    pub fn validate_semantic_anchors(
+        &self,
+        required: &[(String, String)],
+        normalized_spoken_text: &str,
+        normalize: impl Fn(&str) -> String,
+    ) -> Result<()> {
+        let mut previous_position = None;
+        let mut seen = HashSet::new();
+        for (anchor_id, source_phrase) in required {
+            let anchor = self
+                .semantic_anchors
+                .iter()
+                .find(|anchor| anchor.anchor_id == *anchor_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Speech plan {} is missing required semantic anchor {}",
+                        self.index,
+                        anchor_id
+                    )
+                })?;
+            if !seen.insert(anchor_id) {
+                bail!(
+                    "Speech plan {} contains duplicate semantic anchor {}",
+                    self.index,
+                    anchor_id
+                );
+            }
+            let normalized = normalize(&anchor.spoken_phrase);
+            let position =
+                unique_phrase_position(normalized_spoken_text, &normalized).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Speech plan {} semantic anchor {} is not an exact unique phrase",
+                        self.index,
+                        anchor_id
+                    )
+                })?;
+            if previous_position.is_some_and(|previous| position <= previous) {
+                bail!(
+                    "Speech plan {} semantic anchors are out of source order",
+                    self.index
+                );
+            }
+            let source_terms = technical_terms(source_phrase);
+            let target_terms = words(&anchor.spoken_phrase);
+            if source_terms
+                .iter()
+                .any(|term| term.len() > 2 && !target_terms.contains(term))
+            {
+                bail!(
+                    "Speech plan {} semantic anchor {} drops a source technical term",
+                    self.index,
+                    anchor_id
+                );
+            }
+            previous_position = Some(position);
+        }
+        if self
+            .semantic_anchors
+            .iter()
+            .any(|anchor| !required.iter().any(|(id, _)| id == &anchor.anchor_id))
+        {
+            bail!(
+                "Speech plan {} contains an unknown semantic anchor",
+                self.index
+            );
+        }
+        Ok(())
+    }
+}
+
+fn is_technical_term(term: &str) -> bool {
+    term.chars()
+        .any(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
+        || term.contains(['/', ':', '.', '_', '-'])
+}
+
+fn technical_terms(text: &str) -> HashSet<String> {
+    text.split_whitespace()
+        .map(|term| term.trim_matches(|character: char| !character.is_alphanumeric()))
+        .filter(|term| !term.is_empty() && is_technical_term(term))
+        .map(str::to_lowercase)
+        .collect()
 }
 
 fn can_add_emphasis(text: &str, existing: &[Emphasis], phrase: &str) -> bool {
@@ -347,7 +484,7 @@ fn words(text: &str) -> HashSet<String> {
         .collect()
 }
 
-fn unique_phrase_position(text: &str, phrase: &str) -> Option<usize> {
+pub(crate) fn unique_phrase_position(text: &str, phrase: &str) -> Option<usize> {
     let mut positions = text.match_indices(phrase).filter_map(|(position, _)| {
         let before = text[..position].chars().next_back();
         let after = text[position + phrase.len()..].chars().next();
@@ -379,6 +516,8 @@ mod tests {
                 reason: PauseReason::Transition,
             }],
             style: Some("serious".to_owned()),
+            semantic_anchors: Vec::new(),
+            semantic_anchor_invalid: false,
         }
     }
 
@@ -423,5 +562,43 @@ mod tests {
         assert_eq!(document.version, SPEECH_PLAN_VERSION);
         document.plans[0].validate(&[]).unwrap();
         assert_eq!(NaturalMode::default(), NaturalMode::Balanced);
+    }
+
+    #[test]
+    fn semantic_anchor_requires_one_exact_phrase_and_preserves_technical_terms() {
+        let mut plan = plan();
+        plan.semantic_anchors = vec![SemanticAnchor {
+            anchor_id: "p-4-action-1".to_owned(),
+            spoken_phrase: "Spring Boot".to_owned(),
+        }];
+        plan.validate_semantic_anchors(
+            &[("p-4-action-1".to_owned(), "open Spring Boot".to_owned())],
+            &plan.spoken_text,
+            str::to_owned,
+        )
+        .unwrap();
+
+        plan.semantic_anchors[0].spoken_phrase = "Spring".to_owned();
+        assert!(
+            plan.validate_semantic_anchors(
+                &[("p-4-action-1".to_owned(), "open Spring Boot".to_owned())],
+                &plan.spoken_text,
+                str::to_owned,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn compacts_optional_lead_before_visual_anchor() {
+        let mut plan = SpeechPlan::plain(10, "Bạn có thể nhấn Finish để tạo nó.", 4_000);
+        plan.semantic_anchors = vec![SemanticAnchor {
+            anchor_id: "p-10-action-1".to_owned(),
+            spoken_phrase: "nhấn Finish".to_owned(),
+        }];
+        plan.compact_anchor_leads();
+        assert_eq!(plan.spoken_text, "nhấn Finish để tạo nó.");
+        assert!(plan.emphasis.is_empty());
+        assert!(plan.pauses.is_empty());
     }
 }

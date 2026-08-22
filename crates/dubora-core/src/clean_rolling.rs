@@ -9,6 +9,7 @@ use crate::srt::time_to_seconds;
 
 #[derive(Clone, Debug, PartialEq)]
 struct RawSegment {
+    source_index: usize,
     start: String,
     end: String,
     text: String,
@@ -16,9 +17,29 @@ struct RawSegment {
 
 #[derive(Clone, Debug, PartialEq)]
 struct TimedText {
+    source_index: usize,
     start_sec: f64,
     end_sec: f64,
     text: String,
+}
+
+/// A linearized rolling-caption span retained for source-timing reconstruction.
+///
+/// The display SRT intentionally remains unchanged; this is diagnostic evidence for the
+/// source-aligned Natural Voice path only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RollingTimingSpan {
+    pub source_index: usize,
+    pub start_ms: u32,
+    pub end_ms: u32,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RollingTiming {
+    pub raw_count: usize,
+    pub overlap_count: usize,
+    pub spans: Vec<RollingTimingSpan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +69,34 @@ pub fn clean_youtube_rolling_subtitles(input: &Path, output: &Path) -> Result<Cl
     fs::write(output, format_srt(&final_segments))
         .with_context(|| format!("Failed to write SRT {}", output.display()))?;
     Ok(stats)
+}
+
+/// Inspect the same rolling-caption evidence used by the cleaner without changing its output.
+pub fn inspect_youtube_rolling_subtitles(input: &Path) -> Result<RollingTiming> {
+    let content = fs::read_to_string(input)
+        .with_context(|| format!("Failed to read SRT {}", input.display()))?;
+    let raw = parse_original_youtube_srt(&content)?;
+    let overlap_count = raw
+        .windows(2)
+        .filter(|pair| {
+            time_to_seconds(&pair[1].start).unwrap_or(0.0)
+                < time_to_seconds(&pair[0].end).unwrap_or(0.0)
+        })
+        .count();
+    let spans = linearize(&raw)?
+        .into_iter()
+        .map(|span| RollingTimingSpan {
+            source_index: span.source_index,
+            start_ms: (span.start_sec * 1_000.0).round() as u32,
+            end_ms: (span.end_sec * 1_000.0).round() as u32,
+            text: span.text,
+        })
+        .collect();
+    Ok(RollingTiming {
+        raw_count: raw.len(),
+        overlap_count,
+        spans,
+    })
 }
 
 pub fn seconds_to_time(seconds: f64) -> String {
@@ -109,7 +158,12 @@ fn parse_original_youtube_srt(content: &str) -> Result<Vec<RawSegment>> {
 
         let text = text_lines.join(" ").trim().to_owned();
         if !text.is_empty() {
-            segments.push(RawSegment { start, end, text });
+            segments.push(RawSegment {
+                source_index: segments.len() + 1,
+                start,
+                end,
+                text,
+            });
         }
         i = j;
     }
@@ -138,6 +192,7 @@ fn linearize(segments: &[RawSegment]) -> Result<Vec<TimedText>> {
             end_sec = start_sec + 2.0;
         }
         linearized.push(TimedText {
+            source_index: segment.source_index,
             start_sec,
             end_sec,
             text: new_words.join(" "),
@@ -242,16 +297,19 @@ mod tests {
     #[test]
     fn merge_keeps_complete_sentences_but_joins_fragments() {
         let complete = TimedText {
+            source_index: 1,
             start_sec: 0.0,
             end_sec: 3.0,
             text: "The application is ready.".to_owned(),
         };
         let fragment = TimedText {
+            source_index: 1,
             start_sec: 0.0,
             end_sec: 3.0,
             text: "The application is".to_owned(),
         };
         let next = TimedText {
+            source_index: 2,
             start_sec: 3.1,
             end_sec: 5.0,
             text: "ready to run.".to_owned(),

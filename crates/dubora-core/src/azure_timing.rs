@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -13,6 +15,7 @@ use tokio_tungstenite::{
 };
 
 use crate::config::AzureConfig;
+use crate::metrics::{record_azure_logical_generation, record_azure_request};
 
 const OUTPUT_FORMAT: &str = "audio-48khz-192kbitrate-mono-mp3";
 const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(70);
@@ -44,12 +47,53 @@ pub struct TimedAudio {
     pub events: Vec<TimingEvent>,
 }
 
+#[cfg(test)]
+type TestTimingResponder = Box<dyn Fn(&str) -> Result<TimedAudio> + Send + Sync>;
+
+#[cfg(test)]
+static TEST_TIMING_RESPONDER: OnceLock<Mutex<Option<TestTimingResponder>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct TestTimingResponderGuard;
+
+#[cfg(test)]
+pub(crate) fn install_test_timing_responder(
+    responder: TestTimingResponder,
+) -> TestTimingResponderGuard {
+    *TEST_TIMING_RESPONDER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("test Azure responder lock poisoned") = Some(responder);
+    TestTimingResponderGuard
+}
+
+#[cfg(test)]
+impl Drop for TestTimingResponderGuard {
+    fn drop(&mut self) {
+        if let Some(responder) = TEST_TIMING_RESPONDER.get() {
+            *responder
+                .lock()
+                .expect("test Azure responder lock poisoned") = None;
+        }
+    }
+}
+
 /// Synthesize one SSML document and collect Azure's audio metadata events.
 ///
 /// The REST endpoint used by the legacy path returns audio only. This WebSocket path mirrors the
 /// supported Speech SDK transport so callers can validate internal bookmarks before accepting a
 /// grouped utterance.
 pub async fn synthesize_ssml_with_timing(config: &AzureConfig, ssml: &str) -> Result<TimedAudio> {
+    record_azure_logical_generation();
+    record_azure_request(ssml.chars().count());
+    #[cfg(test)]
+    if let Some(responder) = TEST_TIMING_RESPONDER
+        .get()
+        .and_then(|responder| responder.lock().ok())
+        .and_then(|responder| responder.as_ref().map(|responder| responder(ssml)))
+    {
+        return responder;
+    }
     let connection_id = unique_id();
     let request_id = unique_id();
     let url = format!(
