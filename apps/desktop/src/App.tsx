@@ -565,6 +565,7 @@ function App() {
   const [translate, setTranslate] = useState(false);
   const [naturalVoice, setNaturalVoice] = useState(false);
   const [naturalMode, setNaturalMode] = useState<"sync" | "balanced" | "natural">("balanced");
+  const [sourceTiming, setSourceTiming] = useState<"caption-derived" | "azure-fast">("caption-derived");
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [youtubeQuality, setYoutubeQuality] = useState("highest");
   const [importingYoutube, setImportingYoutube] = useState(false);
@@ -1114,7 +1115,7 @@ function App() {
     setProgress(null);
     setNotice("");
     try {
-      await api.startDub(targets, force, forceTts, translate, naturalVoice, naturalMode);
+      await api.startDub(targets, force, forceTts, translate, naturalVoice, naturalMode, sourceTiming);
     } catch (error) {
       setBusy(false);
       setNotice(`Job thất bại: ${describeError(error)}`);
@@ -1436,9 +1437,10 @@ function App() {
                   cần nghe/xem lại.
                 </div>
                 <div className="guide-tip">
-                  <strong>Nguồn timing:</strong> bản desktop hiện dùng <strong>captionDerived</strong>
-                  {" "}hoặc <strong>cueOnly</strong>. Chế độ <strong>granular</strong> hiện chỉ có trên CLI
-                  khi chủ động bật <code>--source-timing azure-fast</code>.
+                  <strong>Nguồn timing:</strong> desktop mặc định dùng <strong>captionDerived</strong>
+                  {" "}hoặc <strong>cueOnly</strong>. Khi cần căn theo từng từ, bật
+                  <strong>Azure Fast granular</strong> trong nhóm Natural Voice; app sẽ trích audio
+                  nguồn và lấy word timestamps trước khi dựng giọng.
                 </div>
                 <div className="guide-tip">
                   <strong>Chọn voice:</strong> sau khi bấm <strong>Tải danh sách giọng</strong> trong
@@ -2128,14 +2130,27 @@ function App() {
                     onChange={setNaturalVoice}
                   />
                   {naturalVoice && (
-                    <label className="natural-mode">
-                      Nhịp Natural Voice
-                      <select value={naturalMode} onChange={(event) => setNaturalMode(event.target.value as typeof naturalMode)}>
-                        <option value="sync">Đồng bộ sát</option>
-                        <option value="balanced">Cân bằng</option>
-                        <option value="natural">Tự nhiên tối đa</option>
-                      </select>
-                    </label>
+                    <>
+                      <label className="natural-mode">
+                        Nhịp Natural Voice
+                        <select value={naturalMode} onChange={(event) => setNaturalMode(event.target.value as typeof naturalMode)}>
+                          <option value="sync">Đồng bộ sát</option>
+                          <option value="balanced">Cân bằng</option>
+                          <option value="natural">Tự nhiên tối đa</option>
+                        </select>
+                      </label>
+                      <label className="natural-mode">
+                        Nguồn timing
+                        <select
+                          value={sourceTiming}
+                          title="Azure Fast đọc audio nguồn để lấy timestamp từng từ; chậm và tốn thêm quota hơn caption timing."
+                          onChange={(event) => setSourceTiming(event.target.value as typeof sourceTiming)}
+                        >
+                          <option value="caption-derived">Caption timing</option>
+                          <option value="azure-fast">Azure Fast granular</option>
+                        </select>
+                      </label>
+                    </>
                   )}
                 </div>
                 <div className="control-bar-actions">

@@ -83,7 +83,7 @@ const SPEECH_PLAN_SYSTEM_INSTRUCTION: &str = concat!(
     "maximumTtsCharacters is a hard budget for the locally expanded Azure pronunciation text. Keep spokenText within that budget whenever the source can be expressed concisely; preserve technical tokens and meaning, but remove optional framing words before exceeding it. ",
     "Before returning each plan, count the characters of its locally speakable text and reject your own draft if it exceeds that segment's maximumTtsCharacters. Returning spokenText identical to an over-budget displayText is invalid. Shorten optional framing or a repeated rolling-caption tail until the budget fits; never copy continuation text from a neighboring index just to complete the sentence. ",
     "Delivery must be neutral, serious, reflective, or question. ",
-    "Use at most two non-adjacent emphasis phrases and two semantic pauses. Before returning, copy every emphasis.text character-for-character as one contiguous substring of spokenText; it must occur exactly once. Never paraphrase, shorten, join separated words, or normalize punctuation in emphasis.text. If no unique exact phrase is suitable, return emphasis as []. ",
+    "Use at most two non-adjacent emphasis phrases and two semantic pauses. When a segment contains a salient technical term, action, warning, contrast, or conclusion, mark its single most important contiguous phrase as clear or strong; use emphasis as [] only when no meaningful phrase can be emphasized. Do not emphasize every segment mechanically. Before returning, copy every emphasis.text character-for-character as one contiguous substring of spokenText; it must occur exactly once. Never paraphrase, shorten, join separated words, or normalize punctuation in emphasis.text. ",
     "Pauses must be 120-800 ms and must not pad timing. Use only an allowed style, otherwise null. ",
     "For every anchorCandidates item, return exactly one semanticAnchors item with the same anchorId and a spokenPhrase that is an exact contiguous substring of spokenText. Preserve technical terms and source order. Return semanticAnchors as [] only when there are no required anchor candidates. Never invent an anchorId. ",
     "Keep each semantic anchor near the same relative point in the sentence as sourceRelativeStart (within roughly one-fifth of the sentence). Do not move an anchored action to the beginning or end merely to shorten the sentence; keep the source context before it before the anchor. ",
@@ -99,7 +99,7 @@ const SPEECH_REVISION_SYSTEM_INSTRUCTION: &str = concat!(
     "timing.maximumWords is an additional hard limit derived from the selected voice's measured speaking rate. Count whitespace-separated words and never exceed it; character count alone is not sufficient. ",
     "spokenText must stay between 45% and 180% of displayText after whitespace is removed; preserve a complete sentence rather than returning an over-short summary. ",
     "Delivery must be neutral, serious, reflective, or question. ",
-    "Do not add fillers, facts, or pauses merely to occupy time. Use at most two non-adjacent emphasis phrases and two semantic pauses. Preserve every valid semantic anchor mapping from the input unless its exact phrase remains unchanged. ",
+    "Do not add fillers, facts, or pauses merely to occupy time. Use at most two non-adjacent emphasis phrases and two semantic pauses. When a segment has a salient technical term, action, warning, contrast, or conclusion, keep one clear or strong emphasis if its exact phrase remains unchanged; otherwise use []. Preserve every valid semantic anchor mapping from the input unless its exact phrase remains unchanged. ",
     "Before returning, copy every emphasis.text character-for-character as one contiguous substring of spokenText; it must occur exactly once. Never paraphrase, shorten, join separated words, or normalize punctuation in emphasis.text. If no unique exact phrase is suitable, return emphasis as []. Pauses must be 120-800 ms. Use only an allowed style, otherwise null. ",
     "Return two or three distinct candidate plans when possible, ordered from shortest to longest, and follow the response schema exactly; emphasis and pauses are arrays and must be [] when unused."
 );
@@ -113,7 +113,7 @@ const SPEECH_BATCH_REVISION_SYSTEM_INSTRUCTION: &str = concat!(
     "Return exactly one candidate for every input index in the same index-addressed map; never omit an index because it is difficult. ",
     "If a sentence is already concise, remove only optional framing or repeated rolling-caption wording while preserving a complete thought. ",
     "Preserve IPs, URLs, numbers, code, and named technical terms verbatim; remove optional framing words first. ",
-    "Do not add facts, fillers, or pauses. Use [] for emphasis or pauses when an exact phrase cannot be preserved. ",
+    "Do not add facts, fillers, or pauses. Keep one clear or strong emphasis for the most important technical term, action, warning, contrast, or conclusion when its exact phrase is preserved; use [] when no safe emphasis exists. ",
     "Every emphasis phrase must be one exact contiguous substring of its own spokenText and occur once. ",
     "Return the required JSON schema with index, displayText, spokenText, targetDurationMs, delivery, emphasis, pauses, style, and semanticAnchors."
 );

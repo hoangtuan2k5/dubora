@@ -770,8 +770,8 @@ async fn create_dub_for_video(
         let mut source_for_cache = fs::read(&plan_input_srt)?;
         source_for_cache.extend_from_slice(&source_timeline_bytes);
         let cache_key = tts_cache_key(
-            // v15 invalidates plans produced before deterministic recovery of dropped action clauses.
-            "gemini-speech-plan-v21",
+            // v22 invalidates plans produced before the stronger semantic emphasis policy.
+            "gemini-speech-plan-v22",
             // Keep this comment adjacent to the version so future prompt/input changes bump it.
             &format!("{mode:?}:{}", options.translate),
             &format!("{}|{}", voice.short_name, voice.styles.join("|")),

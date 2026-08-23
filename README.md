@@ -114,7 +114,8 @@ export DUBORA_FFPROBE=/usr/bin/ffprobe
 
 Azure is the Rust provider; Edge TTS remains in the Python reference.
 
-The --source-timing azure-fast option is an explicit CLI-only spike. Dubora extracts a temporary
+The `--source-timing azure-fast` CLI option and the Desktop **Azure Fast granular** selector enable
+the same opt-in source-word timing path. Dubora extracts a temporary
 16 kHz mono WAV under ignored work/, requests Azure Fast Transcription word timestamps, aligns
 recognized words to the source SRT with bounded matching, and interpolates unmatched spans only
 after the coverage gate passes. It keeps the original subtitle text/timestamps unchanged. The
@@ -165,17 +166,23 @@ playlist entries.
 ### Build via GitHub Actions (recommended)
 
 Workflow: `.github/workflows/build-windows.yml` (runs on `windows-latest`).
+Each successful push to `main` builds both `x64` and `x86` targets, then creates
+a GitHub Release tagged `v<app-version>-build.<run-number>` with the NSIS
+installers and portable `.exe` files attached. Manual workflow runs upload
+artifacts but do not publish a release.
 
 ```bash
 # After the repo is on GitHub:
 gh workflow run "Build Windows"
 gh run watch
 # Download artifacts when finished:
-gh run download -n dubora-windows
+gh run download -n dubora-windows-x64
+gh run download -n dubora-windows-x86
 ```
 
-Artifacts include the NSIS installer (`Dubora_*.exe`) and the raw app binary
-when present.
+Release assets include architecture-specific NSIS installers
+(`Dubora-x64-installer-*.exe`, `Dubora-x86-installer-*.exe`) and raw app
+binaries when present.
 
 ### Build locally on Windows
 
@@ -197,7 +204,8 @@ After loading the Azure voice list, selecting a voice exposes its supported expr
 styles and Natural Voice capabilities (emphasis, prosody, semantic breaks, and style). The `vi-VN`
 filter also includes multilingual voices that support Vietnamese. In **Thư viện**, enable
 **Natural Voice** and choose Sync, Balanced, or Natural timing. Natural Voice needs at least one
-Gemini key stored in **Thiết lập → Google AI Studio**.
+Gemini key stored in **Thiết lập → Google AI Studio**. Desktop also exposes the source timing
+selector next to the Natural Voice mode; Caption timing remains the default.
 
 Dev UI only (no native shell) from `apps/desktop`:
 

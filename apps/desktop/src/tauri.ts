@@ -119,9 +119,10 @@ export const api = {
     translate: boolean,
     naturalVoice: boolean,
     naturalMode: "sync" | "balanced" | "natural",
+    sourceTiming: "caption-derived" | "azure-fast",
   ) =>
     invoke<string>("start_dub", {
-      request: { targets, force, forceTts, translate, naturalVoice, naturalMode },
+      request: { targets, force, forceTts, translate, naturalVoice, naturalMode, sourceTiming },
     }),
   cancelDub: () => invoke<void>("cancel_dub"),
   ffmpegStatus: () => invoke<FfmpegStatus>("get_ffmpeg_status"),

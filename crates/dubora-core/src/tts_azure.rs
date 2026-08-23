@@ -2880,7 +2880,7 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
         body.push_str(&escape_xml(&plan.spoken_text[previous..boundary]));
         for (_, _, level) in emphasis.iter().filter(|(_, end, _)| *end == boundary) {
             body.push_str("</emphasis>");
-            if *level == EmphasisLevel::Strong && supports_prosody {
+            if supports_prosody && emphasis_prosody(*level).is_some() {
                 body.push_str("</prosody>");
             }
         }
@@ -2894,8 +2894,8 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
             body.push_str(&format!("<bookmark mark=\"{}\"/>", escape_xml(mark)));
         }
         for (_, _, level) in emphasis.iter().filter(|(start, _, _)| *start == boundary) {
-            if *level == EmphasisLevel::Strong && supports_prosody {
-                body.push_str("<prosody rate=\"-3%\" pitch=\"+3%\">");
+            if supports_prosody && let Some(prosody) = emphasis_prosody(*level) {
+                body.push_str(prosody);
             }
             body.push_str(&format!("<emphasis level=\"{}\">", emphasis_level(*level)));
         }
@@ -2950,6 +2950,14 @@ fn emphasis_level(level: EmphasisLevel) -> &'static str {
     match level {
         EmphasisLevel::Light => "moderate",
         EmphasisLevel::Clear | EmphasisLevel::Strong => "strong",
+    }
+}
+
+fn emphasis_prosody(level: EmphasisLevel) -> Option<&'static str> {
+    match level {
+        EmphasisLevel::Light => None,
+        EmphasisLevel::Clear => Some("<prosody rate=\"-4%\" pitch=\"+3%\" volume=\"+2%\">"),
+        EmphasisLevel::Strong => Some("<prosody rate=\"-7%\" pitch=\"+5%\" volume=\"+4%\">"),
     }
 }
 
@@ -3189,7 +3197,7 @@ mod tests {
         assert!(ssml.contains("<mstts:express-as style=\"serious\">"));
         assert!(ssml.contains("<break time=\"180ms\"/>"));
         assert!(ssml.contains("<emphasis level=\"strong\">rất quan trọng</emphasis>"));
-        assert!(ssml.contains("<prosody rate=\"-3%\" pitch=\"+3%\">"));
+        assert!(ssml.contains("<prosody rate=\"-7%\" pitch=\"+5%\" volume=\"+4%\">"));
 
         let mut hd = standard_capabilities();
         hd.model_family = VoiceModelFamily::DragonHd;

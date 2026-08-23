@@ -67,6 +67,8 @@ pub struct StartDubRequest {
     pub natural_voice: bool,
     #[serde(default)]
     pub natural_mode: NaturalMode,
+    #[serde(default)]
+    pub source_timing: SourceTiming,
 }
 
 #[derive(Clone, Serialize)]
@@ -646,7 +648,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
                     force_tts: request.force_tts,
                     translate: request.translate,
                     natural_mode: request.natural_voice.then_some(request.natural_mode),
-                    source_timing: SourceTiming::default(),
+                    source_timing: request.source_timing,
                 };
 
                 let result = if request.targets.is_empty() {

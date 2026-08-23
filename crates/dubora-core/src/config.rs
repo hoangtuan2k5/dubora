@@ -18,7 +18,8 @@ pub enum Provider {
     Edge,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SourceTiming {
     #[default]
     CaptionDerived,
@@ -198,6 +199,18 @@ mod tests {
                 .unwrap()
                 .with_voice("bad voice!")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn serializes_source_timing_for_desktop_requests() {
+        assert_eq!(
+            serde_json::to_string(&SourceTiming::AzureFast).unwrap(),
+            "\"azure-fast\""
+        );
+        assert_eq!(
+            serde_json::from_str::<SourceTiming>("\"caption-derived\"").unwrap(),
+            SourceTiming::CaptionDerived
         );
     }
 
