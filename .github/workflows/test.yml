@@ -26,8 +26,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m unittest test_run_dub.py
-          python -m py_compile run_dub.py generate_tts.py translate_srt.py
+          python -m unittest python_reference.tests.test_run_dub
+          python -m py_compile run_dub.py clean_rolling.py generate_tts.py translate_srt.py build_audio.py build_video.py drive_helper.py
+          python -m py_compile python_reference/dubora_reference/*.py python_reference/tests/test_run_dub.py
 
       - uses: dtolnay/rust-toolchain@stable
 

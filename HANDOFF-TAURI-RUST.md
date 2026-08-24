@@ -2,7 +2,7 @@
 
 Tài liệu này là **spec triển khai đầy đủ** để AI/agent khác làm mà **không cần** hội thoại trước.
 
-**Nguồn sự thật hành vi:** code Python trong repo này (`run_dub.py` + modules).  
+**Nguồn sự thật hành vi:** code Python reference trong `python_reference/dubora_reference/`; root-level scripts chỉ là compatibility shims.
 **Mục tiêu kiến trúc:** Phương án **B** — port full Rust, **không** bọc Python sidecar lâu dài.  
 **Hai sản phẩm ship:**
 
@@ -61,7 +61,8 @@ assets/video/<rel>.mp4  +  assets/srt/<rel>.srt
   → outputs/<rel>.vi-dub.mp4
 ```
 
-Entry point Python hiện tại: `run_dub.py` (orchestrator duy nhất).
+Entry point Python compatibility hiện tại: `run_dub.py`; implementation nằm trong
+`python_reference/dubora_reference/run_dub.py`.
 
 ---
 
@@ -69,13 +70,13 @@ Entry point Python hiện tại: `run_dub.py` (orchestrator duy nhất).
 
 | File | Vai trò | ~LOC |
 |------|---------|------|
-| `run_dub.py` | Orchestrator, path matching, skip logic, flags | ~240 |
-| `clean_rolling.py` | Linearize YouTube rolling captions + merge câu | ~140 |
-| `generate_tts.py` | Azure/Edge/gTTS, cache sha256, concurrent TTS | ~364 |
-| `build_audio.py` | FFmpeg filter_complex voiceover | ~168 |
-| `build_video.py` | Mux video copy + AAC | ~45 |
-| `translate_srt.py` | Dịch Google + protect tech terms | ~217 — **MVP optional** |
-| `drive_helper.py` | Google Drive — **OUT OF SCOPE** |
+| `python_reference/dubora_reference/run_dub.py` | Orchestrator, path matching, skip logic, flags | ~240 |
+| `python_reference/dubora_reference/clean_rolling.py` | Linearize YouTube rolling captions + merge câu | ~140 |
+| `python_reference/dubora_reference/generate_tts.py` | Azure/Edge/gTTS, cache sha256, concurrent TTS | ~364 |
+| `python_reference/dubora_reference/build_audio.py` | FFmpeg filter_complex voiceover | ~168 |
+| `python_reference/dubora_reference/build_video.py` | Mux video copy + AAC | ~45 |
+| `python_reference/dubora_reference/translate_srt.py` | Dịch Gemini + protect tech terms | ~217 — **MVP optional** |
+| `python_reference/dubora_reference/drive_helper.py` | Google Drive — **OUT OF SCOPE** |
 | `fuzzy_clean.py` | Không nằm pipeline chính — **OUT OF SCOPE** |
 | `scratch/` | Test scripts — **OUT OF SCOPE** |
 | `README.md`, `AGENTS.md` | Hành vi user-facing + gotchas | — |
@@ -394,7 +395,7 @@ Không bắt buộc MVP. Azure first.
 
 ```text
 viet-dub/                          # repo gốc (giữ Python để parity đến khi archive)
-  python/ hoặc giữ *.py ở root     # reference parity — không xóa sớm
+  python_reference/                # reference parity; root *.py là compatibility shims
   crates/
     viet-dub-core/                 # library: TOÀN BỘ pipeline
       Cargo.toml

@@ -21,24 +21,25 @@ assets/video/<rel>.mp4  +  assets/srt/<rel>.srt
   -> outputs/<rel>.vi-dub.mp4
 ```
 
-Entry point duy nhất: `run_dub.py`. Không gọi trực tiếp `build_audio.py` /
-`build_video.py` trong pipeline bình thường — `run_dub.py` đã điều phối.
+Entry point Python tương thích vẫn là `run_dub.py`. Không gọi trực tiếp
+`build_audio.py` / `build_video.py` trong pipeline bình thường — package
+reference đã điều phối.
 
 ## Kiến trúc module
 
 | File | Trách nhiệm | Ghi chú |
 | --- | --- | --- |
-| `run_dub.py` | Orchestrator chính. Tìm video↔srt, quản lý `work/`, gọi lần lượt các bước. | Mọi arg flag ở đây. |
-| `clean_rolling.py` | Linearize rolling captions (suffix-prefix overlap), gộp câu liền nhau (gap<2s hoặc dur<4.5s, tối đa 22 từ / 8s). | Coi subtitle là rolling pattern YouTube. |
-| `translate_srt.py` | Dịch en→vi qua `deep-translator` (Google). Bảo vệ thuật ngữ kỹ thuật bằng placeholder `ZXQTERM###QXZ`, dịch batch 20, có fallback per-segment và các sửa sai nhận dạng (YouTube nghe nhầm "vapor classes" -> "wrapper classes"). | Chỉ chạy khi `--translate`. |
-| `generate_tts.py` | Sinh MP3 từng segment, cache sha256 + sidecar `.sha256`, retry 3, concurrency semaphore (azure/edge=4, gtts=2). Providers: azure, edge, gtts. | `is_fresh_audio_file` quyết định regenerate. |
-| `build_audio.py` | Xây voiceover: `rubberband=tempo` time-stretch khi audio dài quá slot, `atrim`, `adelay`, `amix=normalize=0`, `alimiter`. Ghi `filter_complex.txt` + runner script. | **Yêu cầu FFmpeg có filter `rubberband`.** |
-| `build_video.py` | Mux: `0:v:0` copy + `1:a:0` aac 192k, `apad` + `-shortest`, metadata lang `vie`, default disposition. | Không re-encode video. |
-| `drive_helper.py` | Upload/download Google Drive qua service account (`~/.hermes/google_service_account.json`). | File độc lập, không nằm trong pipeline chính. |
+| `python_reference/dubora_reference/run_dub.py` | Orchestrator chính. Tìm video↔srt, quản lý `work/`, gọi lần lượt các bước. | `run_dub.py` ở root là compatibility entrypoint. |
+| `python_reference/dubora_reference/clean_rolling.py` | Linearize rolling captions (suffix-prefix overlap), gộp câu liền nhau (gap<2s hoặc dur<4.5s, tối đa 22 từ / 8s). | Coi subtitle là rolling pattern YouTube. |
+| `python_reference/dubora_reference/translate_srt.py` | Dịch en→vi qua Gemini. Bảo vệ thuật ngữ kỹ thuật bằng placeholder `ZXQTERM###QXZ`, dịch theo batch và kiểm tra đủ segment. | Chỉ chạy khi `--translate`. |
+| `python_reference/dubora_reference/generate_tts.py` | Sinh MP3 từng segment, cache sha256 + sidecar `.sha256`, retry 3, concurrency semaphore (azure/edge=4, gtts=2). Providers: azure, edge, gtts. | `is_fresh_audio_file` quyết định regenerate. |
+| `python_reference/dubora_reference/build_audio.py` | Xây voiceover: `rubberband=tempo` time-stretch khi audio dài quá slot, `atrim`, `adelay`, `amix=normalize=0`, `alimiter`. Ghi `filter_complex.txt` + runner script. | **Yêu cầu FFmpeg có filter `rubberband`.** |
+| `python_reference/dubora_reference/build_video.py` | Mux: `0:v:0` copy + `1:a:0` aac 192k, `apad` + `-shortest`, metadata lang `vie`, default disposition. | Không re-encode video. |
+| `python_reference/dubora_reference/drive_helper.py` | Upload/download Google Drive qua service account (`~/.hermes/google_service_account.json`). | File độc lập, không nằm trong pipeline chính. |
 
 ## Nhánh Rust / Desktop (đang phát triển chính)
 
-Pipeline Python đang được port sang Rust (monorepo workspace, edition 2024).
+Pipeline Python reference nằm trong `python_reference/` và đang được port sang Rust (monorepo workspace, edition 2024).
 Spec chi tiết + quyết định đã chốt nằm ở **`HANDOFF-TAURI-RUST.md` — đọc trước khi sửa code Rust.**
 
 - `crates/dubora-core` — pipeline dùng chung: `orchestrator.rs` (`create_dubs`), `clean_rolling.rs`,
@@ -119,7 +120,7 @@ hợp lệ (`ffprobe`/ phát được, có track audio `vie`).
 - Thay provider/voice: cập nhật `tts_cache_key`/note để cache cũ bị invalidate.
 - Thay logic clean/translate: kiểm tra pipeline end-to-end vì nó ảnh hưởng số
   đoạn → số file TTS → voiceover.
-- Giữ arg parser và các path mặc định trong `run_dub.py` đồng bộ với README
+- Giữ arg parser và các path mặc định trong `python_reference/dubora_reference/run_dub.py` đồng bộ với README
   (README là nguồn user-facing; update cả hai khi đổi CLI).
 - Mọi subprocess trong pipeline dùng list-arg + `check=True`; giữ pattern này.
 - Tuân thủ commit convention Conventional Commits (`feat:`, `fix:`, `chore:`, ...).

@@ -23,7 +23,9 @@ The Rust implementation ships one shared pipeline through:
 - `Dubora`, a Windows Tauri 2 desktop app in `apps/desktop`
 - `dubora-core`, the library used by both frontends
 
-The Python files remain in the repository as the parity reference.
+The Python parity reference lives under `python_reference/`. Root-level `.py`
+files remain as compatibility entry points, so existing commands such as
+`python3 run_dub.py` continue to work.
 
 ## Rust CLI (Linux)
 
@@ -215,6 +217,11 @@ npm run build
 ```
 
 ## Python Reference Setup
+
+The reference implementation lives in `python_reference/dubora_reference/`;
+the root-level Python files are compatibility shims for existing commands.
+Its regression tests live in `python_reference/tests/` and remain separate from
+the production Rust pipeline.
 
 Prerequisites:
 
