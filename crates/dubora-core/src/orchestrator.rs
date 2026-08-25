@@ -1895,4 +1895,38 @@ mod tests {
         assert_eq!(windows[0].entry_id, "island-1");
         assert_eq!((windows[0].start_ms, windows[0].end_ms), (1_000, 2_900));
     }
+
+    #[test]
+    fn p95_naturalness_target_is_reported_without_becoming_a_hard_gate() {
+        let entries = [1.0_f64, 1.05, 1.10]
+            .into_iter()
+            .enumerate()
+            .map(|(position, tempo)| ScheduledAudio {
+                id: format!("utterance-{}", position + 1),
+                path: PathBuf::from(format!("utterance-{}.mp3", position + 1)),
+                start_ms: position as u32 * 1_000,
+                end_ms: (position as u32 + 1) * 1_000,
+                source_segments: vec![position + 1],
+                measured_audio_ms: 1_000,
+                speech_end_ms: None,
+                rendered_audio_ms: 1_000,
+                tempo,
+                island_id: Some("island-1".to_owned()),
+                cache_identity: format!("cache-{}", position + 1),
+                alignment: crate::utterance::EntryAlignment::default(),
+            })
+            .collect();
+        let manifest = RenderManifest::new(
+            ManifestStatus::UnanchoredContinuous,
+            TimingPipelineId::UnanchoredContinuous,
+            entries,
+        )
+        .with_semantic_alignment_support(false);
+
+        let diagnostics = manifest_diagnostics(&manifest);
+        assert_eq!(diagnostics["tempoP95"], 1.10);
+        assert_eq!(diagnostics["maxTempo"], 1.10);
+        assert_eq!(diagnostics["technicallySafe"], true);
+        assert!(diagnostics["reviewEntryIds"].as_array().unwrap().is_empty());
+    }
 }
