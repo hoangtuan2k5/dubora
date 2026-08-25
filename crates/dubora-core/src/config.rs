@@ -8,6 +8,9 @@ use crate::speech_plan::NaturalMode;
 
 /// Default Azure TTS voice for Vietnamese course dubbing (Florian Dragon HD).
 pub const AZURE_VOICE: &str = "de-DE-Florian:DragonHDLatestNeural";
+/// Voices tuned for Dubora's Vietnamese tutorial path. Desktop pins these at the top of the picker.
+pub const RECOMMENDED_AZURE_VOICES: &[&str] =
+    &[AZURE_VOICE, "vi-VN-NamMinhNeural", "vi-VN-HoaiMyNeural"];
 pub const DEFAULT_AZURE_REGION: &str = "southeastasia";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -190,6 +193,14 @@ mod tests {
         let config = AzureConfig::new("key", "southeastasia").unwrap();
         assert_eq!(config.voice, AZURE_VOICE);
         assert_eq!(config.voice, "de-DE-Florian:DragonHDLatestNeural");
+    }
+
+    #[test]
+    fn recommended_voices_pin_florian_and_the_vietnamese_pair() {
+        assert_eq!(RECOMMENDED_AZURE_VOICES[0], AZURE_VOICE);
+        assert!(RECOMMENDED_AZURE_VOICES.contains(&"vi-VN-NamMinhNeural"));
+        assert!(RECOMMENDED_AZURE_VOICES.contains(&"vi-VN-HoaiMyNeural"));
+        assert_eq!(RECOMMENDED_AZURE_VOICES.len(), 3);
     }
 
     #[test]

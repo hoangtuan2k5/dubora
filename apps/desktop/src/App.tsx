@@ -44,6 +44,7 @@ import {
 import {
   api,
   DEFAULT_AZURE_VOICE,
+  RECOMMENDED_AZURE_VOICES,
   type AppConfig,
   type AzureVoice,
   type DubProgress,
@@ -98,6 +99,43 @@ function supportsVoiceLocale(voice: AzureVoice, locale: string) {
 function isHdVoice(voice: AzureVoice) {
   const blob = voice.shortName.toLowerCase();
   return blob.includes("hd") || blob.includes("dragon");
+}
+
+const RECOMMENDED_VOICE_NAMES: ReadonlySet<string> = new Set(
+  RECOMMENDED_AZURE_VOICES.map((voice) => voice.shortName),
+);
+
+function voiceMatchesQuery(voice: AzureVoice, query: string) {
+  if (!query) return true;
+  const hay = [
+    voice.shortName,
+    voice.displayName,
+    voice.localName,
+    voice.gender,
+    voice.locale,
+    voice.localeName,
+    voice.status,
+    voice.voiceType,
+    voice.styles.join(" "),
+    voice.secondaryLocales.join(" "),
+  ]
+    .join(" ")
+    .toLowerCase();
+  return hay.includes(query);
+}
+
+function formatVoiceOption(voice: AzureVoice) {
+  return [
+    voice.localName || voice.displayName,
+    voice.gender,
+    voice.locale,
+    isMultilingualVoice(voice) ? "Multi" : "",
+    isHdVoice(voice) ? "HD" : "",
+    voice.status && voice.status !== "GA" ? voice.status : "",
+  ]
+    .filter(Boolean)
+    .join(" · ")
+    .concat(` — ${voice.shortName}`);
 }
 
 function voiceSortLabel(key: VoiceSortKey) {
@@ -894,6 +932,12 @@ function App() {
     [voices, config.azureVoice],
   );
 
+  const recommendedVoices = useMemo(() => {
+    const q = voiceQuery.trim().toLowerCase();
+    return RECOMMENDED_AZURE_VOICES.map((item) => voices.find((voice) => voice.shortName === item.shortName))
+      .filter((voice): voice is AzureVoice => !!voice && voiceMatchesQuery(voice, q));
+  }, [voices, voiceQuery]);
+
   const filteredVoices = useMemo(() => {
     const q = voiceQuery.trim().toLowerCase();
     let list = voices.filter((voice) => {
@@ -903,22 +947,7 @@ function App() {
       if (voiceFeatures.female && voice.gender.toLowerCase() !== "female") return false;
       if (voiceFeatures.male && voice.gender.toLowerCase() !== "male") return false;
       if (voiceFeatures.gaOnly && voice.status && voice.status.toUpperCase() !== "GA") return false;
-      if (!q) return true;
-      const hay = [
-        voice.shortName,
-        voice.displayName,
-        voice.localName,
-        voice.gender,
-        voice.locale,
-        voice.localeName,
-        voice.status,
-        voice.voiceType,
-        voice.styles.join(" "),
-        voice.secondaryLocales.join(" "),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
+      return voiceMatchesQuery(voice, q);
     });
 
     const dir = voiceSortDir === "asc" ? 1 : -1;
@@ -941,6 +970,11 @@ function App() {
     });
     return list;
   }, [voices, voiceQuery, voiceLocale, voiceFeatures, voiceSortKey, voiceSortDir]);
+
+  const otherVoices = useMemo(
+    () => filteredVoices.filter((voice) => !RECOMMENDED_VOICE_NAMES.has(voice.shortName)),
+    [filteredVoices],
+  );
 
   useEffect(() => {
     if (!voiceFilterOpen && !voiceSortOpen) return;
@@ -1457,10 +1491,11 @@ function App() {
                   nguồn và lấy word timestamps trước khi dựng giọng.
                 </div>
                 <div className="guide-tip">
-                  <strong>Chọn voice:</strong> sau khi bấm <strong>Tải danh sách giọng</strong> trong
-                  Thiết lập, app hiển thị khả năng nhấn mạnh, nhịp/độ cao, ngắt câu và phong cách.
-                  Với Dragon HD, Azure tự điều khiển delivery; vì voice này không trả timing events,
-                  Dubora dùng per-segment Natural Voice path và không tuyên bố semantic-anchor alignment.
+                  <strong>Chọn voice:</strong> nhóm <strong>Giọng đề xuất</strong> ghim Florian HD
+                  (mặc định), Nam Minh và Hoài My — ba giọng đã tối ưu cho tutorial tiếng Việt.
+                  Sau khi bấm <strong>Tải danh sách giọng</strong>, app hiện thêm catalog Azure cùng
+                  khả năng nhấn mạnh, nhịp/độ cao, ngắt câu và phong cách. Dragon HD tự điều khiển
+                  delivery và không trả timing events, nên Dubora dùng path HD continuous.
                 </div>
               </article>
 
@@ -1685,6 +1720,33 @@ function App() {
                     Mặc định Florian HD
                   </button>
                 </div>
+                <div className="voice-recommended" role="group" aria-label="Giọng đề xuất">
+                  <p className="voice-recommended-label">Giọng đề xuất</p>
+                  <div className="voice-recommended-chips">
+                    {RECOMMENDED_AZURE_VOICES.map((item) => {
+                      const selected = (config.azureVoice || DEFAULT_AZURE_VOICE) === item.shortName;
+                      return (
+                        <button
+                          key={item.shortName}
+                          type="button"
+                          className={`voice-recommended-chip${selected ? " on" : ""}`}
+                          aria-pressed={selected}
+                          title={`${item.note} — ${item.shortName}`}
+                          onClick={() =>
+                            setConfig((current) => ({
+                              ...current,
+                              azureVoice: item.shortName,
+                              azureVoiceStyle: "",
+                            }))
+                          }
+                        >
+                          <strong>{item.title}</strong>
+                          <span>{item.note}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
                 {voices.length > 0 ? (
                   <>
                     <div className="voice-tools">
@@ -1906,24 +1968,35 @@ function App() {
                           setConfig((current) => ({ ...current, azureVoice: event.target.value, azureVoiceStyle: "" }))
                         }
                       >
-                        {!filteredVoices.some((v) => v.shortName === (config.azureVoice || DEFAULT_AZURE_VOICE)) && (
+                        {!filteredVoices.some((v) => v.shortName === (config.azureVoice || DEFAULT_AZURE_VOICE)) &&
+                          !recommendedVoices.some((v) => v.shortName === (config.azureVoice || DEFAULT_AZURE_VOICE)) && (
                           <option value={config.azureVoice || DEFAULT_AZURE_VOICE}>
                             {config.azureVoice || DEFAULT_AZURE_VOICE} (đang chọn)
                           </option>
                         )}
-                        {filteredVoices.map((voice) => (
-                          <option key={voice.shortName} value={voice.shortName}>
-                            {voice.localName || voice.displayName} · {voice.gender} · {voice.locale}
-                            {isMultilingualVoice(voice) ? " · Multi" : ""}
-                            {isHdVoice(voice) ? " · HD" : ""}
-                            {voice.status && voice.status !== "GA" ? ` · ${voice.status}` : ""} — {voice.shortName}
-                          </option>
-                        ))}
+                        {recommendedVoices.length > 0 && (
+                          <optgroup label="Giọng đề xuất">
+                            {recommendedVoices.map((voice) => (
+                              <option key={`recommended-${voice.shortName}`} value={voice.shortName}>
+                                {formatVoiceOption(voice)}
+                                {voice.shortName === DEFAULT_AZURE_VOICE ? " · Mặc định" : " · Đề xuất"}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        <optgroup label={recommendedVoices.length > 0 ? "Tất cả giọng" : "Giọng Azure"}>
+                          {otherVoices.map((voice) => (
+                            <option key={voice.shortName} value={voice.shortName}>
+                              {formatVoiceOption(voice)}
+                            </option>
+                          ))}
+                        </optgroup>
                       </select>
                     </div>
                     <p className="field-hint">
                       {filteredVoices.length}/{voices.length} giọng · ShortName:{" "}
                       <code>{config.azureVoice || DEFAULT_AZURE_VOICE}</code>
+                      . Florian HD, Nam Minh và Hoài My nằm trong <strong>Giọng đề xuất</strong>.
                     </p>
                   </>
                 ) : (
@@ -1941,7 +2014,8 @@ function App() {
                       />
                     </div>
                     <p className="field-hint">
-                      Mặc định: <code>{DEFAULT_AZURE_VOICE}</code>. Bấm “Tải danh sách giọng” để chọn từ Azure.
+                      Mặc định: <code>{DEFAULT_AZURE_VOICE}</code>. Có thể chọn Florian HD, Nam Minh
+                      hoặc Hoài My ở trên, hoặc bấm “Tải danh sách giọng” để xem catalog Azure.
                     </p>
                   </>
                 )}

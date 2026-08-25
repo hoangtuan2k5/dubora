@@ -905,6 +905,75 @@ h1 {
   background: #fff;
 }
 
+.select-wrap select optgroup {
+  color: #17212b;
+  font-weight: 700;
+}
+
+.voice-recommended {
+  margin: 0 0 12px;
+}
+
+.voice-recommended-label {
+  margin: 0 0 7px;
+  color: var(--quiet);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.voice-recommended-chips {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.voice-recommended-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 58px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.voice-recommended-chip strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.voice-recommended-chip span {
+  color: var(--quiet);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.voice-recommended-chip:hover {
+  border-color: var(--quiet);
+}
+
+.voice-recommended-chip.on {
+  border-color: rgba(70, 203, 213, 0.5);
+  background: var(--cyan-soft);
+}
+
+.voice-recommended-chip.on strong {
+  color: var(--cyan);
+}
+
+.voice-recommended-chip.on span {
+  color: var(--cyan);
+}
+
 .field-hint {
   margin: 8px 0 0;
   color: var(--quiet);
@@ -2745,6 +2814,10 @@ button.guide-link:hover {
 }
 
 @media (max-width: 700px) {
+  .voice-recommended-chips {
+    grid-template-columns: 1fr;
+  }
+
   .topbar {
     padding: 0 16px;
   }

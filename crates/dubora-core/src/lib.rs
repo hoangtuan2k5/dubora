@@ -25,7 +25,8 @@ pub use azure_voices::{
     AzureVoice, CapabilityState, VoiceCapabilities, VoiceModelFamily, list_azure_voices,
 };
 pub use config::{
-    AZURE_VOICE, AzureConfig, DubConfig, DubOptions, GeminiConfig, Provider, SourceTiming,
+    AZURE_VOICE, AzureConfig, DubConfig, DubOptions, GeminiConfig, Provider,
+    RECOMMENDED_AZURE_VOICES, SourceTiming,
 };
 pub use orchestrator::{VideoInfo, create_dubs, scan_videos};
 pub use paths::{

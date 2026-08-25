@@ -50,6 +50,25 @@ export type VoiceCapabilities = {
 
 export const DEFAULT_AZURE_VOICE = "de-DE-Florian:DragonHDLatestNeural";
 
+/** Keep in sync with `dubora_core::RECOMMENDED_AZURE_VOICES`. */
+export const RECOMMENDED_AZURE_VOICES = [
+  {
+    shortName: DEFAULT_AZURE_VOICE,
+    title: "Florian HD",
+    note: "Mặc định · nam · Việt + thuật ngữ Anh",
+  },
+  {
+    shortName: "vi-VN-NamMinhNeural",
+    title: "Nam Minh",
+    note: "Nam · vi-VN · timing Azure",
+  },
+  {
+    shortName: "vi-VN-HoaiMyNeural",
+    title: "Hoài My",
+    note: "Nữ · vi-VN · timing Azure",
+  },
+] as const;
+
 export type VideoInfo = {
   relativePath: string;
   hasSrt: boolean;

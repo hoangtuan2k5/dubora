@@ -121,7 +121,7 @@ struct Args {
     #[arg(long)]
     gemini_key: Vec<String>,
 
-    /// Azure TTS voice ShortName (default: de-DE-Florian:DragonHDLatestNeural).
+    /// Azure TTS voice ShortName. Default Florian HD; also recommended: vi-VN-NamMinhNeural, vi-VN-HoaiMyNeural.
     #[arg(long)]
     voice: Option<String>,
 
