@@ -3558,7 +3558,7 @@ pub fn render_unanchored_utterance_ssml(
     let mut body = String::new();
     for (position, plan) in plans.iter().enumerate() {
         if position > 0 {
-            body.push_str(part_join_separator(voice));
+            body.push_str(&part_join_separator(voice, plans.get(position - 1)));
         }
         body.push_str(&render_speech_plan_body(voice, plan, 0)?);
     }
@@ -3603,7 +3603,7 @@ pub fn render_utterance_ssml_with_semantic_anchors_and_delays(
             bail!("Utterance bookmark names must contain only letters, digits, and hyphens");
         }
         if position > 0 {
-            body.push_str(part_join_separator(voice));
+            body.push_str(&part_join_separator(voice, plans.get(position - 1)));
         }
         let anchors = semantic_bookmarks
             .iter()
@@ -3679,6 +3679,7 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
     let mut boundaries = vec![0, plan.spoken_text.len()];
     let mut emphasis = Vec::new();
     let mut pauses = Vec::new();
+    let mut pace = Vec::new();
     let mut semantic_marks = Vec::new();
 
     if supports_emphasis || supports_prosody {
@@ -3717,6 +3718,47 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
             }
             boundaries.push(end);
             pauses.push((end, duration_ms));
+        }
+        if pauses.len() < 2 && optional_breaks_fit(plan) {
+            for (end, duration_ms) in optional_rhythm_breaks(&plan.spoken_text) {
+                if pauses.len() >= 2 {
+                    break;
+                }
+                if end < 12 || plan.spoken_text.len().saturating_sub(end) < 12 {
+                    continue;
+                }
+                if pauses
+                    .iter()
+                    .any(|(existing, _)| end.abs_diff(*existing) <= 8)
+                {
+                    continue;
+                }
+                boundaries.push(end);
+                pauses.push((end, duration_ms));
+            }
+        }
+    }
+    if supports_prosody && rate_percent == 0 {
+        let forbidden: Vec<(usize, usize)> = emphasis
+            .iter()
+            .map(|(start, end, _)| (*start, *end))
+            .collect();
+        let splits = pace_split_offsets(&plan.spoken_text, &forbidden);
+        if !splits.is_empty() {
+            let mut start = 0;
+            let mut parts = Vec::new();
+            for offset in splits {
+                parts.push((start, offset));
+                start = offset;
+            }
+            parts.push((start, plan.spoken_text.len()));
+            if !plan_is_tight(plan)
+                && let Some(&(start, end)) = parts.last()
+                && end.saturating_sub(start) >= 8
+            {
+                boundaries.extend([start, end]);
+                pace.push((start, end, -4));
+            }
         }
     }
     for (phrase, mark, delay) in semantic_bookmarks {
@@ -3758,6 +3800,12 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
             }
             body.push_str(&format!("<bookmark mark=\"{}\"/>", escape_xml(mark)));
         }
+        for _ in pace.iter().filter(|(_, end, _)| *end == boundary) {
+            body.push_str("</prosody>");
+        }
+        for (_, _, rate) in pace.iter().filter(|(start, _, _)| *start == boundary) {
+            body.push_str(&format!("<prosody rate=\"{rate:+}%\">"));
+        }
         for (_, _, level) in emphasis.iter().filter(|(start, _, _)| *start == boundary) {
             if supports_prosody && let Some(prosody) = emphasis_prosody(*level) {
                 body.push_str(prosody);
@@ -3794,12 +3842,23 @@ fn wrap_voice_ssml(voice: &AzureVoice, body: &str) -> String {
     )
 }
 
-fn part_join_separator(voice: &AzureVoice) -> &'static str {
-    if voice.capabilities.semantic_break == CapabilityState::Supported {
-        "<break time=\"140ms\"/>"
-    } else {
-        " "
+fn part_join_separator(voice: &AzureVoice, previous: Option<&SpeechPlan>) -> String {
+    if voice.capabilities.semantic_break != CapabilityState::Supported {
+        return " ".to_owned();
     }
+    let ms = match previous.map(|plan| plan.spoken_text.trim_end()) {
+        Some(text) if text.ends_with(',') => 90,
+        Some(text)
+            if text.ends_with('.')
+                || text.ends_with('!')
+                || text.ends_with('?')
+                || text.ends_with('…') =>
+        {
+            170
+        }
+        _ => 140,
+    };
+    format!("<break time=\"{ms}ms\"/>")
 }
 
 fn implicit_clause_breaks(text: &str) -> Vec<(usize, u16)> {
@@ -3843,6 +3902,150 @@ fn implicit_clause_breaks(text: &str) -> Vec<(usize, u16)> {
     }
     breaks.truncate(MAX_IMPLICIT);
     breaks
+}
+
+fn optional_breaks_fit(plan: &SpeechPlan) -> bool {
+    let chars = plan
+        .spoken_text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count() as u32;
+    let likely_ms = chars.saturating_mul(80);
+    likely_ms.saturating_add(250) < plan.target_duration_ms
+}
+
+fn optional_rhythm_breaks(text: &str) -> Vec<(usize, u16)> {
+    let mut breaks = comma_or_semicolon_breaks(text);
+    for offset in connector_split_offsets(text) {
+        if breaks
+            .iter()
+            .any(|(existing, _)| offset.abs_diff(*existing) <= 8)
+        {
+            continue;
+        }
+        breaks.push((offset, 90));
+    }
+    breaks.sort_by_key(|(offset, _)| *offset);
+    breaks
+}
+
+fn comma_or_semicolon_breaks(text: &str) -> Vec<(usize, u16)> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut breaks = Vec::new();
+    for (index, &(offset, ch)) in chars.iter().enumerate() {
+        if !matches!(ch, ',' | ';') {
+            continue;
+        }
+        let previous = index
+            .checked_sub(1)
+            .and_then(|previous| chars.get(previous).map(|(_, character)| *character));
+        let next = chars.get(index + 1).map(|(_, character)| *character);
+        if previous.is_some_and(|character| character.is_ascii_digit())
+            && next.is_some_and(|character| character.is_ascii_digit())
+        {
+            continue;
+        }
+        if next.is_some_and(char::is_whitespace) {
+            breaks.push((offset + ch.len_utf8(), 110));
+        }
+    }
+    breaks
+}
+
+fn connector_split_offsets(text: &str) -> Vec<usize> {
+    const CONNECTORS: [&str; 5] = [" và ", " rồi ", " thì ", " nên ", " nhưng "];
+    let lowered = text.to_lowercase();
+    let mut offsets = Vec::new();
+    for connector in CONNECTORS {
+        let mut search = 0;
+        while let Some(found) = lowered[search..].find(connector) {
+            let start = search + found;
+            if start >= 12 && start + connector.len() + 12 <= text.len() {
+                offsets.push(start);
+            }
+            search = start + connector.len();
+        }
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+fn pace_split_offsets(text: &str, forbidden: &[(usize, usize)]) -> Vec<usize> {
+    let mut candidates: Vec<(u8, usize)> = implicit_clause_breaks(text)
+        .into_iter()
+        .map(|(offset, _)| (0, offset))
+        .chain(
+            comma_or_semicolon_breaks(text)
+                .into_iter()
+                .map(|(offset, _)| (1, offset)),
+        )
+        .chain(
+            connector_split_offsets(text)
+                .into_iter()
+                .map(|offset| (2, offset)),
+        )
+        .collect();
+    candidates.sort_by_key(|(priority, offset)| (*offset, *priority));
+    let mut selected = Vec::new();
+    for (_, offset) in candidates {
+        if offset < 12 || text.len().saturating_sub(offset) < 12 {
+            continue;
+        }
+        if forbidden
+            .iter()
+            .any(|(start, end)| offset > *start && offset < *end)
+        {
+            continue;
+        }
+        if selected
+            .iter()
+            .any(|existing: &usize| offset.abs_diff(*existing) < 12)
+        {
+            continue;
+        }
+        selected.push(offset);
+        if selected.len() == 2 {
+            break;
+        }
+    }
+    if selected.is_empty()
+        && let Some(mid) = midpoint_space(text, forbidden)
+    {
+        selected.push(mid);
+    }
+    selected
+}
+
+fn midpoint_space(text: &str, forbidden: &[(usize, usize)]) -> Option<usize> {
+    if !forbidden.is_empty() {
+        return None;
+    }
+    if text.len() < 28 {
+        return None;
+    }
+    let target = text.len() * 3 / 5;
+    let mut best: Option<(usize, usize)> = None;
+    for (offset, character) in text.char_indices() {
+        if character != ' ' || offset < 12 || text.len().saturating_sub(offset) < 12 {
+            continue;
+        }
+        let distance = offset.abs_diff(target);
+        if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+            best = Some((offset, distance));
+        }
+    }
+    best.map(|(offset, _)| offset)
+}
+
+fn plan_is_tight(plan: &SpeechPlan) -> bool {
+    let chars = plan
+        .spoken_text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count() as u32;
+    let likely_ms = chars.saturating_mul(75);
+    likely_ms.saturating_add(400) >= plan.target_duration_ms
 }
 
 /// Cache identity for a plan includes the exact capability-aware SSML payload.
@@ -4180,6 +4383,62 @@ mod tests {
         assert!(hd_ssml.contains("<break time=\"180ms\"/>"));
         assert!(!hd_ssml.contains("<prosody"));
         assert!(!hd_ssml.contains("<emphasis"));
+    }
+
+    #[test]
+    fn neural_pace_slows_the_landing_clause_without_hd_rate() {
+        let plan = SpeechPlan::plain(
+            1,
+            "Mình sẽ đăng nhập vào đó, và nếu các bạn muốn làm theo.",
+            5_000,
+        );
+        let ssml = render_speech_plan_ssml(&voice(standard_capabilities()), &plan).unwrap();
+        assert!(ssml.contains("<prosody rate=\"-4%\">"));
+        assert!(!ssml.contains("<prosody rate=\"+4%\">"));
+        assert!(ssml.contains("<break time=\"110ms\"/>"));
+
+        let mut hd = standard_capabilities();
+        hd.model_family = VoiceModelFamily::DragonHd;
+        hd.manual_emphasis = CapabilityState::Unsupported;
+        hd.manual_prosody = CapabilityState::Unsupported;
+        let mut hd_voice = voice(hd);
+        hd_voice.short_name = "de-DE-Florian:DragonHDLatestNeural".to_owned();
+        let hd_ssml = render_unanchored_utterance_ssml(&hd_voice, &[plan]).unwrap();
+        assert!(hd_ssml.contains("<break time=\"110ms\"/>"));
+        assert!(!hd_ssml.contains("<prosody"));
+    }
+
+    #[test]
+    fn duration_repair_rate_skips_local_pace_wraps() {
+        let plan = SpeechPlan::plain(
+            1,
+            "Mình sẽ đăng nhập vào đó, và nếu các bạn muốn làm theo.",
+            5_000,
+        );
+        let ssml =
+            render_speech_plan_ssml_with_rate(&voice(standard_capabilities()), &plan, 8).unwrap();
+        assert!(ssml.contains("<prosody rate=\"+8%\">"));
+        assert!(!ssml.contains("<prosody rate=\"+4%\">"));
+        assert!(!ssml.contains("<prosody rate=\"-4%\">"));
+    }
+
+    #[test]
+    fn tight_slots_do_not_slow_the_landing_clause() {
+        let plan = SpeechPlan::plain(
+            1,
+            "Mình sẽ đăng nhập vào đó, và nếu các bạn muốn làm theo.",
+            2_000,
+        );
+        let ssml = render_speech_plan_ssml(&voice(standard_capabilities()), &plan).unwrap();
+        assert!(!ssml.contains("<prosody rate=\"+4%\">"));
+        assert!(!ssml.contains("<prosody rate=\"-4%\">"));
+    }
+
+    #[test]
+    fn comma_inside_an_ip_address_is_not_a_rhythm_break() {
+        let plan = SpeechPlan::plain(1, "Mở 192.168.0.1 rồi xong.", 2_000);
+        let ssml = render_speech_plan_ssml(&voice(standard_capabilities()), &plan).unwrap();
+        assert!(!ssml.contains("<break time=\"110ms\"/>"));
     }
 
     #[test]
