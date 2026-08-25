@@ -463,6 +463,7 @@ struct DurationCalibration {
     version: u8,
     voice: String,
     style: String,
+    // Kept for calibration-file compatibility. Loading intentionally keys only by voice and style.
     renderer: String,
     chars_per_second: Vec<f64>,
 }
@@ -477,7 +478,6 @@ impl DurationCalibration {
                 calibration.version == DURATION_CALIBRATION_VERSION
                     && calibration.voice == voice.short_name
                     && calibration.style == voice.styles.join("|")
-                    && calibration.renderer == UTTERANCE_CACHE_PROVIDER
             })
             .unwrap_or_else(|| Self {
                 version: DURATION_CALIBRATION_VERSION,
@@ -498,15 +498,23 @@ impl DurationCalibration {
     }
 
     fn observe(&mut self, plan: &SpeechPlan, measured_audio_ms: u32) {
-        let prepared = prepared_speech_plan(plan);
+        self.observe_plans(std::slice::from_ref(plan), measured_audio_ms);
+    }
+
+    fn observe_plans(&mut self, plans: &[SpeechPlan], measured_audio_ms: u32) {
+        let prepared = plans.iter().map(prepared_speech_plan).collect::<Vec<_>>();
         let chars = prepared
-            .spoken_text
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .count();
-        let pauses_ms = prepared
-            .pauses
             .iter()
+            .map(|plan| {
+                plan.spoken_text
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .count()
+            })
+            .sum::<usize>();
+        let pauses_ms = prepared
+            .iter()
+            .flat_map(|plan| plan.pauses.iter())
             .map(|pause| u32::from(pause.duration_ms))
             .sum::<u32>();
         let spoken_ms = measured_audio_ms.saturating_sub(pauses_ms);
@@ -536,6 +544,13 @@ impl DurationCalibration {
     }
 }
 
+pub(crate) fn load_duration_calibration_chars_per_second(
+    output_dir: &Path,
+    voice: &AzureVoice,
+) -> Option<f64> {
+    DurationCalibration::load(output_dir, voice).median_chars_per_second()
+}
+
 #[cfg(test)]
 fn predict_plan_audio_ms(plan: &SpeechPlan, voice: &AzureVoice) -> u32 {
     predict_plan_audio_ms_with_calibration(plan, voice, None)
@@ -543,24 +558,27 @@ fn predict_plan_audio_ms(plan: &SpeechPlan, voice: &AzureVoice) -> u32 {
 
 fn predict_plan_audio_ms_with_calibration(
     plan: &SpeechPlan,
-    voice: &AzureVoice,
+    _voice: &AzureVoice,
     calibrated_chars_per_second: Option<f64>,
 ) -> u32 {
     let prepared = prepared_speech_plan(plan);
-    let words = prepared.spoken_text.split_whitespace().count().max(1) as u64;
     let chars = prepared
         .spoken_text
         .chars()
         .filter(|character| !character.is_whitespace())
         .count()
         .max(1) as f64;
+    let cold_start_cps = if plan.semantic_anchors.is_empty() {
+        11.0
+    } else {
+        13.0
+    };
     let spoken_ms = calibrated_chars_per_second
         .filter(|cps| cps.is_finite() && *cps > 0.0)
-        .map(|cps| (chars * 1_000.0 / cps).ceil() as u64)
-        .unwrap_or_else(|| {
-            let words_per_minute = u64::from(voice.words_per_minute.unwrap_or(150).clamp(80, 300));
-            words.saturating_mul(60_000).div_ceil(words_per_minute)
-        });
+        .unwrap_or(cold_start_cps)
+        .recip()
+        .mul_add(chars * 1_000.0, 0.0)
+        .ceil() as u64;
     let explicit_pause_ms = prepared
         .pauses
         .iter()
@@ -1037,7 +1055,8 @@ pub async fn generate_all_tts_for_unanchored_utterances(
     let utterances = group_source_aligned_utterances(&segments, plans, timeline, layout)?;
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create {}", output_dir.display()))?;
-    let calibration = DurationCalibration::load(output_dir, voice);
+    let mut duration_calibration = DurationCalibration::load(output_dir, voice);
+    let calibrated_chars_per_second = duration_calibration.median_chars_per_second();
     let predicted = utterances
         .iter()
         .map(|utterance| {
@@ -1050,7 +1069,7 @@ pub async fn generate_all_tts_for_unanchored_utterances(
                         predict_plan_audio_ms_with_calibration(
                             &part.plan,
                             voice,
-                            calibration.median_chars_per_second(),
+                            calibrated_chars_per_second,
                         )
                     })
                     .sum::<u32>()
@@ -1181,12 +1200,22 @@ pub async fn generate_all_tts_for_unanchored_utterances(
                         .utterance
                         .parts
                         .iter()
-                        .map(|part| predict_plan_audio_ms_with_calibration(&part.plan, voice, None))
+                        .map(|part| {
+                            predict_plan_audio_ms_with_calibration(
+                                &part.plan,
+                                voice,
+                                calibrated_chars_per_second,
+                            )
+                        })
                         .sum::<u32>()
                         .max(1);
                     candidate.utterance.parts.iter().map(move |part| {
-                        let predicted =
-                            predict_plan_audio_ms_with_calibration(&part.plan, voice, None).max(1);
+                        let predicted = predict_plan_audio_ms_with_calibration(
+                            &part.plan,
+                            voice,
+                            calibrated_chars_per_second,
+                        )
+                        .max(1);
                         let actual = candidate
                             .measured_audio_ms
                             .saturating_mul(predicted)
@@ -1292,6 +1321,32 @@ pub async fn generate_all_tts_for_unanchored_utterances(
         allocations = measured_allocations;
         review_reasons.extend(allocation_failures);
     }
+
+    for (position, candidate) in audio.iter().enumerate() {
+        if failed_blocks.contains_key(&position) {
+            continue;
+        }
+        let Some(allocation) = allocations.get(&candidate.utterance.block_id) else {
+            continue;
+        };
+        let slot_ms = allocation
+            .slot_end_ms
+            .saturating_sub(allocation.render_start_ms)
+            .max(1);
+        if f64::from(candidate.measured_audio_ms) / f64::from(slot_ms)
+            > MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+        {
+            continue;
+        }
+        let plans = candidate
+            .utterance
+            .parts
+            .iter()
+            .map(|part| part.plan.clone())
+            .collect::<Vec<_>>();
+        duration_calibration.observe_plans(&plans, candidate.measured_audio_ms);
+    }
+    duration_calibration.write(output_dir)?;
 
     let mut entries = audio
         .iter()
@@ -3863,6 +3918,38 @@ mod tests {
     }
 
     #[test]
+    fn compacted_hd_revision_text_changes_the_utterance_cache_payload() {
+        let mut capabilities = standard_capabilities();
+        capabilities.model_family = VoiceModelFamily::DragonHd;
+        capabilities.manual_emphasis = CapabilityState::Unsupported;
+        capabilities.manual_prosody = CapabilityState::Unsupported;
+        let mut hd_voice = voice(capabilities);
+        hd_voice.short_name = "de-DE-Florian:DragonHDLatestNeural".to_owned();
+        hd_voice.styles.clear();
+
+        let mut compacted =
+            SpeechPlan::plain(23, "mà chúng ta sẽ tìm hiểu trong video hôm nay.", 4_000);
+        compacted.compact_optional_framing();
+        let compacted_ssml =
+            render_unanchored_utterance_ssml(&hd_voice, &[prepared_speech_plan(&compacted)])
+                .unwrap();
+        let raw_ssml = render_unanchored_utterance_ssml(
+            &hd_voice,
+            &[prepared_speech_plan(&SpeechPlan::plain(
+                23,
+                "mà chúng ta sẽ tìm hiểu trong video hôm nay.",
+                4_000,
+            ))],
+        )
+        .unwrap();
+        assert!(!compacted_ssml.contains("trong video hôm nay"));
+        assert_ne!(
+            hd_utterance_cache_key(&hd_voice, &raw_ssml),
+            hd_utterance_cache_key(&hd_voice, &compacted_ssml)
+        );
+    }
+
+    #[test]
     fn strips_only_supported_break_tags_for_hd_retry() {
         let ssml = "<speak><break time=\"180ms\"/>text &amp; more</speak>";
         assert_eq!(strip_ssml_breaks(ssml), "<speak>text &amp; more</speak>");
@@ -3929,7 +4016,7 @@ mod tests {
             duration_ms: 300,
             reason: PauseReason::Transition,
         });
-        assert!(predict_plan_audio_ms(&short, &voice) > 1_000);
+        assert!(predict_plan_audio_ms(&short, &voice) > 800);
     }
 
     #[test]
@@ -3951,6 +4038,24 @@ mod tests {
                 calibration.median_chars_per_second()
             ) < predict_plan_audio_ms(&plan, &voice)
         );
+    }
+
+    #[test]
+    fn duration_calibration_counts_a_continuous_utterance_as_one_sample() {
+        let voice = voice(standard_capabilities());
+        let mut calibration = DurationCalibration {
+            version: DURATION_CALIBRATION_VERSION,
+            voice: voice.short_name.clone(),
+            style: voice.styles.join("|"),
+            renderer: UTTERANCE_CACHE_PROVIDER.to_owned(),
+            chars_per_second: Vec::new(),
+        };
+        let plans = vec![
+            SpeechPlan::plain(1, "một hai", 500),
+            SpeechPlan::plain(2, "ba bốn", 500),
+        ];
+        calibration.observe_plans(&plans, 1_000);
+        assert_eq!(calibration.chars_per_second, vec![11.0]);
     }
 
     #[test]

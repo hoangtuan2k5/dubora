@@ -77,6 +77,7 @@ const SPEECH_PLAN_SYSTEM_INSTRUCTION: &str = concat!(
     "Create one plan for every input index and preserve meaning without adding facts or fillers. ",
     "The input is a fixed index-addressed map: plan index N must cover only the text at index N. Never shift, merge, split, or copy prose from a previous or next index; previousText and nextText are context only and must not become plan N content. ",
     "When translateToVietnamese is true, translate displayText and spokenText into natural Vietnamese; otherwise keep displayText exactly unchanged. When the input is already Vietnamese, displayText is the indexed subtitle source but spokenText is a separate performance rewrite: do not copy displayText unchanged when it exceeds maximumTtsCharacters, and compress optional framing or repeated rolling-caption wording until the hard budget fits. ",
+    "Use conversational tutorial Vietnamese such as 'mình bấm Run' when it fits the source meaning. Avoid empty framing such as 'thì chúng ta sẽ tiến hành', 'trong video hôm nay', 'trong video ngày hôm nay', 'ok thì', or 'nào bây giờ thì' unless those words carry meaning in that subtitle. ",
     "spokenText must stay between 45% and 180% of displayText after whitespace is removed; do not replace a sentence with an over-short summary. ",
     "Each segment's ttsText is the timing reference for how Azure pronounces its source text, especially digits and IP addresses. Budget the same digit-by-digit pronunciation for numeric and IP tokens in spokenText, but never copy ttsText into displayText or spokenText. ",
     "Make spokenText naturally speakable within targetDurationMs. Every mode must fit the hard maximumTtsCharacters budget first; sync is strictest, balanced preserves delivery only within that budget, and natural adds expressive phrasing only after the budget is satisfied. Never trade a hard timing budget for naturalness. ",
@@ -98,6 +99,7 @@ const SPEECH_REVISION_SYSTEM_INSTRUCTION: &str = concat!(
     "timing.maximumDurationMs, requiredReductionPercent, and maximumTtsCharacters are hard limits calculated below the permitted 1.13x final stretch so one concise candidate has acoustic headroom. Candidate 1 is mandatory: its normalized Azure text must be strictly shorter than plan.ttsText and no longer than maximumTtsCharacters. Count text characters, not words, before returning it. When finalRevision is true, this is the last attempt: preserve IPs, URLs, numbers, code, and named technical terms verbatim, but remove only optional framing words until the limit is realistic. ",
     "timing.maximumWords is an additional hard limit derived from the selected voice's measured speaking rate. Count whitespace-separated words and never exceed it; character count alone is not sufficient. ",
     "spokenText must stay between 45% and 180% of displayText after whitespace is removed; preserve a complete sentence rather than returning an over-short summary. ",
+    "Use conversational tutorial Vietnamese such as 'mình bấm Run' when it fits the source meaning. Avoid empty framing such as 'thì chúng ta sẽ tiến hành', 'trong video hôm nay', 'trong video ngày hôm nay', 'ok thì', or 'nào bây giờ thì' unless those words carry meaning in that subtitle. ",
     "Delivery must be neutral, serious, reflective, or question. ",
     "Do not add fillers, facts, or pauses merely to occupy time. Use at most two non-adjacent emphasis phrases and two semantic pauses. When a segment has a salient technical term, action, warning, contrast, or conclusion, keep one clear or strong emphasis if its exact phrase remains unchanged; otherwise use []. Preserve every valid semantic anchor mapping from the input unless its exact phrase remains unchanged. ",
     "Before returning, copy every emphasis.text character-for-character as one contiguous substring of spokenText; it must occur exactly once. Never paraphrase, shorten, join separated words, or normalize punctuation in emphasis.text. If no unique exact phrase is suitable, return emphasis as []. Pauses must be 120-800 ms. Use only an allowed style, otherwise null. ",
@@ -112,6 +114,7 @@ const SPEECH_BATCH_REVISION_SYSTEM_INSTRUCTION: &str = concat!(
     "Count the locally speakable characters before returning every revision; an over-budget candidate is invalid even if its wording sounds natural. ",
     "Return exactly one candidate for every input index in the same index-addressed map; never omit an index because it is difficult. ",
     "If a sentence is already concise, remove only optional framing or repeated rolling-caption wording while preserving a complete thought. ",
+    "Use conversational tutorial Vietnamese such as 'mình bấm Run' when it fits the source meaning. Avoid empty framing such as 'thì chúng ta sẽ tiến hành', 'trong video hôm nay', 'trong video ngày hôm nay', 'ok thì', or 'nào bây giờ thì' unless those words carry meaning in that subtitle. ",
     "Preserve IPs, URLs, numbers, code, and named technical terms verbatim; remove optional framing words first. ",
     "Do not add facts, fillers, or pauses. Keep one clear or strong emphasis for the most important technical term, action, warning, contrast, or conclusion when its exact phrase is preserved; use [] when no safe emphasis exists. ",
     "Every emphasis phrase must be one exact contiguous substring of its own spokenText and occur once. ",
@@ -224,6 +227,7 @@ pub async fn create_speech_plans(
     mode: NaturalMode,
     allowed_styles: &[String],
     timeline: Option<&SourceTimeline>,
+    calibrated_chars_per_second: Option<f64>,
 ) -> Result<SpeechPlanDocument> {
     let source = parse_srt(input)?;
     if source.is_empty() {
@@ -246,6 +250,7 @@ pub async fn create_speech_plans(
                 mode,
                 allowed_styles,
                 timeline,
+                calibrated_chars_per_second,
             )
             .await?,
         );
@@ -912,6 +917,7 @@ fn parse_revised_speech_plans(
     let mut candidates = Vec::new();
     for mut revised in revised.plans {
         revised.repair_model_spoken_length();
+        revised.compact_optional_framing();
         revised.repair_model_emphasis();
         restore_revision_anchors(plan, &mut revised);
         if !revision_anchors_valid(plan, &revised) {
@@ -986,6 +992,7 @@ fn parse_revised_speech_plans_batch(
             continue;
         };
         plan.repair_model_spoken_length();
+        plan.compact_optional_framing();
         plan.repair_model_emphasis();
         restore_revision_anchors(&request.plan, &mut plan);
         if !revision_anchors_valid(&request.plan, &plan) {
@@ -1089,6 +1096,7 @@ async fn plan_batch(
     mode: NaturalMode,
     allowed_styles: &[String],
     timeline: Option<&SourceTimeline>,
+    calibrated_chars_per_second: Option<f64>,
 ) -> Result<Vec<SpeechPlan>> {
     let input = batch
         .iter()
@@ -1131,11 +1139,13 @@ async fn plan_batch(
                 target_duration_ms,
                 maximum_tts_characters: maximum_tts_characters_at_rate(
                     target_duration_ms,
-                    if anchor_candidates.is_empty() {
-                        11.0
-                    } else {
-                        13.0
-                    },
+                    calibrated_chars_per_second
+                        .filter(|rate| rate.is_finite() && *rate > 0.0)
+                        .unwrap_or(if anchor_candidates.is_empty() {
+                            11.0
+                        } else {
+                            13.0
+                        }),
                 ),
                 previous_text: position
                     .checked_sub(1)
@@ -1243,6 +1253,7 @@ fn parse_plan_response(
                 })
                 .unwrap_or(target_duration_ms(source_segment)?);
             plan.repair_model_spoken_length();
+            plan.compact_optional_framing();
             plan.repair_model_emphasis();
             plan.validate(allowed_styles)?;
             if let Some(timeline) = timeline {
@@ -1409,9 +1420,9 @@ pub fn load_env_keys(root: &Path) -> Vec<String> {
 mod tests {
     use super::{
         deterministic_action_phrase, infer_semantic_anchor_phrase, insert_anchor_phrase,
-        maximum_tts_characters, next_gemini_key, parse_keys, parse_plan_response,
-        parse_revised_speech_plans, relative_phrase_position, restore_revision_anchors,
-        revision_input, revision_word_budget,
+        maximum_tts_characters, maximum_tts_characters_at_rate, next_gemini_key, parse_keys,
+        parse_plan_response, parse_revised_speech_plans, relative_phrase_position,
+        restore_revision_anchors, revision_input, revision_word_budget,
     };
     use crate::{
         speech_plan::{SemanticAnchor, SpeechPlan},
@@ -1439,6 +1450,11 @@ mod tests {
         assert_eq!(maximum_tts_characters(2_000), 26);
         assert_eq!(maximum_tts_characters(20_000), 260);
         assert_eq!(maximum_tts_characters(100), 24);
+    }
+
+    #[test]
+    fn derives_the_planning_budget_from_a_calibrated_character_rate() {
+        assert_eq!(maximum_tts_characters_at_rate(4_000, 9.0), 36);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use crate::sync_timeline::{
 use crate::translate_gemini::{create_speech_plans, translate_srt};
 use crate::tts_azure::{
     generate_all_tts, generate_all_tts_for_aligned_utterances, generate_all_tts_for_speech_plans,
-    generate_all_tts_for_unanchored_utterances,
+    generate_all_tts_for_unanchored_utterances, load_duration_calibration_chars_per_second,
 };
 use crate::tts_cache::tts_cache_key;
 use crate::utterance::{
@@ -744,6 +744,8 @@ async fn create_dub_for_video(
             .into_iter()
             .collect();
         let voice = AzureVoice::from_short_name(azure.voice.clone(), styles);
+        let calibrated_chars_per_second =
+            load_duration_calibration_chars_per_second(&tts_dir, &voice);
         let source_timeline = match source_timeline_for_video(
             config, video, &input_srt, &clean_srt, &job_dir, options, progress, &label,
         )
@@ -804,8 +806,8 @@ async fn create_dub_for_video(
         let mut source_for_cache = fs::read(&plan_input_srt)?;
         source_for_cache.extend_from_slice(&source_timeline_bytes);
         let cache_key = tts_cache_key(
-            // v22 invalidates plans produced before the stronger semantic emphasis policy.
-            "gemini-speech-plan-v22",
+            // v23 invalidates plans before conversational-register and framing compaction.
+            "gemini-speech-plan-v23",
             // Keep this comment adjacent to the version so future prompt/input changes bump it.
             &format!("{mode:?}:{}", options.translate),
             &format!("{}|{}", voice.short_name, voice.styles.join("|")),
@@ -879,6 +881,7 @@ async fn create_dub_for_video(
                 mode,
                 &voice.styles,
                 Some(&source_timeline),
+                calibrated_chars_per_second,
             )
             .await;
             let plans = match plans_result {
@@ -1600,6 +1603,7 @@ mod tests {
             NaturalMode::Balanced,
             &[],
             Some(&source_timeline),
+            None,
         )
         .await?;
         let azure = crate::config::AzureConfig::new("fake-azure", "southeastasia")?

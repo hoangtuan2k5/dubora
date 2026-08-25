@@ -309,6 +309,86 @@ impl SpeechPlan {
         }
     }
 
+    /// Remove only exact empty tutorial framing while keeping the display text unchanged.
+    /// Prefixes and suffixes are compacted only when the spoken/display ratio remains valid.
+    pub(crate) fn compact_optional_framing(&mut self) {
+        const PREFIXES: [&str; 20] = [
+            "Sau đó, bạn có thể ",
+            "sau đó, bạn có thể ",
+            "Bạn có thể ",
+            "bạn có thể ",
+            "Bạn hãy ",
+            "bạn hãy ",
+            "Giờ bạn có thể ",
+            "giờ bạn có thể ",
+            "Các bạn có thể ",
+            "các bạn có thể ",
+            "Chúng ta sẽ ",
+            "chúng ta sẽ ",
+            "Thì chúng ta sẽ ",
+            "thì chúng ta sẽ ",
+            "Trong video hôm nay, ",
+            "trong video hôm nay, ",
+            "Trong video này, ",
+            "trong video này, ",
+            "Thì chúng ta sẽ tiến hành ",
+            "thì chúng ta sẽ tiến hành ",
+        ];
+        const SUFFIXES: [&str; 6] = [
+            " trong video hôm nay",
+            " trong video ngày hôm nay",
+            " trong video này",
+            ", trong video hôm nay",
+            ", trong video ngày hôm nay",
+            ", trong video này",
+        ];
+
+        let original = self.spoken_text.clone();
+        for prefix in PREFIXES {
+            if let Some(candidate) = self.spoken_text.strip_prefix(prefix)
+                && self.accepts_compacted_spoken_text(candidate)
+                && self.compacted_text_keeps_anchors(candidate)
+            {
+                self.spoken_text = candidate.trim_start().to_owned();
+                break;
+            }
+        }
+        for suffix in SUFFIXES {
+            let candidate = self
+                .spoken_text
+                .strip_suffix(suffix)
+                .map(str::to_owned)
+                .or_else(|| {
+                    self.spoken_text
+                        .strip_suffix('.')
+                        .and_then(|text| text.strip_suffix(suffix))
+                        .map(|text| format!("{text}."))
+                });
+            if let Some(candidate) = candidate
+                && self.accepts_compacted_spoken_text(&candidate)
+                && self.compacted_text_keeps_anchors(&candidate)
+            {
+                self.spoken_text = candidate.trim_end().to_owned();
+                break;
+            }
+        }
+        if self.spoken_text != original {
+            self.emphasis.clear();
+            self.pauses.clear();
+        }
+    }
+
+    fn accepts_compacted_spoken_text(&self, candidate: &str) -> bool {
+        !candidate.trim().is_empty()
+            && validate_spoken_length(self.index, &self.display_text, candidate).is_ok()
+    }
+
+    fn compacted_text_keeps_anchors(&self, candidate: &str) -> bool {
+        self.semantic_anchors
+            .iter()
+            .all(|anchor| unique_phrase_position(candidate, &anchor.spoken_phrase).is_some())
+    }
+
     /// Validate the structured planner's source-anchor mappings after text normalization.
     pub fn validate_semantic_anchors(
         &self,
@@ -600,5 +680,34 @@ mod tests {
         assert_eq!(plan.spoken_text, "nhấn Finish để tạo nó.");
         assert!(plan.emphasis.is_empty());
         assert!(plan.pauses.is_empty());
+    }
+
+    #[test]
+    fn compacts_caddy_suffix_but_does_not_treat_chung_ta_se_as_a_prefix() {
+        let mut plan = SpeechPlan::plain(23, "mà chúng ta sẽ tìm hiểu trong video hôm nay.", 4_000);
+        plan.compact_optional_framing();
+        assert_eq!(plan.spoken_text, "mà chúng ta sẽ tìm hiểu.");
+    }
+
+    #[test]
+    fn skips_framing_strip_when_the_candidate_is_empty_or_too_short() {
+        let mut empty = SpeechPlan::plain(24, "Chúng ta sẽ ", 2_000);
+        empty.compact_optional_framing();
+        assert_eq!(empty.spoken_text, "Chúng ta sẽ ");
+
+        let mut short = SpeechPlan::plain(25, "Chúng ta sẽ biết.", 2_000);
+        short.compact_optional_framing();
+        assert_eq!(short.spoken_text, "Chúng ta sẽ biết.");
+    }
+
+    #[test]
+    fn optional_framing_does_not_remove_an_anchor_phrase() {
+        let mut plan = SpeechPlan::plain(26, "Bạn có thể nhấn Run để chạy.", 2_000);
+        plan.semantic_anchors = vec![SemanticAnchor {
+            anchor_id: "p-26-action-1".to_owned(),
+            spoken_phrase: "Bạn có thể".to_owned(),
+        }];
+        plan.compact_optional_framing();
+        assert_eq!(plan.spoken_text, "Bạn có thể nhấn Run để chạy.");
     }
 }
