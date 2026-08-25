@@ -9,6 +9,7 @@ pub mod ffmpeg;
 pub mod metrics;
 pub mod orchestrator;
 pub mod paths;
+pub mod pause_fit;
 pub mod progress;
 pub mod source_transcription;
 pub mod speech_plan;
