@@ -13,6 +13,118 @@ use crate::sync_timeline::{SourceTimeline, SyncLayout};
 use crate::tts_cache::has_matching_tts_cache_key;
 use crate::utterance::{ManifestStatus, RenderManifest};
 
+const JOIN_FADE_MS: u32 = 30;
+const PAD_ONLY_TOLERANCE_MS: u32 = 26;
+// Rollback switch: DUBORA_INTERNAL_JOIN_FADES=0 restores the pre-PR4 clip joins.
+const JOIN_FADES_ENV: &str = "DUBORA_INTERNAL_JOIN_FADES";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PadClamp {
+    available_s: f64,
+    speech_end_s: Option<f64>,
+    atrim_duration_s: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrimMode {
+    Manifest,
+    Always,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EntryFilterSpec {
+    tempo: f64,
+    rendered_audio_ms: u32,
+    available_ms: u32,
+    actual_ms: u32,
+    speech_end_ms: Option<u32>,
+    delay_ms: u64,
+    trim_mode: TrimMode,
+}
+
+fn join_fades_enabled() -> bool {
+    std::env::var(JOIN_FADES_ENV)
+        .map(|value| value.trim() != "0")
+        .unwrap_or(true)
+}
+
+fn ceil_stretched_ms(duration_ms: u32, tempo: f64) -> u32 {
+    (f64::from(duration_ms) / tempo.max(f64::MIN_POSITIVE)).ceil() as u32
+}
+
+fn pad_clamp(
+    available_ms: u32,
+    actual_ms: u32,
+    tempo: f64,
+    speech_end_ms: Option<u32>,
+) -> Result<PadClamp> {
+    let probed_ms = ceil_stretched_ms(actual_ms, tempo);
+    let speech_end_stretched_ms = speech_end_ms.map(|value| ceil_stretched_ms(value, tempo));
+    let atrim_duration_s = if probed_ms <= available_ms {
+        None
+    } else if speech_end_ms.is_none() {
+        Some(f64::from(available_ms) / 1_000.0)
+    } else if probed_ms.saturating_sub(available_ms) <= PAD_ONLY_TOLERANCE_MS
+        && speech_end_stretched_ms.is_some_and(|value| value <= available_ms)
+    {
+        Some(f64::from(available_ms) / 1_000.0)
+    } else {
+        bail!(
+            "Audio would trim speech: probed={}ms available={}ms speechEnd={:?}ms",
+            probed_ms,
+            available_ms,
+            speech_end_stretched_ms
+        )
+    };
+    Ok(PadClamp {
+        available_s: f64::from(available_ms) / 1_000.0,
+        speech_end_s: speech_end_stretched_ms.map(|value| f64::from(value) / 1_000.0),
+        atrim_duration_s,
+    })
+}
+
+fn entry_filter_chain(spec: EntryFilterSpec, fades_enabled: bool) -> Result<String> {
+    let clamp = match spec.trim_mode {
+        TrimMode::Manifest => Some(pad_clamp(
+            spec.available_ms,
+            spec.actual_ms,
+            spec.tempo,
+            spec.speech_end_ms,
+        )?),
+        TrimMode::Always => None,
+    };
+    let available_s = clamp.as_ref().map_or_else(
+        || f64::from(spec.available_ms) / 1_000.0,
+        |value| value.available_s,
+    );
+    let mut chain = Vec::with_capacity(6);
+    if spec.tempo > 1.0 {
+        chain.push(format!("rubberband=tempo={:.6}", spec.tempo));
+    }
+    if fades_enabled {
+        let fade_ms = JOIN_FADE_MS.min(spec.rendered_audio_ms / 2);
+        if fade_ms > 0 {
+            let fade_s = f64::from(fade_ms) / 1_000.0;
+            let fade_start_s = (f64::from(spec.rendered_audio_ms) / 1_000.0 - fade_s).max(0.0);
+            chain.push(format!("afade=t=in:st=0:d={fade_s:.3}"));
+            chain.push(format!("afade=t=out:st={fade_start_s:.3}:d={fade_s:.3}"));
+        }
+    }
+    match spec.trim_mode {
+        TrimMode::Manifest => {
+            if let Some(duration_s) = clamp.and_then(|value| value.atrim_duration_s) {
+                chain.push(format!("atrim=duration={duration_s:.3}"));
+            }
+        }
+        TrimMode::Always => chain.push(format!("atrim=duration={available_s:.3}")),
+    }
+    chain.extend([
+        "asetpts=PTS-STARTPTS".to_owned(),
+        format!("adelay={}:all=1", spec.delay_ms),
+    ]);
+    Ok(chain.join(","))
+}
+
 pub fn build_voiceover_track(
     ffmpeg: &FfmpegPaths,
     input_srt: &Path,
@@ -72,15 +184,19 @@ pub fn build_voiceover_track_from_manifest(
         bail!("Manifest audio cache identity changed: {}", stale.id);
     }
 
+    let join_fades = join_fades_enabled();
     let mut filters = Vec::with_capacity(entries.len());
     for (position, (entry, input)) in entries.iter().zip(&inputs).enumerate() {
-        let available = f64::from(entry.end_ms.saturating_sub(entry.start_ms)) / 1_000.0;
+        let available_ms = entry.end_ms.saturating_sub(entry.start_ms);
         let actual_duration = ffmpeg.audio_duration(input)?;
-        let manifest_duration = f64::from(entry.measured_audio_ms) / 1_000.0;
-        if (actual_duration - manifest_duration).abs() > 0.15 {
+        let actual_ms = (actual_duration * 1_000.0).ceil() as u32;
+        let manifest_duration_ms = entry.measured_audio_ms;
+        if actual_ms.abs_diff(manifest_duration_ms) > 150 {
             bail!(
-                "Manifest audio {} duration changed after allocation ({actual_duration:.3}s vs {manifest_duration:.3}s)",
-                entry.id
+                "Manifest audio {} duration changed after allocation ({}ms vs {}ms)",
+                entry.id,
+                actual_ms,
+                manifest_duration_ms
             );
         }
         let tempo = entry.tempo;
@@ -90,29 +206,25 @@ pub fn build_voiceover_track_from_manifest(
                 entry.id
             );
         }
-        if f64::from(entry.rendered_audio_ms) / 1_000.0 > available + 0.002 {
+        if entry.rendered_audio_ms > available_ms {
             bail!(
                 "Manifest audio {} does not fit its allocated slot",
                 entry.id
             );
         }
-        if actual_duration / tempo > available + 0.002 {
-            bail!(
-                "Manifest audio {} would be truncated after the allocated tempo",
-                entry.id
-            );
-        }
-        let delay_ms = entry.start_ms;
-        let mut chain = Vec::with_capacity(4);
-        if tempo > 1.0 {
-            chain.push(format!("rubberband=tempo={tempo:.6}"));
-        }
-        chain.extend([
-            format!("atrim=duration={available:.3}"),
-            "asetpts=PTS-STARTPTS".to_owned(),
-            format!("adelay={delay_ms}:all=1"),
-        ]);
-        filters.push(format!("[{position}:a]{}[a{position}]", chain.join(",")));
+        let chain = entry_filter_chain(
+            EntryFilterSpec {
+                tempo,
+                rendered_audio_ms: entry.rendered_audio_ms,
+                available_ms,
+                actual_ms,
+                speech_end_ms: entry.speech_end_ms,
+                delay_ms: u64::from(entry.start_ms),
+                trim_mode: TrimMode::Manifest,
+            },
+            join_fades,
+        )?;
+        filters.push(format!("[{position}:a]{chain}[a{position}]"));
     }
 
     let mixed = (0..entries.len())
@@ -166,6 +278,7 @@ pub fn build_voiceover_track_with_tempo_cap(
         );
     }
 
+    let join_fades = join_fades_enabled();
     let mut filters = Vec::with_capacity(segments.len());
     let mut previous_rendered_end = None;
     for (position, (segment, mp3)) in segments.iter().zip(&inputs).enumerate() {
@@ -188,18 +301,22 @@ pub fn build_voiceover_track_with_tempo_cap(
                 segment.index
             );
         }
-        let delay_ms = (render_start * 1000.0) as u64;
-
-        let mut chain = Vec::with_capacity(4);
-        if tempo > 1.0 {
-            chain.push(format!("rubberband=tempo={tempo:.6}"));
-        }
-        chain.extend([
-            format!("atrim=duration={available:.3}"),
-            "asetpts=PTS-STARTPTS".to_owned(),
-            format!("adelay={delay_ms}:all=1"),
-        ]);
-        filters.push(format!("[{position}:a]{}[a{position}]", chain.join(",")));
+        let available_ms = (available * 1_000.0).round().max(1.0) as u32;
+        let actual_ms = (duration * 1_000.0).ceil().max(1.0) as u32;
+        let rendered_audio_ms = (duration / tempo * 1_000.0).ceil().max(1.0) as u32;
+        let chain = entry_filter_chain(
+            EntryFilterSpec {
+                tempo,
+                rendered_audio_ms,
+                available_ms,
+                actual_ms,
+                speech_end_ms: None,
+                delay_ms: (render_start * 1_000.0) as u64,
+                trim_mode: TrimMode::Always,
+            },
+            join_fades,
+        )?;
+        filters.push(format!("[{position}:a]{chain}[a{position}]"));
         previous_rendered_end = Some(render_start + (duration / tempo).min(available));
     }
 
@@ -229,4 +346,89 @@ pub fn build_voiceover_track_with_tempo_cap(
     ffmpeg
         .checked(&mut command, "build voiceover")
         .with_context(|| format!("Failed to create {}", output_audio.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_a_small_encoded_pad_tail_without_cutting_speech() {
+        let clamp = pad_clamp(2_000, 2_020, 1.0, Some(1_980)).unwrap();
+        assert_eq!(clamp.available_s, 2.0);
+        assert_eq!(clamp.speech_end_s, Some(1.98));
+        assert_eq!(clamp.atrim_duration_s, Some(2.0));
+        let chain = entry_filter_chain(
+            EntryFilterSpec {
+                tempo: 1.0,
+                rendered_audio_ms: 2_000,
+                available_ms: 2_000,
+                actual_ms: 2_020,
+                speech_end_ms: Some(1_980),
+                delay_ms: 0,
+                trim_mode: TrimMode::Manifest,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(chain.contains("atrim=duration=2.000"));
+        assert!(!chain.contains("acrossfade"));
+    }
+
+    #[test]
+    fn fades_are_inside_the_clip_and_use_st_not_ss() {
+        let chain = entry_filter_chain(
+            EntryFilterSpec {
+                tempo: 1.0,
+                rendered_audio_ms: 2_000,
+                available_ms: 2_000,
+                actual_ms: 2_000,
+                speech_end_ms: Some(1_980),
+                delay_ms: 500,
+                trim_mode: TrimMode::Manifest,
+            },
+            true,
+        )
+        .unwrap();
+        assert!(chain.contains("afade=t=in:st=0:d=0.030"));
+        assert!(chain.contains("afade=t=out:st=1.970:d=0.030"));
+        assert!(!chain.contains("afade=t=in:ss="));
+        assert!(chain.ends_with("asetpts=PTS-STARTPTS,adelay=500:all=1"));
+    }
+
+    #[test]
+    fn missing_speech_end_keeps_the_historical_always_trim_fallback() {
+        let chain = entry_filter_chain(
+            EntryFilterSpec {
+                tempo: 1.0,
+                rendered_audio_ms: 2_000,
+                available_ms: 2_000,
+                actual_ms: 2_050,
+                speech_end_ms: None,
+                delay_ms: 0,
+                trim_mode: TrimMode::Manifest,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(chain.contains("atrim=duration=2.000"));
+    }
+
+    #[test]
+    fn unlimited_mode_keeps_always_trim_without_pad_tolerance() {
+        let chain = entry_filter_chain(
+            EntryFilterSpec {
+                tempo: 1.0,
+                rendered_audio_ms: 2_000,
+                available_ms: 2_000,
+                actual_ms: 2_050,
+                speech_end_ms: Some(1_980),
+                delay_ms: 0,
+                trim_mode: TrimMode::Always,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(chain.contains("atrim=duration=2.000"));
+    }
 }

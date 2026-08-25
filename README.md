@@ -93,6 +93,7 @@ DUBORA_SOURCE_LOCALE=en-US ./target/release/dubora --natural-voice \
 
 Natural Voice applies TailOnly encoder lead/tail recovery by default. Use
 `--no-pause-fit` or `DUBORA_INTERNAL_PAUSE_FIT=0` to restore raw TTS timing.
+Use `DUBORA_INTERNAL_JOIN_FADES=0` only to restore the pre-PR4 mixer joins.
 
 For timing-capable voices, Dubora synthesizes each source-aligned utterance once and measures the
 whole island before choosing a follow-up. A block may use at most one mutually exclusive follow-up:
