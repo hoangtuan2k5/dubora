@@ -976,6 +976,147 @@ pub fn allocation_groups(layout: &SyncLayout) -> Vec<AllocationGroup> {
     groups
 }
 
+fn allocation_tempo(measured_ms: u32, slot_ms: u32) -> f64 {
+    f64::from(measured_ms) / f64::from(slot_ms.max(1))
+}
+
+fn allocation_fits_cap(measured_ms: u32, slot_ms: u32) -> bool {
+    allocation_tempo(measured_ms, slot_ms) <= MAX_TIMING_TEMPO + f64::EPSILON
+}
+
+fn refresh_allocated_block(block: &mut AllocatedBlock, measured_ms: u32) {
+    let slot_ms = block
+        .slot_end_ms
+        .saturating_sub(block.render_start_ms)
+        .max(1);
+    let tempo = allocation_tempo(measured_ms, slot_ms).max(1.0);
+    block.predicted_audio_ms = measured_ms;
+    block.tempo = tempo;
+    block.rendered_audio_ms = (f64::from(measured_ms) / tempo).ceil() as u32;
+}
+
+/// Borrow the previous block's unused tail after TTS is measured.
+///
+/// The 250 ms preferred-start window cannot use a multi-second silent setup cue. Speech never
+/// overlaps, island bounds stay hard, and the stretch cap stays 1.13x. Blocks that already fit
+/// are left on their preferred start.
+pub fn apply_measured_spillback(
+    allocations: &mut HashMap<String, AllocatedBlock>,
+    measured_audio_ms: &HashMap<String, u32>,
+    layout: &SyncLayout,
+) {
+    apply_measured_spillback_except(allocations, measured_audio_ms, layout, &HashSet::new());
+}
+
+/// Same as [`apply_measured_spillback`], but never moves a listed current block.
+///
+/// Hard semantic bookmarks keep their measured start. Shrinking the previous unused tail does
+/// not move that previous block's start.
+pub fn apply_measured_spillback_except(
+    allocations: &mut HashMap<String, AllocatedBlock>,
+    measured_audio_ms: &HashMap<String, u32>,
+    layout: &SyncLayout,
+    skip_current_ids: &HashSet<String>,
+) {
+    for group in allocation_groups(layout) {
+        let mut ordered = group.block_ids.clone();
+        ordered.sort_by_key(|block_id| {
+            allocations
+                .get(block_id)
+                .map_or(u32::MAX, |block| block.render_start_ms)
+        });
+        for index in 1..ordered.len() {
+            let previous_id = ordered[index - 1].clone();
+            let current_id = ordered[index].clone();
+            let Some(previous_measured) = measured_audio_ms.get(&previous_id).copied() else {
+                continue;
+            };
+            let Some(current_measured) = measured_audio_ms.get(&current_id).copied() else {
+                continue;
+            };
+            if skip_current_ids.contains(&current_id) {
+                continue;
+            }
+            let (island_id, current_start, current_end, previous_start, previous_tempo) = {
+                let Some(previous) = allocations.get(&previous_id) else {
+                    continue;
+                };
+                let Some(current) = allocations.get(&current_id) else {
+                    continue;
+                };
+                if previous.island_id != current.island_id {
+                    continue;
+                }
+                (
+                    current.island_id.clone(),
+                    current.render_start_ms,
+                    current.slot_end_ms,
+                    previous.render_start_ms,
+                    previous.tempo,
+                )
+            };
+            let current_slot = current_end.saturating_sub(current_start).max(1);
+            if allocation_fits_cap(current_measured, current_slot) {
+                continue;
+            }
+            let island_start = layout
+                .islands
+                .iter()
+                .find(|island| island.id == island_id)
+                .map_or(0, |island| island.start_ms);
+            let previous_speech_end = previous_start.saturating_add(
+                (f64::from(previous_measured) / previous_tempo.max(1.0)).ceil() as u32,
+            );
+            let earliest = island_start.max(previous_speech_end);
+            if earliest >= current_start {
+                continue;
+            }
+            let min_previous_slot = (f64::from(previous_measured) / MAX_TIMING_TEMPO).ceil() as u32;
+            let earliest = earliest.max(previous_start.saturating_add(min_previous_slot.max(1)));
+            if earliest >= current_start {
+                continue;
+            }
+            let borrow_for_unity = current_measured.saturating_sub(current_slot);
+            let borrowed = borrow_for_unity.min(current_start.saturating_sub(earliest));
+            if borrowed == 0 {
+                continue;
+            }
+            let new_start = current_start - borrowed;
+            if let Some(previous) = allocations.get_mut(&previous_id)
+                && previous.slot_end_ms > new_start
+            {
+                previous.slot_end_ms = new_start;
+                refresh_allocated_block(previous, previous_measured);
+            }
+            if let Some(current) = allocations.get_mut(&current_id) {
+                current.render_start_ms = new_start;
+                refresh_allocated_block(current, current_measured);
+            }
+        }
+    }
+}
+
+pub(crate) fn group_exceeds_tempo_cap(
+    group: &AllocationGroup,
+    allocations: &HashMap<String, AllocatedBlock>,
+    measured_audio_ms: &HashMap<String, u32>,
+) -> bool {
+    group.block_ids.iter().any(|block_id| {
+        let Some(measured) = measured_audio_ms.get(block_id).copied() else {
+            return false;
+        };
+        let Some(allocation) = allocations.get(block_id) else {
+            return false;
+        };
+        !allocation_fits_cap(
+            measured,
+            allocation
+                .slot_end_ms
+                .saturating_sub(allocation.render_start_ms),
+        )
+    })
+}
+
 /// Allocate one local clock. Returned slot ends are allocated values; callers must not replace
 /// them with the next block's start. The bounded isotonic pass minimizes weighted start drift
 /// for each island, while the outer scan chooses the smallest common tempo cap that is feasible.
@@ -2604,5 +2745,128 @@ mod tests {
         assert_eq!(failed, vec!["island-1"]);
         assert_eq!(allocated[0].slot_end_ms, 100);
         assert!(allocate_blocks(&layout, &predicted, NaturalMode::Balanced).is_err());
+    }
+
+    fn spillback_layout() -> (
+        SyncLayout,
+        HashMap<String, AllocatedBlock>,
+        HashMap<String, u32>,
+    ) {
+        let layout = SyncLayout {
+            blocks: vec![
+                NarrationBlock {
+                    id: "block-15".to_owned(),
+                    start_ms: 117_051,
+                    end_ms: 124_000,
+                    preferred_start_ms: 117_051,
+                    source_segments: vec![25],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-3".to_owned(),
+                },
+                NarrationBlock {
+                    id: "block-16".to_owned(),
+                    start_ms: 124_000,
+                    end_ms: 128_879,
+                    preferred_start_ms: 124_000,
+                    source_segments: vec![26],
+                    anchor_ids: vec!["p-26-action-1".to_owned()],
+                    island_id: "island-3".to_owned(),
+                },
+            ],
+            islands: vec![SyncIsland {
+                id: "island-3".to_owned(),
+                start_ms: 113_522,
+                end_ms: 168_879,
+                block_ids: vec!["block-15".to_owned(), "block-16".to_owned()],
+                hard_boundary_before: false,
+            }],
+        };
+        let mut allocations = HashMap::new();
+        allocations.insert(
+            "block-15".to_owned(),
+            AllocatedBlock {
+                block_id: "block-15".to_owned(),
+                island_id: "island-3".to_owned(),
+                render_start_ms: 117_051,
+                slot_end_ms: 124_000,
+                predicted_audio_ms: 1_416,
+                rendered_audio_ms: 1_416,
+                tempo: 1.0,
+            },
+        );
+        allocations.insert(
+            "block-16".to_owned(),
+            AllocatedBlock {
+                block_id: "block-16".to_owned(),
+                island_id: "island-3".to_owned(),
+                render_start_ms: 124_000,
+                slot_end_ms: 128_879,
+                predicted_audio_ms: 6_696,
+                rendered_audio_ms: 4_879,
+                tempo: 1.372_412_379_585_980_8,
+            },
+        );
+        let mut measured = HashMap::new();
+        measured.insert("block-15".to_owned(), 1_416);
+        measured.insert("block-16".to_owned(), 6_696);
+        (layout, allocations, measured)
+    }
+
+    #[test]
+    fn measured_spillback_uses_the_previous_unused_tail_on_the_caddy_ip_cue() {
+        let (layout, mut allocations, measured) = spillback_layout();
+        apply_measured_spillback(&mut allocations, &measured, &layout);
+        let previous = &allocations["block-15"];
+        let current = &allocations["block-16"];
+        assert_eq!(current.render_start_ms, 122_183);
+        assert_eq!(current.slot_end_ms, 128_879);
+        assert!(current.tempo <= MAX_TIMING_TEMPO + f64::EPSILON);
+        assert!((current.tempo - 1.0).abs() < 0.001);
+        assert_eq!(previous.slot_end_ms, current.render_start_ms);
+        assert!(previous.tempo <= 1.0 + f64::EPSILON);
+        assert!(current.render_start_ms >= 117_051 + 1_416);
+        assert!(!group_exceeds_tempo_cap(
+            &allocation_groups(&layout)[0],
+            &allocations,
+            &measured
+        ));
+    }
+
+    #[test]
+    fn measured_spillback_does_not_move_a_block_that_already_fits() {
+        let (layout, mut allocations, mut measured) = spillback_layout();
+        measured.insert("block-16".to_owned(), 4_000);
+        allocations.get_mut("block-16").unwrap().tempo = 1.0;
+        allocations.get_mut("block-16").unwrap().rendered_audio_ms = 4_000;
+        allocations.get_mut("block-16").unwrap().predicted_audio_ms = 4_000;
+        apply_measured_spillback(&mut allocations, &measured, &layout);
+        assert_eq!(allocations["block-16"].render_start_ms, 124_000);
+    }
+
+    #[test]
+    fn measured_spillback_does_not_cross_an_island_boundary() {
+        let (mut layout, mut allocations, measured) = spillback_layout();
+        layout.blocks[1].island_id = "island-4".to_owned();
+        allocations.get_mut("block-16").unwrap().island_id = "island-4".to_owned();
+        layout.islands.push(SyncIsland {
+            id: "island-4".to_owned(),
+            start_ms: 124_000,
+            end_ms: 128_879,
+            block_ids: vec!["block-16".to_owned()],
+            hard_boundary_before: true,
+        });
+        layout.islands[0].block_ids = vec!["block-15".to_owned()];
+        layout.islands[0].end_ms = 124_000;
+        apply_measured_spillback(&mut allocations, &measured, &layout);
+        assert_eq!(allocations["block-16"].render_start_ms, 124_000);
+    }
+
+    #[test]
+    fn measured_spillback_skips_a_hard_anchored_current_block() {
+        let (layout, mut allocations, measured) = spillback_layout();
+        let skip = HashSet::from(["block-16".to_owned()]);
+        apply_measured_spillback_except(&mut allocations, &measured, &layout, &skip);
+        assert_eq!(allocations["block-16"].render_start_ms, 124_000);
+        assert!((allocations["block-16"].tempo - 1.372).abs() < 0.001);
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,8 @@ use crate::sync_timeline::{
     AllocatedBlock, Coupling, MAX_ANCHOR_DRIFT_MS, MAX_SOFT_BOUNDARY_DRIFT_MS, MeasuredAnchor,
     SOURCE_TIMELINE_VERSION, SourceTimeline, SyncLayout, allocate_blocks_best_effort,
     allocate_measured_group, allocate_measured_group_with_anchors, allocate_segments,
-    allocation_groups,
+    allocation_groups, apply_measured_spillback, apply_measured_spillback_except,
+    group_exceeds_tempo_cap,
 };
 use crate::translate_gemini::{
     SpeechPlanRevisionRequest, revise_speech_plan, revise_speech_plans_batch, revision_word_budget,
@@ -1083,10 +1084,17 @@ pub async fn generate_all_tts_for_unanchored_utterances(
         .into_iter()
         .map(|allocation| (allocation.block_id.clone(), allocation))
         .collect::<HashMap<_, _>>();
-    let mut review_reasons = failed_islands
-        .iter()
-        .map(|island| format!("{island}:preflight_allocation_infeasible"))
-        .collect::<Vec<_>>();
+    let mut review_reasons = Vec::new();
+    if !failed_islands.is_empty() {
+        progress.event(ProgressEvent::new(
+            Stage::Tts,
+            video,
+            format!(
+                "Preflight timing is tight for {}; measuring real speech before deciding review.",
+                failed_islands.join(", ")
+            ),
+        ));
+    }
     let mut failed_blocks = HashMap::<usize, String>::new();
     let client = Client::new();
     let mut audio = Vec::with_capacity(utterances.len());
@@ -1154,22 +1162,69 @@ pub async fn generate_all_tts_for_unanchored_utterances(
     let (measured_allocations, allocation_failures) =
         measured_continuous_allocations(layout, &audio, mode, &allocations);
     allocations = measured_allocations;
-    review_reasons.extend(allocation_failures);
+    replace_measured_allocation_failures(&mut review_reasons, allocation_failures);
 
-    let mut over_cap = Vec::new();
-    for (position, candidate) in audio.iter().enumerate() {
-        let allocation = allocations
-            .get(&candidate.utterance.block_id)
-            .expect("measured allocations cover every narration block");
-        let slot_ms = allocation
-            .slot_end_ms
-            .saturating_sub(allocation.render_start_ms)
-            .max(1);
-        if !failed_blocks.contains_key(&position)
-            && f64::from(candidate.measured_audio_ms) / f64::from(slot_ms)
-                > MAX_TIME_STRETCH_TEMPO + f64::EPSILON
-        {
-            over_cap.push(position);
+    let mut over_cap = continuous_over_cap_positions(&audio, &allocations, &failed_blocks);
+    if !over_cap.is_empty() {
+        let mut deixis_changed = false;
+        for position in over_cap.clone() {
+            if failed_blocks.contains_key(&position) {
+                continue;
+            }
+            let mut revised = audio[position].utterance.clone();
+            if !compact_utterance_onscreen_tokens(&mut revised) {
+                continue;
+            }
+            let plans = revised
+                .parts
+                .iter()
+                .map(|part| prepared_speech_plan(&part.plan))
+                .collect::<Vec<_>>();
+            let output = output_dir.join(format!("utterance_{}.mp3", revised.id));
+            match synthesize_continuous_audio(
+                &client,
+                config,
+                ffmpeg,
+                &output,
+                &render_unanchored_utterance_ssml(voice, &plans)?,
+                voice,
+                pause_fit,
+            )
+            .await
+            {
+                Ok(stats) => {
+                    audio[position] = ContinuousAudio {
+                        utterance: revised,
+                        path: stats.path,
+                        measured_audio_ms: stats.measured_audio_ms,
+                        speech_end_ms: stats.speech_end_ms,
+                    };
+                    deixis_changed = true;
+                    progress.event(ProgressEvent::new(
+                        Stage::Tts,
+                        video,
+                        format!(
+                            "HD utterance {} replaced an on-screen IP or URL with a short pointer.",
+                            audio[position].utterance.id
+                        ),
+                    ));
+                }
+                Err(error) => {
+                    let reason = format!(
+                        "utterance-{}:hd_deixis_resynthesis_failed:{error:#}",
+                        revised.id
+                    );
+                    failed_blocks.insert(position, reason.clone());
+                    review_reasons.push(reason);
+                }
+            }
+        }
+        if deixis_changed {
+            let (measured_allocations, allocation_failures) =
+                measured_continuous_allocations(layout, &audio, mode, &allocations);
+            allocations = measured_allocations;
+            replace_measured_allocation_failures(&mut review_reasons, allocation_failures);
+            over_cap = continuous_over_cap_positions(&audio, &allocations, &failed_blocks);
         }
     }
 
@@ -1261,6 +1316,9 @@ pub async fn generate_all_tts_for_unanchored_utterances(
                                 }
                             }
                         }
+                        if !changed && compact_utterance_onscreen_tokens(&mut revised) {
+                            changed = true;
+                        }
                         if !changed {
                             let reason =
                                 format!("utterance-{}:hd_concise_revision_unresolved", revised.id);
@@ -1319,7 +1377,7 @@ pub async fn generate_all_tts_for_unanchored_utterances(
         let (measured_allocations, allocation_failures) =
             measured_continuous_allocations(layout, &audio, mode, &allocations);
         allocations = measured_allocations;
-        review_reasons.extend(allocation_failures);
+        replace_measured_allocation_failures(&mut review_reasons, allocation_failures);
     }
 
     for (position, candidate) in audio.iter().enumerate() {
@@ -1438,17 +1496,59 @@ fn measured_continuous_allocations(
         })
         .collect::<HashMap<_, _>>();
     let mut allocations = base.clone();
-    let mut failures = Vec::new();
     for group in allocation_groups(layout) {
         if let Ok(values) = allocate_measured_group(layout, &group.id, &measured, mode) {
             for value in values {
                 allocations.insert(value.block_id.clone(), value);
             }
-        } else {
-            failures.push(format!("{}:measured_allocation_infeasible", group.id));
         }
     }
+    apply_measured_spillback(&mut allocations, &measured, layout);
+    let failures = allocation_groups(layout)
+        .into_iter()
+        .filter(|group| group_exceeds_tempo_cap(group, &allocations, &measured))
+        .map(|group| format!("{}:measured_allocation_infeasible", group.id))
+        .collect::<Vec<_>>();
     (allocations, failures)
+}
+
+fn continuous_over_cap_positions(
+    audio: &[ContinuousAudio],
+    allocations: &HashMap<String, AllocatedBlock>,
+    failed_blocks: &HashMap<usize, String>,
+) -> Vec<usize> {
+    audio
+        .iter()
+        .enumerate()
+        .filter(|(position, candidate)| {
+            if failed_blocks.contains_key(position) {
+                return false;
+            }
+            let Some(allocation) = allocations.get(&candidate.utterance.block_id) else {
+                return false;
+            };
+            let slot_ms = allocation
+                .slot_end_ms
+                .saturating_sub(allocation.render_start_ms)
+                .max(1);
+            f64::from(candidate.measured_audio_ms) / f64::from(slot_ms)
+                > MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+        })
+        .map(|(position, _)| position)
+        .collect()
+}
+
+fn compact_utterance_onscreen_tokens(utterance: &mut Utterance) -> bool {
+    let mut changed = false;
+    for part in &mut utterance.parts {
+        changed |= part.plan.compact_onscreen_technical_tokens();
+    }
+    changed
+}
+
+fn replace_measured_allocation_failures(review_reasons: &mut Vec<String>, failures: Vec<String>) {
+    review_reasons.retain(|reason| !reason.contains(":measured_allocation_infeasible"));
+    review_reasons.extend(failures);
 }
 
 /// Generate grouped utterances for voices that expose reliable Azure timing metadata.
@@ -1741,7 +1841,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
                     .map(|candidate| (block_id.clone(), candidate.measured_audio_ms))
             })
             .collect::<HashMap<_, _>>();
-        let duration_feasible = complete
+        let duration_allocated = complete
             && match allocate_measured_group(layout, &group.id, &measured, mode) {
                 Ok(values) => {
                     for value in &values {
@@ -1766,7 +1866,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
                     false
                 }
             };
-        if duration_feasible {
+        if duration_allocated {
             match allocate_measured_group_with_anchors(
                 layout,
                 &group.id,
@@ -1785,6 +1885,14 @@ pub async fn generate_all_tts_for_aligned_utterances(
                 )),
             }
         }
+        apply_measured_spillback_except(
+            &mut render_allocations,
+            &measured,
+            layout,
+            &hard_anchored_block_ids(&measured_anchor_map),
+        );
+        let duration_feasible =
+            complete && !group_exceeds_tempo_cap(&group, &render_allocations, &measured);
 
         for block_id in block_ids {
             let Some(base) = pending_by_block.remove(block_id) else {
@@ -2124,6 +2232,9 @@ pub async fn generate_all_tts_for_aligned_utterances(
                 changed = true;
             }
         }
+        if !changed {
+            changed = compact_utterance_onscreen_tokens(&mut revised_utterance);
+        }
         let mut revision_applied = false;
         if changed {
             let candidate_path = revision_candidate_path(
@@ -2166,6 +2277,43 @@ pub async fn generate_all_tts_for_aligned_utterances(
                             base.utterance.id
                         ),
                     ));
+                }
+            }
+        }
+        if !revision_applied {
+            let mut deixis_utterance = base.utterance.clone();
+            if compact_utterance_onscreen_tokens(&mut deixis_utterance) {
+                let candidate_path = revision_candidate_path(
+                    &output_dir.join(format!("utterance_{}.mp3", base.utterance.id)),
+                    30_001,
+                );
+                match synthesize_revised_utterance(
+                    config,
+                    ffmpeg,
+                    voice,
+                    deixis_utterance,
+                    timeline,
+                    &candidate_path,
+                    0,
+                    &[],
+                    pause_fit,
+                )
+                .await
+                {
+                    Ok(revision) if revision.measured_audio_ms < base.measured_audio_ms => {
+                        base = revision;
+                        revision_applied = true;
+                        progress.event(ProgressEvent::new(
+                            Stage::Tts,
+                            video,
+                            format!(
+                                "HD-aligned utterance {} replaced an on-screen path, IP, or URL with a short pointer.",
+                                base.utterance.id
+                            ),
+                        ));
+                    }
+                    Ok(_) => remove_audio_artifacts(&candidate_path),
+                    Err(_) => remove_audio_artifacts(&candidate_path),
                 }
             }
         }
@@ -2339,16 +2487,13 @@ fn finalize_measured_schedule(
         }
         // Duration feasibility is authoritative for a group. Display-boundary anchors are soft
         // objectives and must not turn an otherwise safe schedule into reviewRequired; only a
-        // hard semantic anchor conflict remains a final allocation failure.
-        let duration_values = match allocate_measured_group(layout, &group.id, &measured, mode) {
-            Ok(values) => values,
-            Err(_) => {
-                failed_groups.push(group.id);
-                continue;
+        // hard semantic anchor conflict remains a final allocation failure. If the 250 ms
+        // preferred-start window cannot fit measured audio, spillback may still use the previous
+        // block's unused tail.
+        if let Ok(values) = allocate_measured_group(layout, &group.id, &measured, mode) {
+            for value in values {
+                allocations.insert(value.block_id.clone(), value);
             }
-        };
-        for value in duration_values {
-            allocations.insert(value.block_id.clone(), value);
         }
         match allocate_measured_group_with_anchors(
             layout,
@@ -2362,12 +2507,14 @@ fn finalize_measured_schedule(
                     allocations.insert(value.block_id.clone(), value);
                 }
             }
-            Err(_) if group_has_hard_measured_anchor(&group.block_ids, measured_anchors) => {
-                failed_groups.push(group.id);
-                continue;
-            }
             Err(_) => {}
         }
+        apply_measured_spillback_except(
+            allocations,
+            &measured,
+            layout,
+            &hard_anchored_block_ids(measured_anchors),
+        );
         for entry in entries.iter_mut() {
             let Some(block) = layout
                 .blocks
@@ -2388,21 +2535,25 @@ fn finalize_measured_schedule(
             entry.tempo = tempo;
             entry.rendered_audio_ms = rendered;
         }
+        if group_exceeds_tempo_cap(&group, allocations, &measured) {
+            failed_groups.push(group.id);
+        }
     }
     failed_groups
 }
 
-fn group_has_hard_measured_anchor(
-    block_ids: &[String],
+fn hard_anchored_block_ids(
     measured_anchors: &HashMap<String, Vec<MeasuredAnchor>>,
-) -> bool {
-    block_ids.iter().any(|block_id| {
-        measured_anchors.get(block_id).is_some_and(|anchors| {
+) -> HashSet<String> {
+    measured_anchors
+        .iter()
+        .filter(|(_, anchors)| {
             anchors
                 .iter()
                 .any(|anchor| anchor.coupling == Coupling::Anchored)
         })
-    })
+        .map(|(block_id, _)| block_id.clone())
+        .collect()
 }
 
 fn fit_tempo_to_slot(measured_audio_ms: u32, slot_ms: u32) -> (f64, u32) {

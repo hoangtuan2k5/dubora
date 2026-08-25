@@ -1,6 +1,8 @@
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 pub const SPEECH_PLAN_VERSION: u8 = 2;
@@ -378,6 +380,26 @@ impl SpeechPlan {
         }
     }
 
+    /// Replace on-screen IPs, URLs, and file paths with a short pointer when the line is too long.
+    ///
+    /// Display text stays unchanged so the subtitle still shows the number. Action phrases such
+    /// as "nhấn Enter" must remain unique substrings.
+    pub(crate) fn compact_onscreen_technical_tokens(&mut self) -> bool {
+        let candidate = replace_onscreen_technical_tokens(&self.spoken_text);
+        if candidate == self.spoken_text
+            || !self.accepts_compacted_spoken_text(&candidate)
+            || !self.compacted_text_keeps_anchors(&candidate)
+        {
+            return false;
+        }
+        self.spoken_text = candidate;
+        self.emphasis
+            .retain(|item| unique_phrase_position(&self.spoken_text, &item.text).is_some());
+        self.pauses
+            .retain(|pause| unique_phrase_position(&self.spoken_text, &pause.after).is_some());
+        true
+    }
+
     fn accepts_compacted_spoken_text(&self, candidate: &str) -> bool {
         !candidate.trim().is_empty()
             && validate_spoken_length(self.index, &self.display_text, candidate).is_ok()
@@ -564,6 +586,73 @@ fn words(text: &str) -> HashSet<String> {
         .collect()
 }
 
+fn replace_onscreen_technical_tokens(text: &str) -> String {
+    static URL: OnceLock<Regex> = OnceLock::new();
+    static IP: OnceLock<Regex> = OnceLock::new();
+    let with_urls = URL
+        .get_or_init(|| {
+            Regex::new(r"(?i)https?://[^\s,;]+|www\.[^\s,;]+").expect("URL deixis regex")
+        })
+        .replace_all(text, |captures: &regex::Captures<'_>| {
+            let start = captures.get(0).expect("URL match").start();
+            url_pointer(&text[..start])
+        });
+    let with_urls = with_urls.into_owned();
+    let with_ips = IP
+        .get_or_init(|| {
+            Regex::new(r"(?i)(?:[0-9a-f.]*:){2,}[0-9a-f.]*|\b(?:\d{1,3}\.){3}\d{1,3}\b")
+                .expect("IP deixis regex")
+        })
+        .replace_all(&with_urls, |captures: &regex::Captures<'_>| {
+            let start = captures.get(0).expect("IP match").start();
+            ip_pointer(&with_urls[..start])
+        });
+    let with_ips = with_ips.into_owned();
+    static PATH: OnceLock<Regex> = OnceLock::new();
+    let with_paths = PATH
+        .get_or_init(|| {
+            Regex::new(r"/(?:[A-Za-z0-9._-]+/){1,}[A-Za-z0-9._-]+").expect("path deixis regex")
+        })
+        .replace_all(&with_ips, |captures: &regex::Captures<'_>| {
+            let start = captures.get(0).expect("path match").start();
+            path_pointer(&with_ips[..start])
+        });
+    with_paths.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn ip_pointer(before: &str) -> &'static str {
+    let trimmed = before.trim_end();
+    if trimmed.ends_with("IP") || trimmed.ends_with("ip") {
+        "này"
+    } else {
+        "địa chỉ IP này"
+    }
+}
+
+fn url_pointer(before: &str) -> &'static str {
+    let trimmed = before.trim_end().to_ascii_lowercase();
+    if trimmed.ends_with("url") || trimmed.ends_with("đường dẫn") {
+        "này"
+    } else {
+        "đường dẫn trên màn hình"
+    }
+}
+
+fn path_pointer(before: &str) -> &'static str {
+    let trimmed = before.trim_end().to_ascii_lowercase();
+    if trimmed.ends_with("thư mục")
+        || trimmed.ends_with("thu muc")
+        || trimmed.ends_with("đường dẫn")
+        || trimmed.ends_with("duong dan")
+        || trimmed.ends_with("file")
+        || trimmed.ends_with("folder")
+    {
+        "này"
+    } else {
+        "thư mục trên màn hình"
+    }
+}
+
 pub(crate) fn unique_phrase_position(text: &str, phrase: &str) -> Option<usize> {
     let mut positions = text.match_indices(phrase).filter_map(|(position, _)| {
         let before = text[..position].chars().next_back();
@@ -709,5 +798,58 @@ mod tests {
         }];
         plan.compact_optional_framing();
         assert_eq!(plan.spoken_text, "Bạn có thể nhấn Run để chạy.");
+    }
+
+    #[test]
+    fn compact_onscreen_ip_keeps_the_action_anchor() {
+        let mut plan = SpeechPlan::plain(
+            26,
+            "và truy cập vào địa chỉ IP 143.198.135.219, nhấn Enter.",
+            4_799,
+        );
+        plan.semantic_anchors = vec![SemanticAnchor {
+            anchor_id: "p-26-action-1".to_owned(),
+            spoken_phrase: "nhấn Enter".to_owned(),
+        }];
+        assert!(plan.compact_onscreen_technical_tokens());
+        assert_eq!(
+            plan.spoken_text,
+            "và truy cập vào địa chỉ IP này, nhấn Enter."
+        );
+        assert_eq!(
+            plan.display_text,
+            "và truy cập vào địa chỉ IP 143.198.135.219, nhấn Enter."
+        );
+        assert!(unique_phrase_position(&plan.spoken_text, "nhấn Enter").is_some());
+    }
+
+    #[test]
+    fn compact_onscreen_url_uses_a_short_pointer() {
+        let mut plan = SpeechPlan::plain(8, "Mở https://caddyserver.com/docs ngay.", 3_000);
+        assert!(plan.compact_onscreen_technical_tokens());
+        assert_eq!(plan.spoken_text, "Mở đường dẫn trên màn hình ngay.");
+        assert_eq!(plan.display_text, "Mở https://caddyserver.com/docs ngay.");
+    }
+
+    #[test]
+    fn compact_onscreen_tokens_leaves_version_numbers_alone() {
+        let mut plan = SpeechPlan::plain(9, "Caddy phiên bản 2.0 vẫn chạy.", 2_000);
+        assert!(!plan.compact_onscreen_technical_tokens());
+        assert_eq!(plan.spoken_text, "Caddy phiên bản 2.0 vẫn chạy.");
+    }
+
+    #[test]
+    fn compact_onscreen_unix_path_uses_a_short_pointer() {
+        let mut plan = SpeechPlan::plain(
+            37,
+            "Mình có thể đặt file website ở /var/www/html, trước hết xem qua Caddyfile đã.",
+            5_352,
+        );
+        assert!(plan.compact_onscreen_technical_tokens());
+        assert_eq!(
+            plan.spoken_text,
+            "Mình có thể đặt file website ở thư mục trên màn hình, trước hết xem qua Caddyfile đã."
+        );
+        assert!(plan.display_text.contains("/var/www/html"));
     }
 }
