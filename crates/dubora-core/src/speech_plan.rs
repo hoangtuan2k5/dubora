@@ -303,8 +303,12 @@ impl SpeechPlan {
                     unique_phrase_position(&candidate, &anchor.spoken_phrase).is_some()
                 }) {
                     self.spoken_text = candidate;
-                    self.emphasis.clear();
-                    self.pauses.clear();
+                    self.emphasis.retain(|item| {
+                        unique_phrase_position(&self.spoken_text, &item.text).is_some()
+                    });
+                    self.pauses.retain(|pause| {
+                        unique_phrase_position(&self.spoken_text, &pause.after).is_some()
+                    });
                 }
                 break;
             }
@@ -375,8 +379,10 @@ impl SpeechPlan {
             }
         }
         if self.spoken_text != original {
-            self.emphasis.clear();
-            self.pauses.clear();
+            self.emphasis
+                .retain(|item| unique_phrase_position(&self.spoken_text, &item.text).is_some());
+            self.pauses
+                .retain(|pause| unique_phrase_position(&self.spoken_text, &pause.after).is_some());
         }
     }
 
@@ -798,6 +804,18 @@ mod tests {
         }];
         plan.compact_optional_framing();
         assert_eq!(plan.spoken_text, "Bạn có thể nhấn Run để chạy.");
+    }
+
+    #[test]
+    fn compact_optional_framing_keeps_emphasis_when_the_phrase_survives() {
+        let mut plan = SpeechPlan::plain(23, "mà chúng ta sẽ tìm hiểu trong video hôm nay.", 4_000);
+        plan.emphasis = vec![Emphasis {
+            text: "tìm hiểu".to_owned(),
+            level: EmphasisLevel::Strong,
+        }];
+        plan.compact_optional_framing();
+        assert_eq!(plan.spoken_text, "mà chúng ta sẽ tìm hiểu.");
+        assert_eq!(plan.emphasis[0].text, "tìm hiểu");
     }
 
     #[test]

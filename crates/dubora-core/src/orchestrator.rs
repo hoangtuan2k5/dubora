@@ -807,7 +807,7 @@ async fn create_dub_for_video(
         source_for_cache.extend_from_slice(&source_timeline_bytes);
         let cache_key = tts_cache_key(
             // v23 invalidates plans before conversational-register and framing compaction.
-            "gemini-speech-plan-v23",
+            "gemini-speech-plan-v24",
             // Keep this comment adjacent to the version so future prompt/input changes bump it.
             &format!("{mode:?}:{}", options.translate),
             &format!("{}|{}", voice.short_name, voice.styles.join("|")),

@@ -992,7 +992,7 @@ fn refresh_allocated_block(block: &mut AllocatedBlock, measured_ms: u32) {
     let tempo = allocation_tempo(measured_ms, slot_ms).max(1.0);
     block.predicted_audio_ms = measured_ms;
     block.tempo = tempo;
-    block.rendered_audio_ms = (f64::from(measured_ms) / tempo).ceil() as u32;
+    block.rendered_audio_ms = ((f64::from(measured_ms) / tempo).ceil() as u32).min(slot_ms);
 }
 
 /// Borrow the previous block's unused tail after TTS is measured.

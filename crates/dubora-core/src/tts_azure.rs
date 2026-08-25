@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 use crate::azure_timing::{TimingEvent, TimingEventKind, synthesize_ssml_with_timing};
-use crate::azure_voices::{AzureVoice, CapabilityState};
+use crate::azure_voices::{AzureVoice, CapabilityState, VoiceModelFamily};
 use crate::config::AzureConfig;
 #[cfg(test)]
 use crate::duration_solver::SEGMENT_HEADROOM_MS;
@@ -987,7 +987,8 @@ pub async fn generate_all_tts_for_speech_plans(
                     .get(&segment.index)
                     .copied()
                     .flatten(),
-                rendered_audio_ms: (f64::from(measured_audio_ms) / tempo).ceil() as u32,
+                rendered_audio_ms: ((f64::from(measured_audio_ms) / tempo).ceil() as u32)
+                    .min(slot_ms.max(1)),
                 tempo,
                 island_id: Some(allocation.island_id.clone()),
                 cache_identity: String::new(),
@@ -1439,7 +1440,8 @@ pub async fn generate_all_tts_for_unanchored_utterances(
                     .collect(),
                 measured_audio_ms: candidate.measured_audio_ms,
                 speech_end_ms: candidate.speech_end_ms,
-                rendered_audio_ms: (f64::from(candidate.measured_audio_ms) / tempo).ceil() as u32,
+                rendered_audio_ms: ((f64::from(candidate.measured_audio_ms) / tempo).ceil() as u32)
+                    .min(slot_ms),
                 tempo,
                 island_id: Some(candidate.utterance.island_id.clone()),
                 cache_identity: String::new(),
@@ -3556,7 +3558,7 @@ pub fn render_unanchored_utterance_ssml(
     let mut body = String::new();
     for (position, plan) in plans.iter().enumerate() {
         if position > 0 {
-            body.push(' ');
+            body.push_str(part_join_separator(voice));
         }
         body.push_str(&render_speech_plan_body(voice, plan, 0)?);
     }
@@ -3601,7 +3603,7 @@ pub fn render_utterance_ssml_with_semantic_anchors_and_delays(
             bail!("Utterance bookmark names must contain only letters, digits, and hyphens");
         }
         if position > 0 {
-            body.push(' ');
+            body.push_str(part_join_separator(voice));
         }
         let anchors = semantic_bookmarks
             .iter()
@@ -3679,11 +3681,25 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
     let mut pauses = Vec::new();
     let mut semantic_marks = Vec::new();
 
-    if supports_emphasis {
+    if supports_emphasis || supports_prosody {
         for item in &plan.emphasis {
             let (start, end) = phrase_span(&plan.spoken_text, &item.text)?;
             boundaries.extend([start, end]);
             emphasis.push((start, end, item.level));
+        }
+        if supports_prosody {
+            for anchor in &plan.semantic_anchors {
+                let Ok((start, end)) = phrase_span(&plan.spoken_text, &anchor.spoken_phrase) else {
+                    continue;
+                };
+                if emphasis.iter().any(|(existing_start, existing_end, _)| {
+                    start < *existing_end && end > *existing_start
+                }) {
+                    continue;
+                }
+                boundaries.extend([start, end]);
+                emphasis.push((start, end, EmphasisLevel::Strong));
+            }
         }
     }
     if supports_break {
@@ -3691,6 +3707,16 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
             let (_, end) = phrase_span(&plan.spoken_text, &pause.after)?;
             boundaries.push(end);
             pauses.push((end, pause.duration_ms));
+        }
+        for (end, duration_ms) in implicit_clause_breaks(&plan.spoken_text) {
+            if pauses
+                .iter()
+                .any(|(existing, _)| end.abs_diff(*existing) <= 2)
+            {
+                continue;
+            }
+            boundaries.push(end);
+            pauses.push((end, duration_ms));
         }
     }
     for (phrase, mark, delay) in semantic_bookmarks {
@@ -3716,7 +3742,9 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
     for boundary in boundaries {
         body.push_str(&escape_xml(&plan.spoken_text[previous..boundary]));
         for (_, _, level) in emphasis.iter().filter(|(_, end, _)| *end == boundary) {
-            body.push_str("</emphasis>");
+            if supports_emphasis {
+                body.push_str("</emphasis>");
+            }
             if supports_prosody && emphasis_prosody(*level).is_some() {
                 body.push_str("</prosody>");
             }
@@ -3734,7 +3762,9 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
             if supports_prosody && let Some(prosody) = emphasis_prosody(*level) {
                 body.push_str(prosody);
             }
-            body.push_str(&format!("<emphasis level=\"{}\">", emphasis_level(*level)));
+            if supports_emphasis {
+                body.push_str(&format!("<emphasis level=\"{}\">", emphasis_level(*level)));
+            }
         }
         previous = boundary;
     }
@@ -3752,10 +3782,67 @@ fn render_speech_plan_body_with_semantic_bookmarks_and_delays(
 }
 
 fn wrap_voice_ssml(voice: &AzureVoice, body: &str) -> String {
+    let name = escape_xml(&voice.short_name);
+    let voice_open = match voice.capabilities.model_family {
+        VoiceModelFamily::DragonHd => {
+            format!("<voice name=\"{name}\" parameters=\"enhancePronunciation=true\">")
+        }
+        _ => format!("<voice name=\"{name}\">"),
+    };
     format!(
-        "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"vi-VN\"><voice name=\"{}\">{body}</voice></speak>",
-        escape_xml(&voice.short_name)
+        "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" xml:lang=\"vi-VN\">{voice_open}{body}</voice></speak>",
     )
+}
+
+fn part_join_separator(voice: &AzureVoice) -> &'static str {
+    if voice.capabilities.semantic_break == CapabilityState::Supported {
+        "<break time=\"140ms\"/>"
+    } else {
+        " "
+    }
+}
+
+fn implicit_clause_breaks(text: &str) -> Vec<(usize, u16)> {
+    const SENTENCE_MS: u16 = 180;
+    const DASH_MS: u16 = 150;
+    const MAX_IMPLICIT: usize = 2;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut breaks = Vec::new();
+    for (index, &(offset, ch)) in chars.iter().enumerate() {
+        let previous = index
+            .checked_sub(1)
+            .and_then(|previous| chars.get(previous).map(|(_, character)| *character));
+        let next = chars.get(index + 1).map(|(_, character)| *character);
+        let end = offset + ch.len_utf8();
+        if matches!(ch, '—' | '–') {
+            breaks.push((end, DASH_MS));
+            continue;
+        }
+        let sentence_end = matches!(ch, '.' | '!' | '?' | '…');
+        if !sentence_end {
+            continue;
+        }
+        if next.is_none() {
+            continue;
+        }
+        if ch == '.'
+            && previous.is_some_and(|character| character.is_ascii_digit())
+            && next.is_some_and(|character| character.is_ascii_digit())
+        {
+            continue;
+        }
+        if previous.is_some_and(|character| {
+            character.is_alphanumeric() || matches!(character, '"' | '\'' | ')' | ']')
+        }) && next.is_some_and(char::is_whitespace)
+        {
+            breaks.push((end, SENTENCE_MS));
+        }
+        if breaks.len() == MAX_IMPLICIT {
+            break;
+        }
+    }
+    breaks.truncate(MAX_IMPLICIT);
+    breaks
 }
 
 /// Cache identity for a plan includes the exact capability-aware SSML payload.
@@ -4040,6 +4127,7 @@ mod tests {
         hd.model_family = VoiceModelFamily::DragonHd;
         hd.style = CapabilityState::Unsupported;
         hd.manual_emphasis = CapabilityState::Unsupported;
+        hd.manual_prosody = CapabilityState::Unsupported;
         let mut hd_voice = voice(hd);
         hd_voice.styles.clear();
         let mut hd_plan = plan();
@@ -4063,9 +4151,49 @@ mod tests {
         first.style = None;
         let ssml = render_unanchored_utterance_ssml(&hd_voice, &[first]).unwrap();
         assert!(ssml.contains("<break time=\"180ms\"/>"));
+        assert!(ssml.contains("parameters=\"enhancePronunciation=true\""));
         assert!(!ssml.contains("<bookmark"));
         assert!(!ssml.contains("<emphasis"));
         assert!(!ssml.contains("<prosody"));
+    }
+
+    #[test]
+    fn inserts_clause_breaks_and_neural_action_prosody_without_hd_pitch() {
+        let mut neural = SpeechPlan::plain(1, "Chạy lệnh đi. Rồi nhấn Enter để xong.", 4_000);
+        neural.semantic_anchors = vec![SemanticAnchor {
+            anchor_id: "p-1-action-1".to_owned(),
+            spoken_phrase: "nhấn Enter".to_owned(),
+        }];
+        let ssml = render_speech_plan_ssml(&voice(standard_capabilities()), &neural).unwrap();
+        assert!(ssml.contains("<break time=\"180ms\"/>"));
+        assert!(ssml.contains(
+            "<prosody rate=\"-7%\" pitch=\"+5%\" volume=\"+4%\"><emphasis level=\"strong\">nhấn Enter</emphasis></prosody>"
+        ));
+
+        let mut hd = standard_capabilities();
+        hd.model_family = VoiceModelFamily::DragonHd;
+        hd.manual_emphasis = CapabilityState::Unsupported;
+        hd.manual_prosody = CapabilityState::Unsupported;
+        let mut hd_voice = voice(hd);
+        hd_voice.short_name = "de-DE-Florian:DragonHDLatestNeural".to_owned();
+        let hd_ssml = render_unanchored_utterance_ssml(&hd_voice, &[neural.clone()]).unwrap();
+        assert!(hd_ssml.contains("<break time=\"180ms\"/>"));
+        assert!(!hd_ssml.contains("<prosody"));
+        assert!(!hd_ssml.contains("<emphasis"));
+    }
+
+    #[test]
+    fn joins_unanchored_parts_with_a_supported_break() {
+        let mut capabilities = standard_capabilities();
+        capabilities.model_family = VoiceModelFamily::DragonHd;
+        capabilities.manual_prosody = CapabilityState::Unsupported;
+        capabilities.manual_emphasis = CapabilityState::Unsupported;
+        let mut hd_voice = voice(capabilities);
+        hd_voice.short_name = "de-DE-Florian:DragonHDLatestNeural".to_owned();
+        let first = SpeechPlan::plain(1, "Mở cửa sổ ẩn danh", 2_000);
+        let second = SpeechPlan::plain(2, "rồi nhấn Enter.", 2_000);
+        let ssml = render_unanchored_utterance_ssml(&hd_voice, &[first, second]).unwrap();
+        assert!(ssml.contains("<break time=\"140ms\"/>"));
     }
 
     #[test]
