@@ -66,9 +66,9 @@ Gemini keys are used round-robin once per logical request.
 
 Natural Voice is opt-in. Gemini creates structured Speech Plans and Dubora renders only the SSML
 controls supported by the selected Azure voice. Timing-capable voices use source-aligned whole
-utterances; timing-unsupported voices use the per-segment Natural Voice path and do not claim
-semantic-anchor alignment. It requires `GEMINI_API_KEYS` even when the input SRT is already
-Vietnamese.
+utterances; timing-unsupported Dragon HD voices use one continuous REST utterance per source
+narration block and do not claim semantic-anchor alignment. It requires `GEMINI_API_KEYS` even when
+the input SRT is already Vietnamese.
 
 ```bash
 # Balanced is the default: move an elastic block by at most 250 ms inside its sync island.
@@ -101,8 +101,9 @@ resynthesis. Accepted audio uses final time-stretch within `1.13x`. Unresolved a
 timing conflicts, or infeasible islands mark the render `reviewRequired`; the aligned path never
 splits or compacts an utterance into segment files. Dubora never overlaps speech or silently
 truncates content. Source-aligned diagnostics report `granular`, `captionDerived`, or `cueOnly`
-timing evidence. Dragon HD voices are timing-unsupported and use the per-segment Natural Voice path
-with Azure automatic delivery without claiming semantic-anchor alignment.
+timing evidence. Dragon HD uses punctuation and supported semantic breaks only; no fake prosody or
+timing-event alignment is claimed. A continuous block that remains over the `1.13x` cap becomes
+`reviewRequired` as one whole block, never a mixture of `utterance_*` and `seg_*` files.
 
 The source-aligned path keeps one Rust-owned timeline: Gemini chooses wording and delivery only;
 Rust owns source timing, semantic-anchor windows, allocation, and SSML rendering. Each run writes

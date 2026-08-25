@@ -43,9 +43,10 @@ use crate::translate_gemini::{
 };
 use crate::tts_cache::{is_fresh_audio_file, tts_cache_key, write_tts_cache_key};
 use crate::utterance::{
-    AlignmentResult, EntryAlignment, EntryAlignmentStatus, ManifestDiagnostics, RenderManifest,
-    RenderedAnchor, ScheduledAudio, Utterance, bookmark_name, group_source_aligned_utterances,
-    semantic_bookmark_name, validate_bookmark_structure, validate_semantic_alignment,
+    AlignmentResult, EntryAlignment, EntryAlignmentStatus, ManifestDiagnostics, ManifestStatus,
+    RenderManifest, RenderedAnchor, ScheduledAudio, TimingPipelineId, Utterance, bookmark_name,
+    group_source_aligned_utterances, semantic_bookmark_name, validate_bookmark_structure,
+    validate_semantic_alignment,
 };
 
 const CONCURRENCY: usize = 4;
@@ -53,6 +54,7 @@ const RETRIES: usize = 3;
 const SPEECH_PLAN_CACHE_PROVIDER: &str = "azure-speech-plan-v2";
 const MAX_SPEECH_PLAN_REVISIONS: u8 = 1;
 const UTTERANCE_CACHE_PROVIDER: &str = "azure-natural-utterance-v3";
+const HD_UTTERANCE_CACHE_PROVIDER: &str = "azure-hd-continuous-v1";
 // Keep one concise-revision pass with bounded payloads. Each block appears in at most one
 // revision request; 20 preserves the lower request count without the instability seen in smaller
 // stochastic batches.
@@ -975,11 +977,15 @@ pub async fn generate_all_tts_for_speech_plans(
         })
         .collect::<Result<Vec<_>>>()?;
     entries.sort_by_key(|entry| (entry.start_ms, entry.source_segments[0]));
-    let manifest = if review_required {
-        RenderManifest::new(entries).review_required()
-    } else {
-        RenderManifest::new(entries)
-    }
+    let manifest = RenderManifest::new(
+        if review_required {
+            crate::utterance::ManifestStatus::ReviewRequired
+        } else {
+            crate::utterance::ManifestStatus::UnanchoredContinuous
+        },
+        crate::utterance::TimingPipelineId::SegmentedRollback,
+        entries,
+    )
     .with_semantic_alignment_support(false)
     .with_source_timeline(timeline, layout)?
     .with_audio_cache_identities()?;
@@ -1000,6 +1006,394 @@ pub async fn generate_all_tts_for_speech_plans(
         )
     })?;
     Ok(())
+}
+
+#[derive(Clone)]
+struct ContinuousAudio {
+    utterance: Utterance,
+    path: PathBuf,
+    measured_audio_ms: u32,
+    speech_end_ms: Option<u32>,
+}
+
+/// Generate one DragonHD REST utterance for each source-derived narration block.
+pub async fn generate_all_tts_for_unanchored_utterances(
+    config: &AzureConfig,
+    ffmpeg: &FfmpegPaths,
+    input_srt: &Path,
+    plans: &[SpeechPlan],
+    mode: NaturalMode,
+    timeline: &SourceTimeline,
+    layout: &SyncLayout,
+    gemini_keys: &[String],
+    voice: &AzureVoice,
+    output_dir: &Path,
+    manifest_path: &Path,
+    pause_fit: bool,
+    video: &str,
+    progress: &dyn ProgressReporter,
+) -> Result<()> {
+    let segments = parse_srt(input_srt)?;
+    let utterances = group_source_aligned_utterances(&segments, plans, timeline, layout)?;
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create {}", output_dir.display()))?;
+    let calibration = DurationCalibration::load(output_dir, voice);
+    let predicted = utterances
+        .iter()
+        .map(|utterance| {
+            (
+                utterance.block_id.clone(),
+                utterance
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        predict_plan_audio_ms_with_calibration(
+                            &part.plan,
+                            voice,
+                            calibration.median_chars_per_second(),
+                        )
+                    })
+                    .sum::<u32>()
+                    .max(100),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let (allocated, failed_islands) = allocate_blocks_best_effort(layout, &predicted, mode)
+        .map_err(|error| anyhow!("review_required: source timing allocation: {error:#}"))?;
+    let initial_allocations = allocated
+        .into_iter()
+        .map(|allocation| (allocation.block_id.clone(), allocation))
+        .collect::<HashMap<_, _>>();
+    let mut review_reasons = failed_islands
+        .iter()
+        .map(|island| format!("{island}:preflight_allocation_infeasible"))
+        .collect::<Vec<_>>();
+    let mut failed_blocks = HashMap::<usize, String>::new();
+    let client = Client::new();
+    let mut audio = Vec::with_capacity(utterances.len());
+
+    progress.event(ProgressEvent::new(
+        Stage::Tts,
+        video,
+        format!(
+            "Grouped {} subtitle segments into {} unanchored utterances.",
+            segments.len(),
+            utterances.len()
+        ),
+    ));
+    for (position, utterance) in utterances.iter().enumerate() {
+        if progress.is_cancelled() {
+            bail!("Dub job cancelled");
+        }
+        let output = output_dir.join(format!("utterance_{}.mp3", utterance.id));
+        let plans = utterance
+            .parts
+            .iter()
+            .map(|part| prepared_speech_plan(&part.plan))
+            .collect::<Vec<_>>();
+        let ssml = render_unanchored_utterance_ssml(voice, &plans)?;
+        let stats = match synthesize_continuous_audio(
+            &client, config, ffmpeg, &output, &ssml, voice, pause_fit,
+        )
+        .await
+        {
+            Ok(stats) => stats,
+            Err(error) => {
+                let reason = format!("utterance-{}:hd_synthesis_review:{error:#}", utterance.id);
+                remove_audio_artifacts(&output);
+                ffmpeg.create_silence(&output)?;
+                write_tts_cache_key(
+                    &output,
+                    &tts_cache_key("azure-hd-review-v1", &voice.short_name, "", &reason),
+                )?;
+                failed_blocks.insert(position, reason.clone());
+                review_reasons.push(reason);
+                AudioFit {
+                    path: output.clone(),
+                    measured_audio_ms: duration_ms(ffmpeg, &output)?,
+                    speech_end_ms: None,
+                }
+            }
+        };
+        audio.push(ContinuousAudio {
+            utterance: utterance.clone(),
+            path: stats.path,
+            measured_audio_ms: stats.measured_audio_ms,
+            speech_end_ms: stats.speech_end_ms,
+        });
+        progress.event(
+            ProgressEvent::new(
+                Stage::Tts,
+                video,
+                format!("Generated HD utterance {}.", utterance.id),
+            )
+            .progress(position + 1, utterances.len()),
+        );
+    }
+
+    let mut allocations = initial_allocations;
+    let (measured_allocations, allocation_failures) =
+        measured_continuous_allocations(layout, &audio, mode, &allocations);
+    allocations = measured_allocations;
+    review_reasons.extend(allocation_failures);
+
+    let mut over_cap = Vec::new();
+    for (position, candidate) in audio.iter().enumerate() {
+        let allocation = allocations
+            .get(&candidate.utterance.block_id)
+            .expect("measured allocations cover every narration block");
+        let slot_ms = allocation
+            .slot_end_ms
+            .saturating_sub(allocation.render_start_ms)
+            .max(1);
+        if !failed_blocks.contains_key(&position)
+            && f64::from(candidate.measured_audio_ms) / f64::from(slot_ms)
+                > MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+        {
+            over_cap.push(position);
+        }
+    }
+
+    if !over_cap.is_empty() {
+        if gemini_keys.is_empty() {
+            for position in &over_cap {
+                let reason = format!(
+                    "utterance-{}:hd_over_cap_without_revision",
+                    audio[*position].utterance.id
+                );
+                failed_blocks.insert(*position, reason.clone());
+                review_reasons.push(reason);
+            }
+        } else {
+            let requests = over_cap
+                .iter()
+                .flat_map(|position| {
+                    let candidate = &audio[*position];
+                    let allocation = allocations
+                        .get(&candidate.utterance.block_id)
+                        .expect("over-cap block has an allocation");
+                    let slot_ms = allocation
+                        .slot_end_ms
+                        .saturating_sub(allocation.render_start_ms)
+                        .max(1);
+                    let target_total = slot_ms.saturating_mul(113).div_ceil(100);
+                    let predicted_total = candidate
+                        .utterance
+                        .parts
+                        .iter()
+                        .map(|part| predict_plan_audio_ms_with_calibration(&part.plan, voice, None))
+                        .sum::<u32>()
+                        .max(1);
+                    candidate.utterance.parts.iter().map(move |part| {
+                        let predicted =
+                            predict_plan_audio_ms_with_calibration(&part.plan, voice, None).max(1);
+                        let actual = candidate
+                            .measured_audio_ms
+                            .saturating_mul(predicted)
+                            .checked_div(predicted_total)
+                            .unwrap_or(candidate.measured_audio_ms)
+                            .max(100);
+                        let target = target_total
+                            .saturating_mul(predicted)
+                            .checked_div(predicted_total)
+                            .unwrap_or(target_total)
+                            .max(100);
+                        SpeechPlanRevisionRequest {
+                            plan: part.plan.clone(),
+                            actual_duration_ms: actual,
+                            target_duration_ms: target,
+                            allowed_styles: voice.styles.clone(),
+                            maximum_words: revision_word_budget(
+                                &part.plan,
+                                actual,
+                                target,
+                                voice.words_per_minute.unwrap_or(130),
+                            ),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            match revise_speech_plans_batch(gemini_keys, &requests, 1).await {
+                Ok(revisions) => {
+                    let revisions = revisions
+                        .into_iter()
+                        .map(|plan| (plan.index, plan))
+                        .collect::<HashMap<_, _>>();
+                    for position in &over_cap {
+                        let mut revised = audio[*position].utterance.clone();
+                        let mut changed = false;
+                        for part in &mut revised.parts {
+                            if let Some(plan) = revisions.get(&part.index) {
+                                if plan.index == part.index
+                                    && plan.spoken_text != part.plan.spoken_text
+                                {
+                                    part.plan = plan.clone();
+                                    changed = true;
+                                }
+                            }
+                        }
+                        if !changed {
+                            let reason =
+                                format!("utterance-{}:hd_concise_revision_unresolved", revised.id);
+                            failed_blocks.insert(*position, reason.clone());
+                            review_reasons.push(reason);
+                            continue;
+                        }
+                        let plans = revised
+                            .parts
+                            .iter()
+                            .map(|part| prepared_speech_plan(&part.plan))
+                            .collect::<Vec<_>>();
+                        let output = output_dir.join(format!("utterance_{}.mp3", revised.id));
+                        match synthesize_continuous_audio(
+                            &client,
+                            config,
+                            ffmpeg,
+                            &output,
+                            &render_unanchored_utterance_ssml(voice, &plans)?,
+                            voice,
+                            pause_fit,
+                        )
+                        .await
+                        {
+                            Ok(stats) => {
+                                audio[*position] = ContinuousAudio {
+                                    utterance: revised,
+                                    path: stats.path,
+                                    measured_audio_ms: stats.measured_audio_ms,
+                                    speech_end_ms: stats.speech_end_ms,
+                                };
+                            }
+                            Err(error) => {
+                                let reason = format!(
+                                    "utterance-{}:hd_concise_revision_failed:{error:#}",
+                                    revised.id
+                                );
+                                failed_blocks.insert(*position, reason.clone());
+                                review_reasons.push(reason);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    for position in &over_cap {
+                        let reason = format!(
+                            "utterance-{}:hd_concise_revision_failed:{error:#}",
+                            audio[*position].utterance.id
+                        );
+                        failed_blocks.insert(*position, reason.clone());
+                        review_reasons.push(reason);
+                    }
+                }
+            }
+        }
+        let (measured_allocations, allocation_failures) =
+            measured_continuous_allocations(layout, &audio, mode, &allocations);
+        allocations = measured_allocations;
+        review_reasons.extend(allocation_failures);
+    }
+
+    let mut entries = audio
+        .iter()
+        .enumerate()
+        .map(|(position, candidate)| {
+            let allocation = allocations
+                .get(&candidate.utterance.block_id)
+                .expect("final allocations cover every narration block");
+            let slot_ms = allocation
+                .slot_end_ms
+                .saturating_sub(allocation.render_start_ms)
+                .max(1);
+            let tempo = (f64::from(candidate.measured_audio_ms) / f64::from(slot_ms)).max(1.0);
+            if tempo > MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+                && !failed_blocks.contains_key(&position)
+            {
+                review_reasons.push(format!(
+                    "utterance-{}:hd_over_cap:required={tempo:.3}:allowed={MAX_TIME_STRETCH_TEMPO:.2}",
+                    candidate.utterance.id
+                ));
+            }
+            ScheduledAudio {
+                id: format!("utterance-{}", candidate.utterance.id),
+                path: candidate.path.clone(),
+                start_ms: allocation.render_start_ms,
+                end_ms: allocation.slot_end_ms,
+                source_segments: candidate
+                    .utterance
+                    .parts
+                    .iter()
+                    .map(|part| part.index)
+                    .collect(),
+                measured_audio_ms: candidate.measured_audio_ms,
+                speech_end_ms: candidate.speech_end_ms,
+                rendered_audio_ms: (f64::from(candidate.measured_audio_ms) / tempo).ceil() as u32,
+                tempo,
+                island_id: Some(candidate.utterance.island_id.clone()),
+                cache_identity: String::new(),
+                alignment: EntryAlignment::default(),
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (entry.start_ms, entry.source_segments[0]));
+    let status = if review_reasons.is_empty() {
+        ManifestStatus::UnanchoredContinuous
+    } else {
+        ManifestStatus::ReviewRequired
+    };
+    let manifest = RenderManifest::new(status, TimingPipelineId::UnanchoredContinuous, entries)
+        .with_semantic_alignment_support(false)
+        .with_diagnostics(ManifestDiagnostics {
+            review_reasons,
+            ..ManifestDiagnostics::default()
+        })
+        .with_source_timeline(timeline, layout)?
+        .with_audio_cache_identities()?;
+    let expected = segments
+        .iter()
+        .map(|segment| segment.index)
+        .collect::<Vec<_>>();
+    manifest
+        .validate(&expected)
+        .map_err(|error| anyhow!("review_required: Natural Voice manifest: {error:#}"))?;
+    manifest
+        .validate_source_timeline(timeline, layout)
+        .map_err(|error| anyhow!("review_required: Natural Voice source alignment: {error:#}"))?;
+    fs::write(manifest_path, serde_json::to_vec_pretty(&manifest)?).with_context(|| {
+        format!(
+            "Failed to write unanchored render manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn measured_continuous_allocations(
+    layout: &SyncLayout,
+    audio: &[ContinuousAudio],
+    mode: NaturalMode,
+    base: &HashMap<String, AllocatedBlock>,
+) -> (HashMap<String, AllocatedBlock>, Vec<String>) {
+    let measured = audio
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.utterance.block_id.clone(),
+                candidate.measured_audio_ms,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut allocations = base.clone();
+    let mut failures = Vec::new();
+    for group in allocation_groups(layout) {
+        if let Ok(values) = allocate_measured_group(layout, &group.id, &measured, mode) {
+            for value in values {
+                allocations.insert(value.block_id.clone(), value);
+            }
+        } else {
+            failures.push(format!("{}:measured_allocation_infeasible", group.id));
+        }
+    }
+    (allocations, failures)
 }
 
 /// Generate grouped utterances for voices that expose reliable Azure timing metadata.
@@ -1783,11 +2177,15 @@ pub async fn generate_all_tts_for_aligned_utterances(
     }
     entries.sort_by_key(|entry| (entry.start_ms, entry.source_segments[0]));
 
-    let manifest = if review_required {
-        RenderManifest::new(entries).review_required()
-    } else {
-        RenderManifest::new(entries)
-    }
+    let manifest = RenderManifest::new(
+        if review_required {
+            crate::utterance::ManifestStatus::ReviewRequired
+        } else {
+            crate::utterance::ManifestStatus::Aligned
+        },
+        crate::utterance::TimingPipelineId::SourceAligned,
+        entries,
+    )
     .with_semantic_alignment_support(true)
     .with_diagnostics(diagnostics)
     .with_source_timeline(timeline, layout)?
@@ -2223,6 +2621,73 @@ fn fit_audio_file(
             speech_end_ms: speech_end_hint_ms,
         }),
         Err(error) => Err(error),
+    }
+}
+
+fn hd_utterance_cache_key(voice: &AzureVoice, ssml: &str) -> String {
+    tts_cache_key(
+        HD_UTTERANCE_CACHE_PROVIDER,
+        &voice.short_name,
+        "",
+        &format!("source-timeline-v{SOURCE_TIMELINE_VERSION}\n{ssml}"),
+    )
+}
+
+fn strip_ssml_breaks(ssml: &str) -> String {
+    static BREAK_TAG: OnceLock<Regex> = OnceLock::new();
+    BREAK_TAG
+        .get_or_init(|| Regex::new(r#"<break\b[^>]*/>"#).expect("valid SSML break regex"))
+        .replace_all(ssml, "")
+        .into_owned()
+}
+
+async fn synthesize_continuous_audio(
+    client: &Client,
+    config: &AzureConfig,
+    ffmpeg: &FfmpegPaths,
+    output: &Path,
+    ssml: &str,
+    voice: &AzureVoice,
+    pause_fit: bool,
+) -> Result<AudioFit> {
+    let stripped = strip_ssml_breaks(ssml);
+    for candidate in [ssml, stripped.as_str()] {
+        let cache_key = hd_utterance_cache_key(voice, candidate);
+        if is_fresh_audio_file(ffmpeg, output, &cache_key) {
+            record_azure_cache_hit();
+            return fit_audio_file(ffmpeg, output, None, pause_fit);
+        }
+    }
+
+    record_azure_logical_generation();
+    remove_audio_artifacts(output);
+    let tmp = temporary_path(output);
+    let first_key = hd_utterance_cache_key(voice, ssml);
+    match synthesize_ssml_once(client, config, ffmpeg, ssml, &tmp, output, &first_key).await {
+        Ok(()) => fit_audio_file(ffmpeg, output, None, pause_fit),
+        Err(first_error) if first_error.fallback_allowed && stripped != ssml => {
+            remove_audio_artifacts(output);
+            let stripped_key = hd_utterance_cache_key(voice, &stripped);
+            match synthesize_ssml_once(
+                client,
+                config,
+                ffmpeg,
+                &stripped,
+                &tmp,
+                output,
+                &stripped_key,
+            )
+            .await
+            {
+                Ok(()) => fit_audio_file(ffmpeg, output, None, pause_fit),
+                Err(second_error) => bail!(
+                    "DragonHD continuous synthesis failed after break-stripped retry: {:#}; {:#}",
+                    first_error.error,
+                    second_error.error
+                ),
+            }
+        }
+        Err(error) => bail!("DragonHD continuous synthesis failed: {:#}", error.error),
     }
 }
 
@@ -2874,6 +3339,24 @@ pub fn render_utterance_ssml(
     render_utterance_ssml_with_semantic_anchors(voice, plans, bookmarks, &[], rate_percent)
 }
 
+/// Render one unanchored continuous HD utterance without timing bookmarks or fake prosody.
+pub fn render_unanchored_utterance_ssml(
+    voice: &AzureVoice,
+    plans: &[SpeechPlan],
+) -> Result<String> {
+    if plans.is_empty() {
+        bail!("Unanchored utterances must contain at least one speech plan");
+    }
+    let mut body = String::new();
+    for (position, plan) in plans.iter().enumerate() {
+        if position > 0 {
+            body.push(' ');
+        }
+        body.push_str(&render_speech_plan_body(voice, plan, 0)?);
+    }
+    Ok(wrap_voice_ssml(voice, &body))
+}
+
 pub fn render_utterance_ssml_with_semantic_anchors(
     voice: &AzureVoice,
     plans: &[SpeechPlan],
@@ -3359,6 +3842,30 @@ mod tests {
         assert!(ssml.contains("<break time=\"180ms\"/>"));
         assert!(!ssml.contains("<emphasis"));
         assert!(!ssml.contains("<prosody"));
+    }
+
+    #[test]
+    fn renders_hd_continuous_utterances_without_fake_timing_controls() {
+        let mut capabilities = standard_capabilities();
+        capabilities.model_family = VoiceModelFamily::DragonHd;
+        capabilities.manual_emphasis = CapabilityState::Unsupported;
+        capabilities.manual_prosody = CapabilityState::Unsupported;
+        let mut hd_voice = voice(capabilities);
+        hd_voice.short_name = "de-DE-Florian:DragonHDLatestNeural".to_owned();
+        hd_voice.styles.clear();
+        let mut first = plan();
+        first.style = None;
+        let ssml = render_unanchored_utterance_ssml(&hd_voice, &[first]).unwrap();
+        assert!(ssml.contains("<break time=\"180ms\"/>"));
+        assert!(!ssml.contains("<bookmark"));
+        assert!(!ssml.contains("<emphasis"));
+        assert!(!ssml.contains("<prosody"));
+    }
+
+    #[test]
+    fn strips_only_supported_break_tags_for_hd_retry() {
+        let ssml = "<speak><break time=\"180ms\"/>text &amp; more</speak>";
+        assert_eq!(strip_ssml_breaks(ssml), "<speak>text &amp; more</speak>");
     }
 
     #[test]

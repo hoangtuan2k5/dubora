@@ -26,9 +26,12 @@ use crate::sync_timeline::{
 use crate::translate_gemini::{create_speech_plans, translate_srt};
 use crate::tts_azure::{
     generate_all_tts, generate_all_tts_for_aligned_utterances, generate_all_tts_for_speech_plans,
+    generate_all_tts_for_unanchored_utterances,
 };
 use crate::tts_cache::tts_cache_key;
-use crate::utterance::{ManifestStatus, RENDER_MANIFEST_VERSION, RenderManifest, ScheduledAudio};
+use crate::utterance::{
+    ManifestStatus, RENDER_MANIFEST_VERSION, RenderManifest, ScheduledAudio, TimingPipelineId,
+};
 
 // One-release internal escape hatch; remove after source-aligned rollout acceptance.
 const NATURAL_TIMING_PIPELINE_ENV: &str = "DUBORA_INTERNAL_NATURAL_TIMING_PIPELINE";
@@ -39,6 +42,7 @@ const PAUSE_FIT_ENV: &str = "DUBORA_INTERNAL_PAUSE_FIT";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NaturalTimingPipeline {
     SourceAligned,
+    UnanchoredContinuous,
     SegmentedRollback,
 }
 
@@ -72,8 +76,18 @@ fn select_natural_timing_pipeline(
 ) -> NaturalTimingPipeline {
     if timing_events == CapabilityState::Supported {
         configured
-    } else {
+    } else if configured == NaturalTimingPipeline::SegmentedRollback {
         NaturalTimingPipeline::SegmentedRollback
+    } else {
+        NaturalTimingPipeline::UnanchoredContinuous
+    }
+}
+
+fn timing_pipeline_id(pipeline: NaturalTimingPipeline) -> TimingPipelineId {
+    match pipeline {
+        NaturalTimingPipeline::SourceAligned => TimingPipelineId::SourceAligned,
+        NaturalTimingPipeline::UnanchoredContinuous => TimingPipelineId::UnanchoredContinuous,
+        NaturalTimingPipeline::SegmentedRollback => TimingPipelineId::SegmentedRollback,
     }
 }
 
@@ -102,6 +116,7 @@ fn invalidate_mismatched_render_manifest(
         .and_then(|bytes| serde_json::from_slice::<RenderManifest>(&bytes).ok())
         .is_some_and(|manifest| {
             manifest.version == RENDER_MANIFEST_VERSION
+                && manifest.timing_pipeline == timing_pipeline_id(pipeline)
                 && manifest.semantic_alignment_supported
                     == (pipeline == NaturalTimingPipeline::SourceAligned)
         });
@@ -362,6 +377,7 @@ fn manifest_diagnostics(manifest: &RenderManifest) -> serde_json::Value {
     serde_json::json!({
         "manifestVersion": manifest.version,
         "manifestStatus": manifest.status,
+        "timingPipeline": manifest.timing_pipeline,
         "entryCount": manifest.entries.len(),
         "stretchCount": stretch_count,
         "overSlotCount": over_slot_count,
@@ -402,6 +418,7 @@ fn sync_report(
         "blockCount": layout.blocks.len(),
         "islandCount": layout.islands.len(),
         "semanticAlignment": semantic_alignment,
+        "timingPipeline": manifest.map(|value| value.timing_pipeline),
         "status": status,
         "providerMetrics": metrics::snapshot(),
         "diagnostics": diagnostics,
@@ -964,6 +981,25 @@ async fn create_dub_for_video(
                 )
                 .await
             }
+            NaturalTimingPipeline::UnanchoredContinuous => {
+                generate_all_tts_for_unanchored_utterances(
+                    azure,
+                    &config.ffmpeg,
+                    &vi_srt,
+                    &plans.plans,
+                    mode,
+                    &source_timeline,
+                    &sync_layout,
+                    &gemini.keys,
+                    &voice,
+                    &tts_dir,
+                    &render_manifest,
+                    pause_fit,
+                    &label,
+                    progress,
+                )
+                .await
+            }
         };
         if let Err(error) = tts_result {
             let manifest = fs::read(&render_manifest)
@@ -1036,15 +1072,23 @@ async fn create_dub_for_video(
         }
         if let Ok(bytes) = fs::read(&render_manifest)
             && let Ok(manifest) = serde_json::from_slice::<RenderManifest>(&bytes)
-            && manifest.status == ManifestStatus::Aligned
+            && matches!(
+                manifest.status,
+                ManifestStatus::Aligned | ManifestStatus::UnanchoredContinuous
+            )
         {
+            let status = if manifest.status == ManifestStatus::Aligned {
+                "aligned"
+            } else {
+                "unanchoredContinuous"
+            };
             let _ = fs::write(
                 &sync_report_path,
                 serde_json::to_vec_pretty(&sync_report(
                     &source_timeline,
                     &sync_layout,
                     semantic_alignment,
-                    "aligned",
+                    status,
                     Some(&manifest),
                 ))?,
             );
@@ -1341,11 +1385,11 @@ mod tests {
         );
         assert_eq!(
             select_natural_timing_pipeline(CapabilityState::Unsupported, aligned),
-            NaturalTimingPipeline::SegmentedRollback
+            NaturalTimingPipeline::UnanchoredContinuous
         );
         assert_eq!(
             select_natural_timing_pipeline(CapabilityState::Unknown, aligned),
-            NaturalTimingPipeline::SegmentedRollback
+            NaturalTimingPipeline::UnanchoredContinuous
         );
         assert!(parse_natural_timing_pipeline(Some("legacy-ish")).is_err());
         Ok(())
@@ -1357,7 +1401,12 @@ mod tests {
         fs::create_dir_all(&directory)?;
         let path = directory.join("render_manifest.json");
 
-        let mut old = RenderManifest::new(Vec::new()).with_semantic_alignment_support(true);
+        let mut old = RenderManifest::new(
+            ManifestStatus::Aligned,
+            TimingPipelineId::SourceAligned,
+            Vec::new(),
+        )
+        .with_semantic_alignment_support(true);
         old.version = RENDER_MANIFEST_VERSION - 1;
         fs::write(&path, serde_json::to_vec(&old)?)?;
         assert!(invalidate_mismatched_render_manifest(
@@ -1367,7 +1416,12 @@ mod tests {
         assert!(!path.exists());
         assert!(require_natural_render_manifest(true, &path).is_err());
 
-        let aligned = RenderManifest::new(Vec::new()).with_semantic_alignment_support(true);
+        let aligned = RenderManifest::new(
+            ManifestStatus::Aligned,
+            TimingPipelineId::SourceAligned,
+            Vec::new(),
+        )
+        .with_semantic_alignment_support(true);
         fs::write(&path, serde_json::to_vec(&aligned)?)?;
         assert!(!invalidate_mismatched_render_manifest(
             &path,
@@ -1575,6 +1629,7 @@ mod tests {
                 )
                 .await?;
             }
+            NaturalTimingPipeline::UnanchoredContinuous => unreachable!(),
             NaturalTimingPipeline::SegmentedRollback => unreachable!(),
         }
         let aligned_metrics = crate::metrics::snapshot();
@@ -1590,6 +1645,7 @@ mod tests {
             NaturalTimingPipeline::SegmentedRollback,
         ) {
             NaturalTimingPipeline::SourceAligned => unreachable!(),
+            NaturalTimingPipeline::UnanchoredContinuous => unreachable!(),
             NaturalTimingPipeline::SegmentedRollback => {
                 crate::tts_azure::generate_all_tts_for_speech_plans(
                     &azure,
@@ -1621,10 +1677,46 @@ mod tests {
         assert_eq!(aligned.entries.len(), 1);
         assert!(aligned.entries[0].path.is_file());
         let rollback: RenderManifest = serde_json::from_slice(&fs::read(&rollback_manifest)?)?;
-        assert_eq!(rollback.status, ManifestStatus::Aligned);
+        assert_eq!(rollback.status, ManifestStatus::UnanchoredContinuous);
         assert_eq!(rollback.entries.len(), 1);
         assert!(!rollback.semantic_alignment_supported);
         assert!(rollback.entries[0].path.is_file());
+
+        let hd_manifest = directory.join("hd-render-manifest.json");
+        let hd_output_dir = directory.join("hd-tts");
+        let hd_voice = AzureVoice::from_short_name(
+            "de-DE-Florian:DragonHDLatestNeural".to_owned(),
+            Vec::new(),
+        );
+        let hd_azure = crate::config::AzureConfig::new("fake-azure", "southeastasia")?
+            .with_voice("de-DE-Florian:DragonHDLatestNeural")?;
+        crate::tts_azure::generate_all_tts_for_unanchored_utterances(
+            &hd_azure,
+            &ffmpeg,
+            &input_srt,
+            &plans.plans,
+            NaturalMode::Balanced,
+            &source_timeline,
+            &layout,
+            &["fake-gemini".to_owned()],
+            &hd_voice,
+            &hd_output_dir,
+            &hd_manifest,
+            false,
+            "fake-provider-hd",
+            &crate::progress::NoopProgress,
+        )
+        .await?;
+        let hd: RenderManifest = serde_json::from_slice(&fs::read(&hd_manifest)?)?;
+        assert_eq!(hd.status, ManifestStatus::UnanchoredContinuous);
+        assert_eq!(hd.timing_pipeline, TimingPipelineId::UnanchoredContinuous);
+        assert_eq!(hd.entries.len(), 1);
+        assert_eq!(hd.entries[0].source_segments, vec![1]);
+        assert!(!hd.semantic_alignment_supported);
+        assert!(hd.entries[0].path.is_file());
+        let metrics = crate::metrics::snapshot();
+        assert_eq!(metrics["azureLogicalGenerations"], 4);
+        assert_eq!(metrics["azureSynthesisAttempts"], 4);
 
         fs::remove_dir_all(directory)?;
         Ok(())
@@ -1713,20 +1805,25 @@ mod tests {
 
     #[test]
     fn review_diagnostics_expose_timestamp_for_segment_reason() {
-        let manifest = RenderManifest::new(vec![ScheduledAudio {
-            id: "segment-26".to_owned(),
-            path: PathBuf::from("segment-26.mp3"),
-            start_ms: 124_000,
-            end_ms: 128_799,
-            source_segments: vec![26],
-            measured_audio_ms: 4_799,
-            speech_end_ms: None,
-            rendered_audio_ms: 4_799,
-            tempo: 1.0,
-            island_id: Some("island-fallback-26".to_owned()),
-            cache_identity: "cache".to_owned(),
-            alignment: crate::utterance::EntryAlignment::default(),
-        }])
+        let manifest = RenderManifest::new(
+            ManifestStatus::ReviewRequired,
+            TimingPipelineId::SegmentedRollback,
+            vec![ScheduledAudio {
+                id: "segment-26".to_owned(),
+                path: PathBuf::from("segment-26.mp3"),
+                start_ms: 124_000,
+                end_ms: 128_799,
+                source_segments: vec![26],
+                measured_audio_ms: 4_799,
+                speech_end_ms: None,
+                rendered_audio_ms: 4_799,
+                tempo: 1.0,
+                island_id: Some("island-fallback-26".to_owned()),
+                cache_identity: "cache".to_owned(),
+                alignment: crate::utterance::EntryAlignment::default(),
+            }],
+        )
+        .with_semantic_alignment_support(false)
         .with_diagnostics(crate::utterance::ManifestDiagnostics {
             prediction_errors_ms: vec![-120, 240],
             review_reasons: vec!["segment-26:fallback".to_owned()],
@@ -1771,12 +1868,16 @@ mod tests {
                 alignment: crate::utterance::EntryAlignment::default(),
             })
             .collect();
-        let manifest = RenderManifest::new(entries)
-            .with_diagnostics(crate::utterance::ManifestDiagnostics {
-                review_reasons: vec!["island-1:infeasible".to_owned()],
-                ..crate::utterance::ManifestDiagnostics::default()
-            })
-            .review_required();
+        let manifest = RenderManifest::new(
+            ManifestStatus::ReviewRequired,
+            TimingPipelineId::SegmentedRollback,
+            entries,
+        )
+        .with_diagnostics(crate::utterance::ManifestDiagnostics {
+            review_reasons: vec!["island-1:infeasible".to_owned()],
+            ..crate::utterance::ManifestDiagnostics::default()
+        })
+        .review_required();
 
         let windows = review_windows(&manifest);
         assert_eq!(windows.len(), 1);

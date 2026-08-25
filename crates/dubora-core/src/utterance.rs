@@ -22,7 +22,7 @@ pub const FIRST_WORD_TOLERANCE_MS: i64 = 120;
 pub const INTERNAL_ANCHOR_TOLERANCE_MS: i64 = 180;
 pub const FINAL_ANCHOR_TOLERANCE_MS: i64 = 150;
 const AUDIO_TAIL_TOLERANCE_MS: u32 = 1_200;
-pub(crate) const RENDER_MANIFEST_VERSION: u8 = 2;
+pub(crate) const RENDER_MANIFEST_VERSION: u8 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,10 +119,21 @@ pub struct RenderManifest {
     pub islands: Vec<ManifestIsland>,
     pub semantic_alignment_supported: bool,
     #[serde(default)]
+    pub timing_pipeline: TimingPipelineId,
+    #[serde(default)]
     pub status: ManifestStatus,
     pub entries: Vec<ScheduledAudio>,
     #[serde(default)]
     pub diagnostics: ManifestDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TimingPipelineId {
+    #[default]
+    SourceAligned,
+    UnanchoredContinuous,
+    SegmentedRollback,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -141,6 +152,7 @@ pub struct ManifestDiagnostics {
 pub enum ManifestStatus {
     #[default]
     Aligned,
+    UnanchoredContinuous,
     ReviewRequired,
 }
 
@@ -169,14 +181,19 @@ impl AlignmentResult {
 }
 
 impl RenderManifest {
-    pub fn new(entries: Vec<ScheduledAudio>) -> Self {
+    pub fn new(
+        status: ManifestStatus,
+        timing_pipeline: TimingPipelineId,
+        entries: Vec<ScheduledAudio>,
+    ) -> Self {
         Self {
             version: RENDER_MANIFEST_VERSION,
             source_timeline_version: 0,
             source_timeline_identity: String::new(),
             islands: Vec::new(),
             semantic_alignment_supported: false,
-            status: ManifestStatus::Aligned,
+            timing_pipeline,
+            status,
             entries,
             diagnostics: ManifestDiagnostics::default(),
         }
@@ -367,7 +384,25 @@ impl RenderManifest {
         {
             bail!("Audio render manifest sync islands overlap");
         }
-        let enforce_aligned_constraints = self.status == ManifestStatus::Aligned;
+        if (self.timing_pipeline == TimingPipelineId::SourceAligned)
+            != self.semantic_alignment_supported
+        {
+            bail!("Audio render manifest timing pipeline disagrees with semantic alignment");
+        }
+        if self.status == ManifestStatus::Aligned
+            && self.timing_pipeline != TimingPipelineId::SourceAligned
+        {
+            bail!("Aligned audio render manifest must use the source-aligned pipeline");
+        }
+        if self.status == ManifestStatus::UnanchoredContinuous
+            && self.timing_pipeline == TimingPipelineId::SourceAligned
+        {
+            bail!("Unanchored audio render manifest cannot use the source-aligned pipeline");
+        }
+        let enforce_timing_constraints = matches!(
+            self.status,
+            ManifestStatus::Aligned | ManifestStatus::UnanchoredContinuous
+        );
         let covered = self
             .entries
             .iter()
@@ -438,7 +473,7 @@ impl RenderManifest {
                         entry.id
                     );
                 }
-                if enforce_aligned_constraints && anchor.drift_ms.abs() > anchor.tolerance_ms {
+                if enforce_timing_constraints && anchor.drift_ms.abs() > anchor.tolerance_ms {
                     bail!(
                         "Audio render manifest entry {} has an anchor outside tolerance",
                         entry.id
@@ -447,7 +482,7 @@ impl RenderManifest {
             }
             if (entry.alignment.status == EntryAlignmentStatus::Aligned
                 && entry.alignment.anchors.is_empty())
-                || (enforce_aligned_constraints
+                || (enforce_timing_constraints
                     && entry.alignment.status == EntryAlignmentStatus::ReviewRequired)
             {
                 bail!(
@@ -472,11 +507,11 @@ impl RenderManifest {
             if !entry.tempo.is_finite()
                 || entry.tempo < 1.0
                 // A one-millisecond ceil/rounding difference is not a real timing overrun.
-                || (enforce_aligned_constraints && entry.tempo > 1.13 + f64::EPSILON)
+                || (enforce_timing_constraints && entry.tempo > 1.13 + f64::EPSILON)
                 || entry.measured_audio_ms == 0
                 || entry.rendered_audio_ms == 0
                 || expected_rendered.abs_diff(entry.rendered_audio_ms) > 1
-                || (enforce_aligned_constraints
+                || (enforce_timing_constraints
                     && entry.rendered_audio_ms > entry.end_ms.saturating_sub(entry.start_ms))
             {
                 bail!(
@@ -973,7 +1008,11 @@ mod tests {
             .min()
             .unwrap_or(0);
         let end_ms = entries.iter().map(|entry| entry.end_ms).max().unwrap_or(1);
-        let mut manifest = RenderManifest::new(entries);
+        let mut manifest = RenderManifest::new(
+            ManifestStatus::UnanchoredContinuous,
+            TimingPipelineId::SegmentedRollback,
+            entries,
+        );
         manifest.source_timeline_version = SOURCE_TIMELINE_VERSION;
         manifest.source_timeline_identity = "test-timeline".to_owned();
         manifest.islands = vec![ManifestIsland {
@@ -1050,32 +1089,36 @@ mod tests {
             projected_anchor_ids: Vec::new(),
         };
         let layout = build_sync_layout(&timeline, &segments).unwrap();
-        let manifest = RenderManifest::new(vec![ScheduledAudio {
-            id: "block-1".to_owned(),
-            path: PathBuf::from("block-1.mp3"),
-            start_ms: 0,
-            end_ms: 1_000,
-            source_segments: vec![1],
-            measured_audio_ms: 1_000,
-            speech_end_ms: None,
-            rendered_audio_ms: 1_000,
-            tempo: 1.0,
-            island_id: Some("island-1".to_owned()),
-            cache_identity: "cache".to_owned(),
-            alignment: EntryAlignment {
-                status: EntryAlignmentStatus::Aligned,
-                anchors: vec![RenderedAnchor {
-                    id: "p-1-action-1".to_owned(),
-                    bookmark: "bookmark".to_owned(),
-                    source_ms: 400,
-                    raw_offset_ms: 400,
-                    rendered_ms: 400,
-                    drift_ms: 0,
-                    tolerance_ms: MAX_ANCHOR_DRIFT_MS,
-                    coupling: Coupling::Anchored,
-                }],
-            },
-        }])
+        let manifest = RenderManifest::new(
+            ManifestStatus::Aligned,
+            TimingPipelineId::SourceAligned,
+            vec![ScheduledAudio {
+                id: "block-1".to_owned(),
+                path: PathBuf::from("block-1.mp3"),
+                start_ms: 0,
+                end_ms: 1_000,
+                source_segments: vec![1],
+                measured_audio_ms: 1_000,
+                speech_end_ms: None,
+                rendered_audio_ms: 1_000,
+                tempo: 1.0,
+                island_id: Some("island-1".to_owned()),
+                cache_identity: "cache".to_owned(),
+                alignment: EntryAlignment {
+                    status: EntryAlignmentStatus::Aligned,
+                    anchors: vec![RenderedAnchor {
+                        id: "p-1-action-1".to_owned(),
+                        bookmark: "bookmark".to_owned(),
+                        source_ms: 400,
+                        raw_offset_ms: 400,
+                        rendered_ms: 400,
+                        drift_ms: 0,
+                        tolerance_ms: MAX_ANCHOR_DRIFT_MS,
+                        coupling: Coupling::Anchored,
+                    }],
+                },
+            }],
+        )
         .with_semantic_alignment_support(true)
         .with_source_timeline(&timeline, &layout)
         .unwrap();
