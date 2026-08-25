@@ -150,9 +150,9 @@ pub struct ManifestDiagnostics {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ManifestStatus {
-    #[default]
     Aligned,
     UnanchoredContinuous,
+    #[default]
     ReviewRequired,
 }
 
@@ -1160,6 +1160,39 @@ mod tests {
     }
 
     #[test]
+    fn hd_layout_groups_caddy_rolling_tail_as_one_utterance() {
+        let path =
+            std::env::temp_dir().join(format!("dubora-hd-layout-{}.srt", std::process::id()));
+        std::fs::write(
+            &path,
+            "22\n00:01:46,640 --> 00:01:51,522\nwith the new syntax\n\n23\n00:01:51,522 --> 00:01:53,522\nthat we will learn in this video today.\n\n24\n00:01:54,000 --> 00:01:56,000\nNext is another part.\n",
+        )
+        .unwrap();
+        let segments = crate::srt::parse_srt(&path).unwrap();
+        let timeline = SourceTimeline::from_files(&path, &path).unwrap();
+        let layout = build_sync_layout(&timeline, &segments).unwrap();
+        let plans = segments
+            .iter()
+            .map(|segment| SpeechPlan::plain(segment.index, segment.text.clone(), 2_000))
+            .collect::<Vec<_>>();
+
+        let utterances =
+            group_source_aligned_utterances(&segments, &plans, &timeline, &layout).unwrap();
+
+        assert_eq!(layout.blocks[0].source_segments, vec![22, 23]);
+        assert_eq!(
+            utterances[0]
+                .parts
+                .iter()
+                .map(|part| part.index)
+                .collect::<Vec<_>>(),
+            vec![22, 23]
+        );
+        assert_eq!(utterances[1].parts[0].index, 24);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn keeps_complete_sentences_and_large_gaps_separate() {
         let segments = vec![
             segment(1, "00:00:00,000", "00:00:01,000", "Một câu hoàn chỉnh."),
@@ -1191,6 +1224,22 @@ mod tests {
             alignment: EntryAlignment::default(),
         }]);
         assert!(manifest.validate(&[1, 2]).is_err());
+    }
+
+    #[test]
+    fn missing_manifest_status_defaults_to_review_required() {
+        let manifest: RenderManifest = serde_json::from_value(serde_json::json!({
+            "version": RENDER_MANIFEST_VERSION,
+            "sourceTimelineVersion": SOURCE_TIMELINE_VERSION,
+            "sourceTimelineIdentity": "timeline",
+            "islands": [],
+            "semanticAlignmentSupported": false,
+            "timingPipeline": "segmentedRollback",
+            "entries": []
+        }))
+        .unwrap();
+
+        assert_eq!(manifest.status, ManifestStatus::ReviewRequired);
     }
 
     #[test]

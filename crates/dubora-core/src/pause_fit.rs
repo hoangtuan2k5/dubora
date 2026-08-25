@@ -208,6 +208,7 @@ pub fn plan_pause_fit(
     );
     let keep = complement_windows(duration_ms, &drops);
     let recovered_ms = duration_ms.saturating_sub(keep.iter().map(|(s, e)| e - s).sum());
+    let fitted_speech_end = fitted_speech_end_ms(&keep, speech_end_ms);
 
     // Every removable window comes from detected silence. A bookmark hint is the
     // only deliberate exception: samples after the last bookmark are exempt.
@@ -218,7 +219,7 @@ pub fn plan_pause_fit(
             tail_recovered_ms: 0,
             internal_recovered_ms: 0,
             lead_recovered_ms: 0,
-            speech_end_ms,
+            speech_end_ms: fitted_speech_end_ms(&[(0, duration_ms)], speech_end_ms),
         });
     }
 
@@ -228,7 +229,7 @@ pub fn plan_pause_fit(
         tail_recovered_ms,
         internal_recovered_ms,
         lead_recovered_ms,
-        speech_end_ms,
+        speech_end_ms: fitted_speech_end,
     })
 }
 
@@ -352,13 +353,7 @@ pub fn detect_speech_end_ms(
     }
     let profile = PauseFitProfile::default();
     let intervals = detect_silences(ffmpeg, input, duration_ms, profile)?;
-    let plan = plan_pause_fit(
-        duration_ms,
-        &intervals,
-        None,
-        PauseFitMode::TailOnly,
-        profile,
-    )?;
+    let plan = plan_pause_fit(duration_ms, &intervals, None, PauseFitMode::Off, profile)?;
     Ok(Some(plan.speech_end_ms))
 }
 
@@ -652,6 +647,16 @@ fn non_empty_keep_windows(windows: Vec<(u32, u32)>, duration_ms: u32) -> Vec<(u3
     }
 }
 
+fn fitted_speech_end_ms(keep: &[(u32, u32)], raw_speech_end_ms: u32) -> u32 {
+    keep.iter()
+        .map(|(start_ms, end_ms)| {
+            let start_ms = (*start_ms).min(raw_speech_end_ms);
+            let end_ms = (*end_ms).min(raw_speech_end_ms);
+            end_ms.saturating_sub(start_ms)
+        })
+        .sum()
+}
+
 fn overlaps_speech(
     drops: &[SilenceInterval],
     silences: &[SilenceInterval],
@@ -717,7 +722,7 @@ mod tests {
         assert_eq!(plan.lead_recovered_ms, 160);
         assert_eq!(plan.tail_recovered_ms, 210);
         assert_eq!(plan.keep, vec![(160, 1240)]);
-        assert_eq!(plan.speech_end_ms, 1200);
+        assert_eq!(plan.speech_end_ms, 1040);
     }
 
     #[test]
@@ -787,6 +792,7 @@ mod tests {
         assert_eq!(plan.internal_recovered_ms, 300);
         assert_eq!(plan.tail_recovered_ms, 210);
         assert_eq!(plan.recovered_ms, 510);
+        assert_eq!(plan.speech_end_ms, 1600);
     }
 
     #[test]
