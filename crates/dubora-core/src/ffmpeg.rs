@@ -74,6 +74,25 @@ impl FfmpegPaths {
             .with_context(|| format!("Invalid audio duration for {}", path.display()))
     }
 
+    pub(crate) fn has_audio_stream(&self, path: &Path) -> Result<bool> {
+        let output = base_command(&self.ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path)
+            .output()
+            .with_context(|| format!("Failed to probe source audio {}", path.display()))?;
+        ensure_success(&output, "ffprobe source audio")?;
+        Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    }
+
     pub fn is_valid_audio(&self, path: &Path) -> bool {
         path.metadata().is_ok_and(|metadata| metadata.len() > 0)
             && self

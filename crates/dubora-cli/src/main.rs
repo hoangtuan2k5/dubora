@@ -105,6 +105,18 @@ struct Args {
     #[arg(long)]
     no_pause_fit: bool,
 
+    /// Mix the original audio bed quietly under the Vietnamese voiceover.
+    #[arg(long)]
+    duck_original: bool,
+
+    /// Normalize voiceover-only loudness toward -17 LUFS when outside the target range.
+    #[arg(long)]
+    loudness_normalize: bool,
+
+    /// Apply the opt-in 80 Hz voiceover high-pass filter.
+    #[arg(long)]
+    voiceover_eq: bool,
+
     /// Gemini API key; repeat this option to round-robin multiple keys.
     #[arg(long)]
     gemini_key: Vec<String>,
@@ -167,6 +179,9 @@ async fn main() -> Result<()> {
         natural_mode: args.natural_voice.then(|| args.natural_mode.into()),
         source_timing: args.source_timing.into(),
         pause_fit: !args.no_pause_fit,
+        duck_original: args.duck_original,
+        loudness_normalize: args.loudness_normalize,
+        voiceover_eq: args.voiceover_eq,
     };
 
     create_dubs(&config, args.target.as_deref(), options, &StdoutProgress).await?;

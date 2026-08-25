@@ -85,6 +85,9 @@ the input SRT is already Vietnamese.
 # Keep raw Natural Voice TTS files without TailOnly pause-fit recovery.
 ./target/release/dubora --natural-voice --no-pause-fit "course/part/lesson.mp4"
 
+# Optional audio polish; every flag is off by default.
+./target/release/dubora --duck-original --voiceover-eq --loudness-normalize "course/part/lesson.mp4"
+
 # Optional source-word timing experiment (uploads a temporary mono track to Azure Speech).
 # The default remains caption-derived and does not upload source audio.
 DUBORA_SOURCE_LOCALE=en-US ./target/release/dubora --natural-voice \
@@ -94,6 +97,9 @@ DUBORA_SOURCE_LOCALE=en-US ./target/release/dubora --natural-voice \
 Natural Voice applies TailOnly encoder lead/tail recovery by default. Use
 `--no-pause-fit` or `DUBORA_INTERNAL_PAUSE_FIT=0` to restore raw TTS timing.
 Use `DUBORA_INTERNAL_JOIN_FADES=0` only to restore the pre-PR4 mixer joins.
+`--duck-original` keeps the source audio bed at -22 dB, `--voiceover-eq` applies an 80 Hz
+voiceover high-pass, and `--loudness-normalize` targets -17 LUFS for voiceover only. These
+audio-polish options are opt-in and remain off by default.
 
 For timing-capable voices, Dubora synthesizes each source-aligned utterance once and measures the
 whole island before choosing a follow-up. A block may use at most one mutually exclusive follow-up:
@@ -447,5 +453,6 @@ If no matching SRT exists, the script stops and prints the paths it tried.
 - `work/` stores intermediate cleaned/translated SRT, TTS segments, and voiceover audio.
 - By default, input SRT files are assumed to already be Vietnamese.
 - `outputs/` stores final dubbed videos and matching `*.vi-dub.srt` subtitle files.
-- The final video keeps only the original video stream and the Vietnamese audio track.
+- By default, the final video keeps only the original video stream and the Vietnamese audio track;
+  opt-in audio polish can also retain a quiet source bed.
 - Output keeps the same folder structure as `assets/video/`.

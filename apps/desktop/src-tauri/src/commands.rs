@@ -69,6 +69,12 @@ pub struct StartDubRequest {
     pub natural_mode: NaturalMode,
     #[serde(default)]
     pub source_timing: SourceTiming,
+    #[serde(default)]
+    pub duck_original: bool,
+    #[serde(default)]
+    pub loudness_normalize: bool,
+    #[serde(default)]
+    pub voiceover_eq: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -650,6 +656,9 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
                     natural_mode: request.natural_voice.then_some(request.natural_mode),
                     source_timing: request.source_timing,
                     pause_fit: DubOptions::default().pause_fit,
+                    duck_original: request.duck_original,
+                    loudness_normalize: request.loudness_normalize,
+                    voiceover_eq: request.voiceover_eq,
                 };
 
                 let result = if request.targets.is_empty() {

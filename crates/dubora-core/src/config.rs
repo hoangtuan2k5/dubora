@@ -152,6 +152,9 @@ pub struct DubOptions {
     pub natural_mode: Option<NaturalMode>,
     pub source_timing: SourceTiming,
     pub pause_fit: bool,
+    pub duck_original: bool,
+    pub loudness_normalize: bool,
+    pub voiceover_eq: bool,
 }
 
 impl Default for DubOptions {
@@ -163,6 +166,9 @@ impl Default for DubOptions {
             natural_mode: None,
             source_timing: SourceTiming::CaptionDerived,
             pause_fit: true,
+            duck_original: false,
+            loudness_normalize: false,
+            voiceover_eq: false,
         }
     }
 }
@@ -242,5 +248,14 @@ mod tests {
                 .is_err()
         );
         assert!(config.with_style(" ").unwrap().style.is_empty());
+    }
+
+    #[test]
+    fn audio_polish_is_opt_in() {
+        let options = DubOptions::default();
+        assert!(!options.duck_original);
+        assert!(!options.loudness_normalize);
+        assert!(!options.voiceover_eq);
+        assert!(options.pause_fit);
     }
 }

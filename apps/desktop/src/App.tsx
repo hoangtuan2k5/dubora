@@ -566,6 +566,9 @@ function App() {
   const [naturalVoice, setNaturalVoice] = useState(false);
   const [naturalMode, setNaturalMode] = useState<"sync" | "balanced" | "natural">("balanced");
   const [sourceTiming, setSourceTiming] = useState<"caption-derived" | "azure-fast">("caption-derived");
+  const [duckOriginal, setDuckOriginal] = useState(false);
+  const [loudnessNormalize, setLoudnessNormalize] = useState(false);
+  const [voiceoverEq, setVoiceoverEq] = useState(false);
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [youtubeQuality, setYoutubeQuality] = useState("highest");
   const [importingYoutube, setImportingYoutube] = useState(false);
@@ -1115,7 +1118,18 @@ function App() {
     setProgress(null);
     setNotice("");
     try {
-      await api.startDub(targets, force, forceTts, translate, naturalVoice, naturalMode, sourceTiming);
+      await api.startDub(
+        targets,
+        force,
+        forceTts,
+        translate,
+        naturalVoice,
+        naturalMode,
+        sourceTiming,
+        duckOriginal,
+        loudnessNormalize,
+        voiceoverEq,
+      );
     } catch (error) {
       setBusy(false);
       setNotice(`Job thất bại: ${describeError(error)}`);
@@ -2152,6 +2166,33 @@ function App() {
                       </label>
                     </>
                   )}
+                  <OptionChip
+                    id="duck-original"
+                    label="Giữ nền gốc"
+                    title="Giữ âm thanh gốc ở mức nhỏ?"
+                    body="Trộn audio gốc ở -22 dB dưới giọng tiếng Việt. Chỉ bật khi muốn giữ nhạc hoặc tiếng gõ phím."
+                    hint="Mặc định tắt; video không có audio gốc sẽ bỏ qua tùy chọn này."
+                    checked={duckOriginal}
+                    onChange={setDuckOriginal}
+                  />
+                  <OptionChip
+                    id="loudness-normalize"
+                    label="Chuẩn hóa âm lượng"
+                    title="Chuẩn hóa loudness voiceover?"
+                    body="Đưa voiceover về khoảng -17 LUFS khi cần, trước khi trộn nền gốc."
+                    hint="Mặc định tắt; chỉ áp dụng cho voiceover."
+                    checked={loudnessNormalize}
+                    onChange={setLoudnessNormalize}
+                  />
+                  <OptionChip
+                    id="voiceover-eq"
+                    label="EQ voiceover"
+                    title="Lọc bớt dải trầm voiceover?"
+                    body="Bật high-pass 80 Hz cho voiceover để giảm ù nền."
+                    hint="Mặc định tắt; không dùng de-ess hoặc reverb."
+                    checked={voiceoverEq}
+                    onChange={setVoiceoverEq}
+                  />
                 </div>
                 <div className="control-bar-actions">
                   <button

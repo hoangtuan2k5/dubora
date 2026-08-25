@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::azure_voices::{AzureVoice, CapabilityState};
 use crate::build_audio::{build_voiceover_track, build_voiceover_track_from_manifest};
-use crate::build_video::build_dubbed_video;
+use crate::build_video::{AudioPolishOptions, build_dubbed_video};
 use crate::clean_rolling::clean_youtube_rolling_subtitles;
 use crate::config::{DubConfig, DubOptions, Provider, SourceTiming};
 use crate::duration_solver::MAX_TIME_STRETCH_TEMPO;
@@ -1177,6 +1177,11 @@ async fn create_dub_for_video(
         let output_srt = output_srt.clone();
         let vi_srt = vi_srt.clone();
         let label_video = label.clone();
+        let audio_polish = AudioPolishOptions {
+            duck_original: options.duck_original,
+            loudness_normalize: options.loudness_normalize,
+            voiceover_eq: options.voiceover_eq,
+        };
         tokio::task::spawn_blocking(move || {
             let staged_output = output.with_extension("pending.mp4");
             let staged_output_srt = output_srt.with_extension("pending.srt");
@@ -1190,7 +1195,9 @@ async fn create_dub_for_video(
                     staged_output_srt.display()
                 )
             })?;
-            if let Err(error) = build_dubbed_video(&ffmpeg, &video, &voiceover, &staged_output) {
+            if let Err(error) =
+                build_dubbed_video(&ffmpeg, &video, &voiceover, &staged_output, audio_polish)
+            {
                 let _ = fs::remove_file(&staged_output_srt);
                 return Err(error);
             }
