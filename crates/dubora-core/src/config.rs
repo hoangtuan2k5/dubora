@@ -143,7 +143,7 @@ pub struct DubConfig {
     pub ffmpeg: FfmpegPaths,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct DubOptions {
     pub force: bool,
     pub force_tts: bool,
@@ -151,6 +151,20 @@ pub struct DubOptions {
     /// Opt-in Natural Voice processing. `None` preserves the legacy pipeline.
     pub natural_mode: Option<NaturalMode>,
     pub source_timing: SourceTiming,
+    pub pause_fit: bool,
+}
+
+impl Default for DubOptions {
+    fn default() -> Self {
+        Self {
+            force: false,
+            force_tts: false,
+            translate: false,
+            natural_mode: None,
+            source_timing: SourceTiming::CaptionDerived,
+            pause_fit: true,
+        }
+    }
 }
 
 #[cfg(test)]

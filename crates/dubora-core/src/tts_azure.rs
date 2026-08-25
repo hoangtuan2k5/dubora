@@ -101,6 +101,7 @@ struct PendingUtterance {
     utterance: Utterance,
     path: PathBuf,
     measured_audio_ms: u32,
+    speech_end_ms: Option<u32>,
     events: Vec<TimingEvent>,
     semantic_expected: Vec<(String, u32, i64)>,
     structural_issue: Option<String>,
@@ -331,6 +332,7 @@ async fn synthesize_revised_utterance(
     output: &Path,
     rate_percent: i8,
     semantic_delays: &[(String, u16)],
+    pause_fit: bool,
 ) -> Result<PendingUtterance> {
     let prepared = utterance
         .parts
@@ -373,7 +375,7 @@ async fn synthesize_revised_utterance(
         semantic_delays,
         rate_percent,
     )?;
-    let (events, measured_audio_ms) = generate_timed_utterance(
+    let (events, measured_audio_ms, audio_path, speech_end_ms) = generate_timed_utterance(
         config,
         ffmpeg,
         output,
@@ -381,6 +383,7 @@ async fn synthesize_revised_utterance(
         &voice.short_name,
         &prepared,
         &timing_bookmarks,
+        pause_fit,
     )
     .await?;
     let structure = validate_bookmark_structure(&utterance, &events);
@@ -400,8 +403,9 @@ async fn synthesize_revised_utterance(
     }
     Ok(PendingUtterance {
         utterance,
-        path: output.to_owned(),
+        path: audio_path,
         measured_audio_ms,
+        speech_end_ms,
         events,
         semantic_expected,
         structural_issue: None,
@@ -440,6 +444,7 @@ fn pending_entry(
                 .map(|part| part.index)
                 .collect(),
             measured_audio_ms: candidate.measured_audio_ms,
+            speech_end_ms: candidate.speech_end_ms,
             rendered_audio_ms,
             tempo,
             island_id: Some(candidate.utterance.island_id),
@@ -664,6 +669,7 @@ pub async fn generate_all_tts_for_speech_plans(
     voice: &AzureVoice,
     output_dir: &Path,
     manifest_path: &Path,
+    pause_fit: bool,
     video: &str,
     progress: &dyn ProgressReporter,
 ) -> Result<()> {
@@ -707,6 +713,8 @@ pub async fn generate_all_tts_for_speech_plans(
     ));
     let client = Client::new();
     let mut generated_durations = HashMap::new();
+    let mut generated_paths = HashMap::new();
+    let mut generated_speech_ends = HashMap::new();
     let mut calibrated_plans = Vec::new();
     let mut review_required = false;
 
@@ -731,11 +739,14 @@ pub async fn generate_all_tts_for_speech_plans(
             mode,
         };
         let mut speech_plan_revisions = 0;
-        let mut result =
-            generate_plan_segment(&client, config, ffmpeg, output_dir, &plan, voice, 0).await?;
+        let mut result = generate_plan_segment(
+            &client, config, ffmpeg, output_dir, &plan, voice, 0, pause_fit,
+        )
+        .await?;
         if result.fallback {
-            let output = segment_path(output_dir, plan.index);
-            generated_durations.insert(plan.index, duration_ms(ffmpeg, &output)?);
+            generated_durations.insert(plan.index, result.measured_audio_ms);
+            generated_paths.insert(plan.index, result.path.clone());
+            generated_speech_ends.insert(plan.index, result.speech_end_ms);
             progress.event(ProgressEvent::new(
                 Stage::Tts,
                 video,
@@ -745,7 +756,7 @@ pub async fn generate_all_tts_for_speech_plans(
         }
 
         let output = segment_path(output_dir, plan.index);
-        let actual_duration_ms = duration_ms(ffmpeg, &output)?;
+        let actual_duration_ms = result.measured_audio_ms;
         let decision = solve_duration(target, actual_duration_ms, false)?;
         match decision {
             DurationDecision::Accept => {}
@@ -760,8 +771,16 @@ pub async fn generate_all_tts_for_speech_plans(
                     &plan,
                     voice,
                     rate_percent,
+                    pause_fit,
                 )
                 .await?;
+                if !result.fallback {
+                    // The regenerated raw file has a new cache identity; refresh its sibling.
+                    let stats = fit_audio_file(ffmpeg, &output, None, pause_fit)?;
+                    result.path = stats.path;
+                    result.measured_audio_ms = stats.measured_audio_ms;
+                    result.speech_end_ms = stats.speech_end_ms;
+                }
             }
             DurationDecision::RegenerateWithProsody { .. } => {
                 // This voice cannot express prosody; the bounded stretch below avoids an AI retry.
@@ -786,10 +805,15 @@ pub async fn generate_all_tts_for_speech_plans(
                     candidates,
                     voice,
                     target,
+                    pause_fit,
                 )
                 .await?;
                 plan = revised;
                 speech_plan_revisions = 1;
+                let stats = fit_audio_file(ffmpeg, &output, None, pause_fit)?;
+                result.path = stats.path;
+                result.measured_audio_ms = stats.measured_audio_ms;
+                result.speech_end_ms = stats.speech_end_ms;
             }
             DurationDecision::TimeStretch { .. } => {}
             DurationDecision::Reject { .. } => {
@@ -797,8 +821,15 @@ pub async fn generate_all_tts_for_speech_plans(
             }
         }
 
+        if result.fallback {
+            generated_durations.insert(plan.index, result.measured_audio_ms);
+            generated_paths.insert(plan.index, result.path.clone());
+            generated_speech_ends.insert(plan.index, result.speech_end_ms);
+            continue;
+        }
+
         if !result.fallback {
-            let mut final_duration_ms = duration_ms(ffmpeg, &output)?;
+            let mut final_duration_ms = result.measured_audio_ms;
             if matches!(
                 solve_duration(target, final_duration_ms, true)?,
                 DurationDecision::Reject { .. }
@@ -831,11 +862,16 @@ pub async fn generate_all_tts_for_speech_plans(
                     candidates,
                     voice,
                     target,
+                    pause_fit,
                 )
                 .await?;
                 plan = revised;
                 speech_plan_revisions = 2;
                 final_duration_ms = revised_duration_ms;
+                let stats = fit_audio_file(ffmpeg, &output, None, pause_fit)?;
+                result.path = stats.path;
+                result.measured_audio_ms = stats.measured_audio_ms;
+                result.speech_end_ms = stats.speech_end_ms;
             }
             match solve_duration(target, final_duration_ms, true)? {
                 DurationDecision::Accept => {}
@@ -872,6 +908,8 @@ pub async fn generate_all_tts_for_speech_plans(
                 }
             }
             generated_durations.insert(plan.index, final_duration_ms);
+            generated_paths.insert(plan.index, result.path.clone());
+            generated_speech_ends.insert(plan.index, result.speech_end_ms);
             calibrated_plans.push((plan.clone(), final_duration_ms));
         }
         progress.event(
@@ -916,11 +954,18 @@ pub async fn generate_all_tts_for_speech_plans(
             }
             Ok(ScheduledAudio {
                 id: format!("segment-{}", segment.index),
-                path: segment_path(output_dir, segment.index),
+                path: generated_paths
+                    .get(&segment.index)
+                    .cloned()
+                    .with_context(|| format!("Missing generated path for segment {}", segment.index))?,
                 start_ms: allocation.render_start_ms,
                 end_ms: allocation.slot_end_ms,
                 source_segments: vec![segment.index],
                 measured_audio_ms,
+                speech_end_ms: generated_speech_ends
+                    .get(&segment.index)
+                    .copied()
+                    .flatten(),
                 rendered_audio_ms: (f64::from(measured_audio_ms) / tempo).ceil() as u32,
                 tempo,
                 island_id: Some(allocation.island_id.clone()),
@@ -970,6 +1015,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
     voice: &AzureVoice,
     output_dir: &Path,
     manifest_path: &Path,
+    pause_fit: bool,
     video: &str,
     progress: &dyn ProgressReporter,
 ) -> Result<()> {
@@ -1117,7 +1163,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
             &semantic_bookmarks,
             0,
         )?;
-        let (events, duration_ms) = match generate_timed_utterance(
+        let (events, duration_ms, audio_path, speech_end_ms) = match generate_timed_utterance(
             config,
             ffmpeg,
             &candidate_output,
@@ -1125,6 +1171,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
             &voice.short_name,
             &prepared,
             &timing_bookmarks,
+            pause_fit,
         )
         .await
         {
@@ -1175,8 +1222,9 @@ pub async fn generate_all_tts_for_aligned_utterances(
         }
         pending_utterances.push(PendingUtterance {
             utterance: utterance.clone(),
-            path: candidate_output,
+            path: audio_path,
             measured_audio_ms: duration_ms,
+            speech_end_ms,
             events,
             semantic_expected,
             structural_issue,
@@ -1428,6 +1476,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
                         &candidate_path,
                         rate_percent,
                         &semantic_delays,
+                        pause_fit,
                     )
                     .await;
                     let repaired = match repair {
@@ -1641,6 +1690,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
                 &candidate_path,
                 0,
                 &[],
+                pause_fit,
             )
             .await
             {
@@ -1944,47 +1994,65 @@ async fn generate_timed_utterance(
     voice_name: &str,
     plans: &[SpeechPlan],
     bookmarks: &[String],
-) -> Result<(Vec<TimingEvent>, u32)> {
+    pause_fit: bool,
+) -> Result<(Vec<TimingEvent>, u32, PathBuf, Option<u32>)> {
     let cache_material = format!("source-timeline-v{SOURCE_TIMELINE_VERSION}\n{ssml}");
     let cache_key = tts_cache_key(UTTERANCE_CACHE_PROVIDER, voice_name, "", &cache_material);
     let sidecar = timing_sidecar_path(output);
-    if is_fresh_audio_file(ffmpeg, output, &cache_key)
+    let events = if is_fresh_audio_file(ffmpeg, output, &cache_key)
         && let Ok(cached) = fs::read(&sidecar)
         && let Ok(cached) = serde_json::from_slice::<TimingSidecar>(&cached)
         && cached.cache_key == cache_key
         && cached.bookmarks == bookmarks
     {
         record_azure_cache_hit();
-        let duration_ms = duration_ms(ffmpeg, output)?;
-        return Ok((cached.events, duration_ms));
-    }
-    // Do not let a failed new synthesis accidentally reuse audio from another voice or SSML.
-    let _ = fs::remove_file(output);
-    let _ = fs::remove_file(&sidecar);
-    let timed = synthesize_ssml_with_timing(config, ssml).await?;
-    let tmp = temporary_path(output);
-    fs::write(&tmp, &timed.audio).with_context(|| format!("Failed to write {}", tmp.display()))?;
-    if !ffmpeg.is_valid_audio(&tmp) {
-        let _ = fs::remove_file(&tmp);
-        bail!("Azure timing synthesis returned invalid audio");
-    }
-    if output.exists() {
-        fs::remove_file(output)
-            .with_context(|| format!("Failed to replace {}", output.display()))?;
-    }
-    fs::rename(&tmp, output).with_context(|| format!("Failed to promote {}", output.display()))?;
-    write_tts_cache_key(output, &cache_key)?;
-    fs::write(
-        &sidecar,
-        serde_json::to_vec_pretty(&TimingSidecar {
-            cache_key,
-            bookmarks: bookmarks.to_vec(),
-            events: timed.events.clone(),
-            plan_count: plans.len(),
-        })?,
-    )?;
-    let duration_ms = duration_ms(ffmpeg, output)?;
-    Ok((timed.events, duration_ms))
+        cached.events
+    } else {
+        // Do not let a failed new synthesis accidentally reuse audio from another voice or SSML.
+        let _ = fs::remove_file(output);
+        let _ = fs::remove_file(&sidecar);
+        crate::pause_fit::remove_fitted_artifacts(output);
+        let timed = synthesize_ssml_with_timing(config, ssml).await?;
+        let tmp = temporary_path(output);
+        fs::write(&tmp, &timed.audio)
+            .with_context(|| format!("Failed to write {}", tmp.display()))?;
+        if !ffmpeg.is_valid_audio(&tmp) {
+            let _ = fs::remove_file(&tmp);
+            bail!("Azure timing synthesis returned invalid audio");
+        }
+        if output.exists() {
+            fs::remove_file(output)
+                .with_context(|| format!("Failed to replace {}", output.display()))?;
+        }
+        fs::rename(&tmp, output)
+            .with_context(|| format!("Failed to promote {}", output.display()))?;
+        write_tts_cache_key(output, &cache_key)?;
+        fs::write(
+            &sidecar,
+            serde_json::to_vec_pretty(&TimingSidecar {
+                cache_key,
+                bookmarks: bookmarks.to_vec(),
+                events: timed.events.clone(),
+                plan_count: plans.len(),
+            })?,
+        )?;
+        timed.events
+    };
+    let speech_end_hint_ms = bookmarks.last().and_then(|bookmark| {
+        events.iter().find_map(|event| {
+            (event.kind == TimingEventKind::Bookmark
+                && event.mark.as_deref() == Some(bookmark.as_str()))
+            .then(|| u32::try_from(event.offset_ms).ok())
+            .flatten()
+        })
+    });
+    let stats = fit_audio_file(ffmpeg, output, speech_end_hint_ms, pause_fit)?;
+    Ok((
+        events,
+        stats.measured_audio_ms,
+        stats.path,
+        stats.speech_end_ms,
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2121,6 +2189,41 @@ struct SegmentResult {
     index: usize,
     fallback: bool,
     attempt_errors: Vec<String>,
+    path: PathBuf,
+    measured_audio_ms: u32,
+    speech_end_ms: Option<u32>,
+}
+
+struct AudioFit {
+    path: PathBuf,
+    measured_audio_ms: u32,
+    speech_end_ms: Option<u32>,
+}
+
+fn fit_audio_file(
+    ffmpeg: &FfmpegPaths,
+    input: &Path,
+    speech_end_hint_ms: Option<u32>,
+    pause_fit: bool,
+) -> Result<AudioFit> {
+    let mode = if pause_fit {
+        crate::pause_fit::PauseFitMode::TailOnly
+    } else {
+        crate::pause_fit::PauseFitMode::Off
+    };
+    match crate::pause_fit::fit_tts_file(ffmpeg, input, speech_end_hint_ms, mode) {
+        Ok(stats) => Ok(AudioFit {
+            path: stats.path,
+            measured_audio_ms: stats.measured_audio_ms,
+            speech_end_ms: Some(stats.speech_end_ms),
+        }),
+        Err(error) if error.to_string().contains("silencedetect") => Ok(AudioFit {
+            path: input.to_owned(),
+            measured_audio_ms: duration_ms(ffmpeg, input)?,
+            speech_end_ms: speech_end_hint_ms,
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 async fn generate_segment(
@@ -2139,6 +2242,9 @@ async fn generate_segment(
             index: segment.index,
             fallback: false,
             attempt_errors: Vec::new(),
+            path: output.clone(),
+            measured_audio_ms: duration_ms(ffmpeg, &output)?,
+            speech_end_ms: None,
         });
     }
     record_azure_logical_generation();
@@ -2154,6 +2260,9 @@ async fn generate_segment(
                     index: segment.index,
                     fallback: false,
                     attempt_errors,
+                    path: output.clone(),
+                    measured_audio_ms: duration_ms(ffmpeg, &output)?,
+                    speech_end_ms: None,
                 });
             }
             Err(error) => {
@@ -2190,6 +2299,9 @@ async fn generate_segment(
         index: segment.index,
         fallback: true,
         attempt_errors,
+        path: output.clone(),
+        measured_audio_ms: duration_ms(ffmpeg, &output)?,
+        speech_end_ms: None,
     })
 }
 
@@ -2201,9 +2313,20 @@ async fn generate_plan_segment(
     plan: &SpeechPlan,
     voice: &AzureVoice,
     rate_percent: i8,
+    pause_fit: bool,
 ) -> Result<SegmentResult> {
     let output = segment_path(output_dir, plan.index);
-    generate_plan_segment_to_path(client, config, ffmpeg, &output, plan, voice, rate_percent).await
+    generate_plan_segment_to_path(
+        client,
+        config,
+        ffmpeg,
+        &output,
+        plan,
+        voice,
+        rate_percent,
+        pause_fit,
+    )
+    .await
 }
 
 async fn generate_plan_segment_to_path(
@@ -2214,32 +2337,36 @@ async fn generate_plan_segment_to_path(
     plan: &SpeechPlan,
     voice: &AzureVoice,
     rate_percent: i8,
+    pause_fit: bool,
 ) -> Result<SegmentResult> {
     let plan = prepared_speech_plan(plan);
     let ssml = render_speech_plan_ssml_with_rate(voice, &plan, rate_percent)?;
     let cache_key = speech_plan_cache_key_with_rate(voice, &plan, rate_percent)?;
     if is_fresh_audio_file(ffmpeg, &output, &cache_key) {
         record_azure_cache_hit();
+        let stats = fit_audio_file(ffmpeg, output, None, pause_fit)?;
         return Ok(SegmentResult {
             index: plan.index,
             fallback: false,
             attempt_errors: Vec::new(),
+            path: stats.path,
+            measured_audio_ms: stats.measured_audio_ms,
+            speech_end_ms: stats.speech_end_ms,
         });
     }
     record_azure_logical_generation();
+    crate::pause_fit::remove_fitted_artifacts(output);
 
     let tmp = temporary_path(&output);
     let mut attempt_errors = Vec::new();
     let mut fallback_allowed = false;
+    let mut synthesized = false;
     for attempt in 1..=RETRIES {
         let _ = fs::remove_file(&tmp);
         match synthesize_ssml_once(client, config, ffmpeg, &ssml, &tmp, &output, &cache_key).await {
             Ok(()) => {
-                return Ok(SegmentResult {
-                    index: plan.index,
-                    fallback: false,
-                    attempt_errors,
-                });
+                synthesized = true;
+                break;
             }
             Err(error) => {
                 fallback_allowed = error.fallback_allowed;
@@ -2255,7 +2382,7 @@ async fn generate_plan_segment_to_path(
         }
     }
 
-    if !fallback_allowed {
+    if !synthesized && !fallback_allowed {
         bail!(
             "Azure TTS failed for Natural Voice segment {} after {RETRIES} attempts: {}",
             plan.index,
@@ -2265,18 +2392,24 @@ async fn generate_plan_segment_to_path(
                 .unwrap_or("unknown error")
         );
     }
-    ffmpeg.create_silence(&output)?;
-    if !ffmpeg.is_valid_audio(&output) {
-        bail!(
-            "Silent fallback is invalid for Natural Voice segment {}",
-            plan.index
-        );
+    if !synthesized {
+        ffmpeg.create_silence(&output)?;
+        if !ffmpeg.is_valid_audio(&output) {
+            bail!(
+                "Silent fallback is invalid for Natural Voice segment {}",
+                plan.index
+            );
+        }
+        write_tts_cache_key(&output, &cache_key)?;
     }
-    write_tts_cache_key(&output, &cache_key)?;
+    let stats = fit_audio_file(ffmpeg, output, None, pause_fit)?;
     Ok(SegmentResult {
         index: plan.index,
-        fallback: true,
+        fallback: !synthesized,
         attempt_errors,
+        path: stats.path,
+        measured_audio_ms: stats.measured_audio_ms,
+        speech_end_ms: stats.speech_end_ms,
     })
 }
 
@@ -2290,6 +2423,7 @@ async fn select_revision_candidate(
     candidates: Vec<SpeechPlan>,
     voice: &AzureVoice,
     target: DurationTarget,
+    pause_fit: bool,
 ) -> Result<(SpeechPlan, u32)> {
     let mut best: Option<(SpeechPlan, PathBuf, u32)> = None;
 
@@ -2304,6 +2438,7 @@ async fn select_revision_candidate(
             &candidate,
             voice,
             0,
+            pause_fit,
         )
         .await?;
         if result.fallback {
@@ -2311,7 +2446,7 @@ async fn select_revision_candidate(
             continue;
         }
 
-        let duration_ms = duration_ms(ffmpeg, &candidate_output)?;
+        let duration_ms = result.measured_audio_ms;
         if duration_ms >= current_duration_ms {
             remove_audio_artifacts(&candidate_output);
             continue;
@@ -2363,6 +2498,7 @@ fn remove_audio_artifacts(output: &Path) {
     let _ = fs::remove_file(output);
     let _ = fs::remove_file(cache_key_path(output));
     let _ = fs::remove_file(timing_sidecar_path(output));
+    crate::pause_fit::remove_fitted_artifacts(output);
 }
 
 fn promote_audio_candidate(candidate_output: &Path, output: &Path) -> Result<()> {
@@ -2383,12 +2519,16 @@ fn promote_audio_candidate(candidate_output: &Path, output: &Path) -> Result<()>
     remove_audio_artifacts(&backup);
     let output_cache = cache_key_path(output);
     let output_timing = timing_sidecar_path(output);
+    let candidate_fitted = crate::pause_fit::fitted_audio_path(candidate_output);
+    let output_fitted = crate::pause_fit::fitted_audio_path(output);
+    let output_fitted_cache = cache_key_path(&output_fitted);
     if output.is_file() != output_cache.is_file() {
         bail!(
             "Existing audio/cache pair is incomplete: {}",
             output.display()
         );
     }
+    crate::pause_fit::remove_fitted_artifacts(output);
     let backup_result = (|| -> Result<()> {
         if output.is_file() {
             fs::rename(output, &backup)?;
@@ -2423,6 +2563,14 @@ fn promote_audio_candidate(candidate_output: &Path, output: &Path) -> Result<()>
             fs::rename(&candidate_timing, &output_timing).with_context(|| {
                 format!("Failed to promote timing metadata for {}", output.display())
             })?;
+        }
+        if candidate_fitted.is_file() {
+            fs::rename(&candidate_fitted, &output_fitted).with_context(|| {
+                format!("Failed to promote fitted audio for {}", output.display())
+            })?;
+            fs::rename(cache_key_path(&candidate_fitted), &output_fitted_cache).with_context(
+                || format!("Failed to promote fitted cache for {}", output.display()),
+            )?;
         }
         Ok(())
     })();
@@ -3334,6 +3482,7 @@ mod tests {
             end_ms: 3_000,
             source_segments: vec![1],
             measured_audio_ms: 1_000,
+            speech_end_ms: None,
             rendered_audio_ms: 1_000,
             tempo: 1.0,
             island_id: Some("island-1".to_owned()),
@@ -3398,6 +3547,7 @@ mod tests {
             end_ms: 1_000,
             source_segments: vec![1],
             measured_audio_ms: 1_000,
+            speech_end_ms: None,
             rendered_audio_ms: 1_000,
             tempo: 1.0,
             island_id: Some("island-1".to_owned()),
@@ -3437,6 +3587,7 @@ mod tests {
             end_ms: 1_000,
             source_segments: vec![1],
             measured_audio_ms: 1_000,
+            speech_end_ms: None,
             rendered_audio_ms: 1_000,
             tempo: 1.0,
             island_id: Some("island-1".to_owned()),
@@ -3576,6 +3727,7 @@ mod tests {
             },
             path: PathBuf::from("utterance-1.mp3"),
             measured_audio_ms: 4_000,
+            speech_end_ms: None,
             events: vec![
                 TimingEvent {
                     kind: TimingEventKind::Bookmark,

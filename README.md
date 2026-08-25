@@ -82,11 +82,17 @@ Vietnamese.
 # Vietnamese SRT.
 ./target/release/dubora --translate --natural-voice "course/part/lesson.mp4"
 
+# Keep raw Natural Voice TTS files without TailOnly pause-fit recovery.
+./target/release/dubora --natural-voice --no-pause-fit "course/part/lesson.mp4"
+
 # Optional source-word timing experiment (uploads a temporary mono track to Azure Speech).
 # The default remains caption-derived and does not upload source audio.
 DUBORA_SOURCE_LOCALE=en-US ./target/release/dubora --natural-voice \
   --source-timing azure-fast "course/part/lesson.mp4"
 ```
+
+Natural Voice applies TailOnly encoder lead/tail recovery by default. Use
+`--no-pause-fit` or `DUBORA_INTERNAL_PAUSE_FIT=0` to restore raw TTS timing.
 
 For timing-capable voices, Dubora synthesizes each source-aligned utterance once and measures the
 whole island before choosing a follow-up. A block may use at most one mutually exclusive follow-up:

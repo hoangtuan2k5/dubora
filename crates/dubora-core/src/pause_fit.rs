@@ -1,4 +1,13 @@
-use anyhow::{Result, bail};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
+
+use crate::ffmpeg::FfmpegPaths;
+use crate::tts_cache::{
+    is_fresh_audio_file, read_tts_cache_key, tts_cache_key, write_tts_cache_key,
+};
 
 pub const PAUSE_FIT_VERSION: u8 = 1;
 pub const INTERNAL_NOISE_DB: f64 = -40.0;
@@ -18,7 +27,7 @@ pub enum PauseFitMode {
     WithInternal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct PauseFitProfile {
     pub version: u8,
     pub internal_noise_db: f64,
@@ -63,6 +72,17 @@ pub struct PauseFitPlan {
     pub internal_recovered_ms: u32,
     pub lead_recovered_ms: u32,
     pub speech_end_ms: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PauseFitStats {
+    pub path: PathBuf,
+    pub recovered_ms: u32,
+    pub tail_recovered_ms: u32,
+    pub lead_recovered_ms: u32,
+    pub internal_recovered_ms: u32,
+    pub speech_end_ms: u32,
+    pub measured_audio_ms: u32,
 }
 
 pub fn parse_silencedetect(stderr: &str, duration_ms: u32) -> Result<Vec<SilenceInterval>> {
@@ -210,6 +230,313 @@ pub fn plan_pause_fit(
         lead_recovered_ms,
         speech_end_ms,
     })
+}
+
+pub fn fitted_audio_path(input: &Path) -> PathBuf {
+    input.with_file_name(format!(
+        "{}.fitted{}",
+        input
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("audio"),
+        input.extension().map_or_else(String::new, |extension| {
+            format!(".{}", extension.to_string_lossy())
+        })
+    ))
+}
+
+pub(crate) fn fitted_sidecar_path(input: &Path) -> PathBuf {
+    fitted_audio_path(input).with_extension("json")
+}
+
+pub fn fitted_cache_key(
+    raw_cache_key: &str,
+    mode: PauseFitMode,
+    speech_end_hint_ms: Option<u32>,
+    profile: PauseFitProfile,
+) -> String {
+    let mode = match mode {
+        PauseFitMode::Off => "off",
+        PauseFitMode::TailOnly => "tail-only",
+        PauseFitMode::WithInternal => "with-internal",
+    };
+    let material = format!(
+        "version={};mode={mode};noise={};tail={};detect={};floor={};lead={};tailKeep={};cutFade={};minSpeechIsland={};encoder={};hint={speech_end_hint_ms:?}",
+        profile.version,
+        profile.internal_noise_db,
+        profile.tail_noise_db,
+        profile.detect_min_ms,
+        profile.pause_keep_floor_ms,
+        profile.lead_keep_ms,
+        profile.tail_keep_ms,
+        profile.cut_fade_ms,
+        profile.min_speech_island_ms,
+        profile.encoder,
+    );
+    tts_cache_key("pause-fit-v1", raw_cache_key, "", &material)
+}
+
+pub fn fit_tts_file(
+    ffmpeg: &FfmpegPaths,
+    input: &Path,
+    speech_end_hint_ms: Option<u32>,
+    mode: PauseFitMode,
+) -> Result<PauseFitStats> {
+    let duration_ms = audio_duration_ms(ffmpeg, input)?;
+    if matches!(mode, PauseFitMode::Off) && speech_end_hint_ms.is_some() {
+        remove_fitted_artifacts(input);
+        return Ok(PauseFitStats {
+            path: input.to_owned(),
+            recovered_ms: 0,
+            tail_recovered_ms: 0,
+            lead_recovered_ms: 0,
+            internal_recovered_ms: 0,
+            speech_end_ms: speech_end_hint_ms.unwrap().min(duration_ms),
+            measured_audio_ms: duration_ms,
+        });
+    }
+
+    let profile = PauseFitProfile::default();
+    let intervals = detect_silences(ffmpeg, input, duration_ms, profile)?;
+    let plan = plan_pause_fit(duration_ms, &intervals, speech_end_hint_ms, mode, profile)?;
+    if plan.recovered_ms == 0 || matches!(mode, PauseFitMode::Off) {
+        remove_fitted_artifacts(input);
+        return Ok(PauseFitStats {
+            path: input.to_owned(),
+            recovered_ms: 0,
+            tail_recovered_ms: 0,
+            lead_recovered_ms: 0,
+            internal_recovered_ms: 0,
+            speech_end_ms: plan.speech_end_ms,
+            measured_audio_ms: duration_ms,
+        });
+    }
+
+    let raw_cache_key = read_tts_cache_key(input)?;
+    let fitted = fitted_audio_path(input);
+    let cache_key = fitted_cache_key(&raw_cache_key, mode, speech_end_hint_ms, profile);
+    if !is_fresh_audio_file(ffmpeg, &fitted, &cache_key) {
+        let temporary = temporary_fitted_path(&fitted);
+        let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(crate::tts_cache::tts_cache_key_path(&temporary));
+        apply_pause_fit(ffmpeg, input, &temporary, &plan)?;
+        if fitted.exists() {
+            fs::remove_file(&fitted)
+                .with_context(|| format!("Failed to replace {}", fitted.display()))?;
+        }
+        fs::rename(&temporary, &fitted)
+            .with_context(|| format!("Failed to promote {}", fitted.display()))?;
+        write_tts_cache_key(&fitted, &cache_key)?;
+    }
+    write_fitted_sidecar(&fitted, input, &plan, mode, profile)?;
+    let measured_audio_ms = audio_duration_ms(ffmpeg, &fitted)?;
+    Ok(PauseFitStats {
+        path: fitted,
+        recovered_ms: plan.recovered_ms,
+        tail_recovered_ms: plan.tail_recovered_ms,
+        lead_recovered_ms: plan.lead_recovered_ms,
+        internal_recovered_ms: plan.internal_recovered_ms,
+        speech_end_ms: plan.speech_end_ms,
+        measured_audio_ms,
+    })
+}
+
+pub fn detect_speech_end_ms(
+    ffmpeg: &FfmpegPaths,
+    input: &Path,
+    speech_end_hint_ms: Option<u32>,
+) -> Result<Option<u32>> {
+    let duration_ms = audio_duration_ms(ffmpeg, input)?;
+    if let Some(hint) = speech_end_hint_ms {
+        return Ok(Some(hint.min(duration_ms)));
+    }
+    let profile = PauseFitProfile::default();
+    let intervals = detect_silences(ffmpeg, input, duration_ms, profile)?;
+    let plan = plan_pause_fit(
+        duration_ms,
+        &intervals,
+        None,
+        PauseFitMode::TailOnly,
+        profile,
+    )?;
+    Ok(Some(plan.speech_end_ms))
+}
+
+pub fn apply_pause_fit(
+    ffmpeg: &FfmpegPaths,
+    input: &Path,
+    output: &Path,
+    plan: &PauseFitPlan,
+) -> Result<()> {
+    if plan.keep.is_empty() {
+        bail!("Pause-fit plan has no audio to keep");
+    }
+    let filter = if plan.keep.len() == 1 {
+        let (start_ms, end_ms) = plan.keep[0];
+        let trim = if start_ms == 0 {
+            format!("atrim=end={}", seconds(end_ms))
+        } else {
+            format!("atrim=start={}:end={}", seconds(start_ms), seconds(end_ms))
+        };
+        format!("[0:a]{trim},asetpts=PTS-STARTPTS[outa]")
+    } else {
+        let mut filter = String::new();
+        for (index, (start_ms, end_ms)) in plan.keep.iter().copied().enumerate() {
+            let duration_ms = end_ms - start_ms;
+            let fade_ms = CUT_FADE_MS.min(duration_ms / 2);
+            filter.push_str(&format!(
+                "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS",
+                seconds(start_ms),
+                seconds(end_ms)
+            ));
+            if fade_ms > 0 {
+                let fade = seconds(fade_ms);
+                let fade_start = seconds(duration_ms - fade_ms);
+                filter.push_str(&format!(
+                    ",afade=t=in:st=0:d={fade},afade=t=out:st={fade_start}:d={fade}"
+                ));
+            }
+            filter.push_str(&format!("[pause{index}];"));
+        }
+        let labels = (0..plan.keep.len())
+            .map(|index| format!("[pause{index}]"))
+            .collect::<String>();
+        filter.push_str(&format!(
+            "{labels}concat=n={}:v=0:a=1[outa]",
+            plan.keep.len()
+        ));
+        filter
+    };
+    let mut command = ffmpeg.ffmpeg_command();
+    command
+        .args(["-y", "-i"])
+        .arg(input)
+        .args([
+            "-filter_complex",
+            &filter,
+            "-map",
+            "[outa]",
+            "-vn",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+        ])
+        .arg(output);
+    ffmpeg.checked(&mut command, "apply pause-fit")
+}
+
+fn detect_silences(
+    ffmpeg: &FfmpegPaths,
+    input: &Path,
+    duration_ms: u32,
+    profile: PauseFitProfile,
+) -> Result<Vec<SilenceInterval>> {
+    let internal = run_silencedetect(ffmpeg, input, profile.internal_noise_db, duration_ms)?;
+    let tail = run_silencedetect(ffmpeg, input, profile.tail_noise_db, duration_ms)?;
+    let mut intervals = internal;
+    if let Some(tail) = tail
+        .iter()
+        .find(|interval| interval.end_ms.saturating_add(1) >= duration_ms)
+        && let Some(existing) = intervals
+            .iter_mut()
+            .find(|interval| interval.end_ms.saturating_add(1) >= duration_ms)
+    {
+        existing.start_ms = existing.start_ms.min(tail.start_ms);
+        existing.end_ms = duration_ms;
+    }
+    Ok(intervals)
+}
+
+fn run_silencedetect(
+    ffmpeg: &FfmpegPaths,
+    input: &Path,
+    noise_db: f64,
+    duration_ms: u32,
+) -> Result<Vec<SilenceInterval>> {
+    let mut command = ffmpeg.ffmpeg_command();
+    let filter = format!("silencedetect=noise={noise_db}dB:d=0.080");
+    let output = command
+        .args(["-i"])
+        .arg(input)
+        .args(["-af", &filter, "-f", "null", "-"])
+        .output()
+        .with_context(|| format!("Failed to run silencedetect on {}", input.display()))?;
+    if !output.status.success() {
+        bail!(
+            "silencedetect failed for {}: {}",
+            input.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    parse_silencedetect(&String::from_utf8_lossy(&output.stderr), duration_ms)
+}
+
+fn audio_duration_ms(ffmpeg: &FfmpegPaths, input: &Path) -> Result<u32> {
+    let duration = ffmpeg.audio_duration(input)?;
+    if duration <= 0.0 {
+        bail!("Audio has no duration: {}", input.display());
+    }
+    Ok((duration * 1_000.0).round() as u32)
+}
+
+fn temporary_fitted_path(output: &Path) -> PathBuf {
+    output.with_file_name(format!(
+        "{}.tmp.{}",
+        output
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("audio"),
+        output.extension().map_or_else(
+            || "mp3".to_owned(),
+            |extension| extension.to_string_lossy().into_owned()
+        )
+    ))
+}
+
+pub(crate) fn remove_fitted_artifacts(input: &Path) {
+    let fitted = fitted_audio_path(input);
+    let _ = fs::remove_file(&fitted);
+    let _ = fs::remove_file(crate::tts_cache::tts_cache_key_path(&fitted));
+    let _ = fs::remove_file(fitted_sidecar_path(input));
+}
+
+fn write_fitted_sidecar(
+    fitted: &Path,
+    source: &Path,
+    plan: &PauseFitPlan,
+    mode: PauseFitMode,
+    profile: PauseFitProfile,
+) -> Result<()> {
+    let mode = match mode {
+        PauseFitMode::Off => "off",
+        PauseFitMode::TailOnly => "tail-only",
+        PauseFitMode::WithInternal => "with-internal",
+    };
+    fs::write(
+        fitted_sidecar_path(source),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "recoveredMs": plan.recovered_ms,
+            "tailRecoveredMs": plan.tail_recovered_ms,
+            "leadRecoveredMs": plan.lead_recovered_ms,
+            "internalRecoveredMs": plan.internal_recovered_ms,
+            "speechEndMs": plan.speech_end_ms,
+            "mode": mode,
+            "profile": profile,
+            "sourcePath": source,
+            "fittedPath": fitted,
+        }))?,
+    )
+    .with_context(|| {
+        format!(
+            "Failed to write pause-fit metadata for {}",
+            fitted.display()
+        )
+    })
+}
+
+fn seconds(milliseconds: u32) -> String {
+    format!("{:.3}", f64::from(milliseconds) / 1_000.0)
 }
 
 fn parse_seconds(value: &str) -> Result<f64> {
@@ -519,6 +846,87 @@ mod tests {
         file.read_exact(&mut sample).unwrap();
         assert_ne!(sample, [0, 0]);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fitted_cache_key_changes_for_every_sample_changing_profile_value() {
+        let raw = "raw-cache-key";
+        let profile = PauseFitProfile::default();
+        let key = |profile| fitted_cache_key(raw, PauseFitMode::TailOnly, Some(5000), profile);
+        let mut changed = profile;
+        changed.version += 1;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.internal_noise_db -= 1.0;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.tail_noise_db -= 1.0;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.detect_min_ms += 1;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.pause_keep_floor_ms += 1;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.lead_keep_ms += 1;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.tail_keep_ms += 1;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.cut_fade_ms += 1;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.min_speech_island_ms += 1;
+        assert_ne!(key(profile), key(changed));
+        let mut changed = profile;
+        changed.encoder = "other-encoder";
+        assert_ne!(key(profile), key(changed));
+        assert_ne!(
+            fitted_cache_key(raw, PauseFitMode::TailOnly, Some(5000), profile),
+            fitted_cache_key(raw, PauseFitMode::WithInternal, Some(5000), profile)
+        );
+        assert_ne!(
+            fitted_cache_key(raw, PauseFitMode::TailOnly, Some(5000), profile),
+            fitted_cache_key(raw, PauseFitMode::TailOnly, Some(5001), profile)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local FFmpeg with silencedetect and libmp3lame"]
+    fn fits_an_encoded_lead_and_tail_without_overwriting_the_raw_audio() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "dubora-pause-fit-integration-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        let wav = directory.join("raw.wav");
+        let raw = directory.join("raw.mp3");
+        write_tone_silence_wav(
+            &wav,
+            48_000,
+            &[(200, None), (1_000, Some(-6.0)), (250, None)],
+        )?;
+        let ffmpeg = crate::ffmpeg::FfmpegPaths::resolve(None);
+        let mut command = ffmpeg.ffmpeg_command();
+        command
+            .args(["-y", "-i"])
+            .arg(&wav)
+            .args(["-c:a", "libmp3lame", "-q:a", "2"])
+            .arg(&raw);
+        ffmpeg.checked(&mut command, "encode pause-fit fixture")?;
+        write_tts_cache_key(&raw, "raw-pause-fit-fixture")?;
+
+        let stats = fit_tts_file(&ffmpeg, &raw, None, PauseFitMode::TailOnly)?;
+        assert!(stats.recovered_ms > 0);
+        assert_eq!(stats.path, fitted_audio_path(&raw));
+        assert!(raw.is_file());
+        assert!(stats.path.is_file());
+        assert!(stats.measured_audio_ms < 1_600);
+
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     fn write_tone_silence_wav(

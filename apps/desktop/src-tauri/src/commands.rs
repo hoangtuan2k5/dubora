@@ -649,6 +649,7 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
                     translate: request.translate,
                     natural_mode: request.natural_voice.then_some(request.natural_mode),
                     source_timing: request.source_timing,
+                    pause_fit: DubOptions::default().pause_fit,
                 };
 
                 let result = if request.targets.is_empty() {

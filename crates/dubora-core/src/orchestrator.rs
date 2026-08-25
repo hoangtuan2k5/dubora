@@ -32,6 +32,9 @@ use crate::utterance::{ManifestStatus, RENDER_MANIFEST_VERSION, RenderManifest, 
 
 // One-release internal escape hatch; remove after source-aligned rollout acceptance.
 const NATURAL_TIMING_PIPELINE_ENV: &str = "DUBORA_INTERNAL_NATURAL_TIMING_PIPELINE";
+// Set to 0 to keep raw TTS files; DUBORA_INTERNAL_PAUSE_FIT_INTERNAL remains reserved for a
+// later paid-listen rollout and is intentionally not read here.
+const PAUSE_FIT_ENV: &str = "DUBORA_INTERNAL_PAUSE_FIT";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NaturalTimingPipeline {
@@ -71,6 +74,19 @@ fn select_natural_timing_pipeline(
         configured
     } else {
         NaturalTimingPipeline::SegmentedRollback
+    }
+}
+
+fn pause_fit_enabled(options: DubOptions) -> Result<bool> {
+    if !options.pause_fit {
+        return Ok(false);
+    }
+    match std::env::var(PAUSE_FIT_ENV) {
+        Ok(value) => Ok(value.trim() != "0"),
+        Err(std::env::VarError::NotPresent) => Ok(true),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{PAUSE_FIT_ENV} must contain valid Unicode")
+        }
     }
 }
 
@@ -615,6 +631,7 @@ async fn create_dub_for_video(
     let output = output_path(&config.root, video, relative)?;
     let output_srt = companion_output_srt(&output);
     let label = relative.display().to_string();
+    let pause_fit = pause_fit_enabled(options)?;
 
     if skip_allowed(options) && output_pair_is_up_to_date(&output, &output_srt, video, &srt)? {
         progress.event(ProgressEvent::new(
@@ -922,6 +939,7 @@ async fn create_dub_for_video(
                     &voice,
                     &tts_dir,
                     &render_manifest,
+                    pause_fit,
                     &label,
                     progress,
                 )
@@ -940,6 +958,7 @@ async fn create_dub_for_video(
                     &voice,
                     &tts_dir,
                     &render_manifest,
+                    pause_fit,
                     &label,
                     progress,
                 )
@@ -1368,6 +1387,14 @@ mod tests {
     #[test]
     fn skip_requires_fresh_output_without_force_flags() {
         let normal = DubOptions::default();
+        assert!(normal.pause_fit);
+        assert!(
+            !pause_fit_enabled(DubOptions {
+                pause_fit: false,
+                ..normal
+            })
+            .unwrap()
+        );
         assert!(skip_allowed(normal));
         assert!(!skip_allowed(DubOptions {
             force: true,
@@ -1542,6 +1569,7 @@ mod tests {
                     &voice,
                     &aligned_output_dir,
                     &aligned_manifest,
+                    false,
                     "fake-provider-budget",
                     &crate::progress::NoopProgress,
                 )
@@ -1575,6 +1603,7 @@ mod tests {
                     &voice,
                     &rollback_output_dir,
                     &rollback_manifest,
+                    false,
                     "fake-provider-budget",
                     &crate::progress::NoopProgress,
                 )
@@ -1691,6 +1720,7 @@ mod tests {
             end_ms: 128_799,
             source_segments: vec![26],
             measured_audio_ms: 4_799,
+            speech_end_ms: None,
             rendered_audio_ms: 4_799,
             tempo: 1.0,
             island_id: Some("island-fallback-26".to_owned()),
@@ -1733,6 +1763,7 @@ mod tests {
                 end_ms: position * 1_000 + 900,
                 source_segments: vec![position as usize],
                 measured_audio_ms: 900,
+                speech_end_ms: None,
                 rendered_audio_ms: 900,
                 tempo: 1.0,
                 island_id: Some("island-1".to_owned()),

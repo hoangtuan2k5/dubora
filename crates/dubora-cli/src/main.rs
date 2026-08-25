@@ -101,6 +101,10 @@ struct Args {
     #[arg(long, value_enum, default_value_t)]
     source_timing: SourceTimingArg,
 
+    /// Keep raw TTS files without pause-fit duration recovery.
+    #[arg(long)]
+    no_pause_fit: bool,
+
     /// Gemini API key; repeat this option to round-robin multiple keys.
     #[arg(long)]
     gemini_key: Vec<String>,
@@ -162,6 +166,7 @@ async fn main() -> Result<()> {
         translate: args.translate,
         natural_mode: args.natural_voice.then(|| args.natural_mode.into()),
         source_timing: args.source_timing.into(),
+        pause_fit: !args.no_pause_fit,
     };
 
     create_dubs(&config, args.target.as_deref(), options, &StdoutProgress).await?;
