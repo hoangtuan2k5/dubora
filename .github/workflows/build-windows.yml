@@ -13,6 +13,8 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "CHANGELOG.md"
+      - "scripts/changelog-release.py"
       - "scripts/prepare-ffmpeg-windows.ps1"
       - "scripts/prepare-ytdlp-windows.ps1"
       - ".github/workflows/build-windows.yml"
@@ -138,18 +140,36 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Read version and notes from CHANGELOG
+        id: changelog
+        run: |
+          version="$(python3 scripts/changelog-release.py version)"
+          tag="$(python3 scripts/changelog-release.py tag)"
+          title="$(python3 scripts/changelog-release.py title)"
+          python3 scripts/changelog-release.py notes > "$RUNNER_TEMP/release-notes.md"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "title=${title}" >> "$GITHUB_OUTPUT"
+          echo "Using CHANGELOG ${tag} (${title})"
+          echo "----- notes -----"
+          cat "$RUNNER_TEMP/release-notes.md"
+
       - name: Create tag and release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.changelog.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.changelog.outputs.title }}
         run: |
-          version="$(node -p "JSON.parse(require('fs').readFileSync('apps/desktop/src-tauri/tauri.conf.json', 'utf8')).version")"
-          tag="v${version}-build.${GITHUB_RUN_NUMBER}"
           mapfile -d '' assets < <(find release-assets -type f -name '*.exe' -print0)
           if (( ${#assets[@]} == 0 )); then
             echo "No .exe release assets found" >&2
             exit 1
           fi
-          gh release create "$tag" "${assets[@]}" \
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "GitHub Release ${RELEASE_TAG} already exists; skip. Bump CHANGELOG.md to publish again."
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
             --target "$GITHUB_SHA" \
-            --title "Dubora $tag" \
-            --generate-notes
+            --title "$RELEASE_TITLE" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -1635,7 +1635,7 @@ function App() {
               </article>
 
               <p className="guide-footer">
-                Dubora v0.1.0 · © 2026 Hoàng Chiều Nguyễn Tuấn · tuan@hoangtuan.dev ·{" "}
+                Dubora v0.2.0 · © 2026 Hoàng Chiều Nguyễn Tuấn · tuan@hoangtuan.dev ·{" "}
                 github.com/hoangtuan2k5
               </p>
             </div>
