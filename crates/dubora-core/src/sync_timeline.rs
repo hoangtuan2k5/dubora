@@ -995,11 +995,12 @@ fn refresh_allocated_block(block: &mut AllocatedBlock, measured_ms: u32) {
     block.rendered_audio_ms = ((f64::from(measured_ms) / tempo).ceil() as u32).min(slot_ms);
 }
 
-/// Borrow the previous block's unused tail after TTS is measured.
+/// Borrow unused same-island tails after TTS is measured.
 ///
 /// The 250 ms preferred-start window cannot use a multi-second silent setup cue. Speech never
 /// overlaps, island bounds stay hard, and the stretch cap stays 1.13x. Blocks that already fit
-/// are left on their preferred start.
+/// stay on their preferred start unless a later movable block is still over-cap: then unused
+/// prefix slack packs left through fitted neighbors so it can travel more than one hop.
 pub fn apply_measured_spillback(
     allocations: &mut HashMap<String, AllocatedBlock>,
     measured_audio_ms: &HashMap<String, u32>,
@@ -1056,7 +1057,30 @@ pub fn apply_measured_spillback_except(
                 )
             };
             let current_slot = current_end.saturating_sub(current_start).max(1);
-            if allocation_fits_cap(current_measured, current_slot) {
+            let current_fits = allocation_fits_cap(current_measured, current_slot);
+            let mut suffix_needs_slack = false;
+            for (offset, block_id) in ordered[index..].iter().enumerate() {
+                if offset > 0 && skip_current_ids.contains(block_id) {
+                    break;
+                }
+                if skip_current_ids.contains(block_id) {
+                    continue;
+                }
+                let Some(measured) = measured_audio_ms.get(block_id).copied() else {
+                    continue;
+                };
+                let Some(block) = allocations.get(block_id) else {
+                    continue;
+                };
+                if !allocation_fits_cap(
+                    measured,
+                    block.slot_end_ms.saturating_sub(block.render_start_ms),
+                ) {
+                    suffix_needs_slack = true;
+                    break;
+                }
+            }
+            if current_fits && !suffix_needs_slack {
                 continue;
             }
             let island_start = layout
@@ -1076,8 +1100,13 @@ pub fn apply_measured_spillback_except(
             if earliest >= current_start {
                 continue;
             }
-            let borrow_for_unity = current_measured.saturating_sub(current_slot);
-            let borrowed = borrow_for_unity.min(current_start.saturating_sub(earliest));
+            let available = current_start.saturating_sub(earliest);
+            let needed = if current_fits {
+                available
+            } else {
+                current_measured.saturating_sub(current_slot)
+            };
+            let borrowed = needed.min(available);
             if borrowed == 0 {
                 continue;
             }
@@ -3037,6 +3066,207 @@ mod tests {
         apply_measured_spillback_except(&mut allocations, &measured, &layout, &skip);
         assert_eq!(allocations["block-16"].render_start_ms, 124_000);
         assert!((allocations["block-16"].tempo - 1.372).abs() < 0.001);
+    }
+
+    #[test]
+    fn measured_spillback_packs_fitted_predecessors_to_reach_a_later_over_cap() {
+        let layout = SyncLayout {
+            blocks: vec![
+                NarrationBlock {
+                    id: "block-a".to_owned(),
+                    start_ms: 80,
+                    end_ms: 20_000,
+                    preferred_start_ms: 80,
+                    source_segments: vec![1],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-1".to_owned(),
+                },
+                NarrationBlock {
+                    id: "block-b".to_owned(),
+                    start_ms: 20_000,
+                    end_ms: 22_000,
+                    preferred_start_ms: 20_000,
+                    source_segments: vec![2],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-1".to_owned(),
+                },
+                NarrationBlock {
+                    id: "block-c".to_owned(),
+                    start_ms: 22_000,
+                    end_ms: 28_000,
+                    preferred_start_ms: 22_000,
+                    source_segments: vec![3],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-1".to_owned(),
+                },
+            ],
+            islands: vec![SyncIsland {
+                id: "island-1".to_owned(),
+                start_ms: 80,
+                end_ms: 28_000,
+                block_ids: vec![
+                    "block-a".to_owned(),
+                    "block-b".to_owned(),
+                    "block-c".to_owned(),
+                ],
+                hard_boundary_before: false,
+            }],
+        };
+        let mut allocations = HashMap::new();
+        allocations.insert(
+            "block-a".to_owned(),
+            AllocatedBlock {
+                block_id: "block-a".to_owned(),
+                island_id: "island-1".to_owned(),
+                render_start_ms: 80,
+                slot_end_ms: 20_000,
+                predicted_audio_ms: 12_000,
+                rendered_audio_ms: 12_000,
+                tempo: 1.0,
+            },
+        );
+        allocations.insert(
+            "block-b".to_owned(),
+            AllocatedBlock {
+                block_id: "block-b".to_owned(),
+                island_id: "island-1".to_owned(),
+                render_start_ms: 20_000,
+                slot_end_ms: 22_000,
+                predicted_audio_ms: 2_000,
+                rendered_audio_ms: 2_000,
+                tempo: 1.0,
+            },
+        );
+        allocations.insert(
+            "block-c".to_owned(),
+            AllocatedBlock {
+                block_id: "block-c".to_owned(),
+                island_id: "island-1".to_owned(),
+                render_start_ms: 22_000,
+                slot_end_ms: 28_000,
+                predicted_audio_ms: 10_000,
+                rendered_audio_ms: 6_000,
+                tempo: 10_000.0 / 6_000.0,
+            },
+        );
+        let measured = HashMap::from([
+            ("block-a".to_owned(), 12_000),
+            ("block-b".to_owned(), 2_000),
+            ("block-c".to_owned(), 10_000),
+        ]);
+
+        apply_measured_spillback(&mut allocations, &measured, &layout);
+
+        let first = &allocations["block-a"];
+        let middle = &allocations["block-b"];
+        let last = &allocations["block-c"];
+        assert_eq!(first.render_start_ms, 80);
+        assert_eq!(first.slot_end_ms, middle.render_start_ms);
+        assert_eq!(middle.slot_end_ms, last.render_start_ms);
+        assert!(middle.render_start_ms < 20_000);
+        assert!(last.render_start_ms < 22_000);
+        assert!(first.tempo <= MAX_TIMING_TEMPO + f64::EPSILON);
+        assert!(middle.tempo <= MAX_TIMING_TEMPO + f64::EPSILON);
+        assert!(last.tempo <= MAX_TIMING_TEMPO + f64::EPSILON);
+        assert!(!group_exceeds_tempo_cap(
+            &allocation_groups(&layout)[0],
+            &allocations,
+            &measured
+        ));
+    }
+
+    #[test]
+    fn measured_spillback_does_not_pack_through_a_hard_anchored_neighbor() {
+        let layout = SyncLayout {
+            blocks: vec![
+                NarrationBlock {
+                    id: "block-a".to_owned(),
+                    start_ms: 0,
+                    end_ms: 8_000,
+                    preferred_start_ms: 0,
+                    source_segments: vec![1],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-1".to_owned(),
+                },
+                NarrationBlock {
+                    id: "block-b".to_owned(),
+                    start_ms: 8_000,
+                    end_ms: 10_000,
+                    preferred_start_ms: 8_000,
+                    source_segments: vec![2],
+                    anchor_ids: vec!["enter".to_owned()],
+                    island_id: "island-1".to_owned(),
+                },
+                NarrationBlock {
+                    id: "block-c".to_owned(),
+                    start_ms: 10_000,
+                    end_ms: 14_000,
+                    preferred_start_ms: 10_000,
+                    source_segments: vec![3],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-1".to_owned(),
+                },
+            ],
+            islands: vec![SyncIsland {
+                id: "island-1".to_owned(),
+                start_ms: 0,
+                end_ms: 14_000,
+                block_ids: vec![
+                    "block-a".to_owned(),
+                    "block-b".to_owned(),
+                    "block-c".to_owned(),
+                ],
+                hard_boundary_before: false,
+            }],
+        };
+        let mut allocations = HashMap::new();
+        allocations.insert(
+            "block-a".to_owned(),
+            AllocatedBlock {
+                block_id: "block-a".to_owned(),
+                island_id: "island-1".to_owned(),
+                render_start_ms: 0,
+                slot_end_ms: 8_000,
+                predicted_audio_ms: 2_000,
+                rendered_audio_ms: 2_000,
+                tempo: 1.0,
+            },
+        );
+        allocations.insert(
+            "block-b".to_owned(),
+            AllocatedBlock {
+                block_id: "block-b".to_owned(),
+                island_id: "island-1".to_owned(),
+                render_start_ms: 8_000,
+                slot_end_ms: 10_000,
+                predicted_audio_ms: 2_000,
+                rendered_audio_ms: 2_000,
+                tempo: 1.0,
+            },
+        );
+        allocations.insert(
+            "block-c".to_owned(),
+            AllocatedBlock {
+                block_id: "block-c".to_owned(),
+                island_id: "island-1".to_owned(),
+                render_start_ms: 10_000,
+                slot_end_ms: 14_000,
+                predicted_audio_ms: 8_000,
+                rendered_audio_ms: 4_000,
+                tempo: 2.0,
+            },
+        );
+        let measured = HashMap::from([
+            ("block-a".to_owned(), 2_000),
+            ("block-b".to_owned(), 2_000),
+            ("block-c".to_owned(), 8_000),
+        ]);
+        let skip = HashSet::from(["block-b".to_owned()]);
+
+        apply_measured_spillback_except(&mut allocations, &measured, &layout, &skip);
+
+        assert_eq!(allocations["block-b"].render_start_ms, 8_000);
+        assert!(allocations["block-c"].tempo > MAX_TIMING_TEMPO);
     }
 
     #[test]
