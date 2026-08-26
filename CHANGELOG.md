@@ -11,6 +11,11 @@ heading when you want a new GitHub Release; `## [Unreleased]` is ignored.
 
 ## [Unreleased]
 
+### Fixed
+
+- Spell dotted model versions such as Qwen 3.8 as `ba chấm tám` instead of thirty-eight
+- Spell GPU SKUs such as RTX 4060 digit-by-digit (`bốn không sáu không`)
+
 ## [0.2.0] - 2026-08-26
 
 Natural Voice production cut: keep speech at or below 1.13x, publish duration-safe

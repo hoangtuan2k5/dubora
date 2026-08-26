@@ -3498,7 +3498,7 @@ pub(crate) fn prepare_tts_text(text: &str) -> String {
                 .join(" chấm ")
         })
         .into_owned();
-    TECHNICAL_TOKEN
+    let with_tokens = TECHNICAL_TOKEN
         .get_or_init(|| {
             Regex::new(
                 r"https?://[A-Za-z0-9][A-Za-z0-9._~:/?@!$&'()*+=%#-]*[A-Za-z0-9/#]|/[A-Za-z0-9_.-]*[A-Za-z0-9_-](?:/[A-Za-z0-9_.-]*[A-Za-z0-9_-])+|\b[A-Za-z][A-Za-z0-9.-]*:\d+\b|\b[A-Za-z_][A-Za-z0-9_]*(?:[/:;,\x5C][A-Za-z0-9_./:,\x5C-]*[A-Za-z0-9_/-])+",
@@ -3508,7 +3508,59 @@ pub(crate) fn prepare_tts_text(text: &str) -> String {
         .replace_all(&with_spoken_ips, |captures: &regex::Captures<'_>| {
             spell_technical_token(&captures[0])
         })
+        .into_owned();
+    let with_versions = spell_dotted_versions(&with_tokens);
+    spell_gpu_model_numbers(&with_versions)
+}
+
+fn spell_dotted_versions(text: &str) -> String {
+    static VERSION: OnceLock<Regex> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            Regex::new(r"(^|[^\d.])(\d{1,2}(?:\.\d{1,2}){1,2})(?:-(\d{1,4})([BbMm]))?\b").unwrap()
+        })
+        .replace_all(text, |captures: &regex::Captures<'_>| {
+            let mut spoken = captures[1].to_owned();
+            spoken.push_str(&spell_dotted_number(&captures[2]));
+            if let (Some(count), Some(unit)) = (captures.get(3), captures.get(4)) {
+                spoken.push(' ');
+                spoken.push_str(&spell_integer_digits(count.as_str()));
+                spoken.push(' ');
+                spoken.push_str(unit.as_str());
+            }
+            spoken
+        })
         .into_owned()
+}
+
+fn spell_gpu_model_numbers(text: &str) -> String {
+    static GPU: OnceLock<Regex> = OnceLock::new();
+    GPU.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b((?:geforce\s+)?(?:rtx|gtx)|(?:radeon\s+)?rx|gt|gpu|vga|card(?:\s+màn\s+hình)?)\s*-?\s*(\d{3,4})\b",
+        )
+        .unwrap()
+    })
+    .replace_all(text, |captures: &regex::Captures<'_>| {
+        format!("{} {}", &captures[1], spell_integer_digits(&captures[2]))
+    })
+    .into_owned()
+}
+
+fn spell_dotted_number(token: &str) -> String {
+    token
+        .split('.')
+        .map(spell_integer_digits)
+        .collect::<Vec<_>>()
+        .join(" chấm ")
+}
+
+fn spell_integer_digits(digits: &str) -> String {
+    digits
+        .chars()
+        .map(spell_digit)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn spell_technical_token(token: &str) -> String {
@@ -4318,6 +4370,18 @@ mod tests {
             "hai chấm hai chấm ép ép ép ép hai chấm một chín hai chấm không chấm hai chấm một hai tám"
         );
         assert_eq!(prepare_tts_text("1:2:3"), "1:2:3");
+        assert_eq!(
+            prepare_tts_text("Qwen 3.8-27B trên một RTX 4060 8 gigs."),
+            "Qwen ba chấm tám hai bảy B trên một RTX bốn không sáu không 8 gigs."
+        );
+        assert_eq!(
+            prepare_tts_text("Qwen 3.8 và Opus 4.6 trên card RTX4060 Ti."),
+            "Qwen ba chấm tám và Opus bốn chấm sáu trên card RTX bốn không sáu không Ti."
+        );
+        assert_eq!(
+            prepare_tts_text("Caddy phiên bản 2.0 vẫn chạy."),
+            "Caddy phiên bản hai chấm không vẫn chạy."
+        );
         let ssml = build_ssml("voice", "chat", "Xin chào");
         assert!(ssml.contains("<mstts:express-as style=\"chat\">Xin chào</mstts:express-as>"));
     }
