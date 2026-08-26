@@ -806,8 +806,8 @@ async fn create_dub_for_video(
         let mut source_for_cache = fs::read(&plan_input_srt)?;
         source_for_cache.extend_from_slice(&source_timeline_bytes);
         let cache_key = tts_cache_key(
-            // v23 invalidates plans before conversational-register and framing compaction.
-            "gemini-speech-plan-v24",
+            // v25 invalidates plans before hedge-prefix compaction and extra-anchor stripping.
+            "gemini-speech-plan-v25",
             // Keep this comment adjacent to the version so future prompt/input changes bump it.
             &format!("{mode:?}:{}", options.translate),
             &format!("{}|{}", voice.short_name, voice.styles.join("|")),
@@ -1028,20 +1028,21 @@ async fn create_dub_for_video(
             let bytes = fs::read(&render_manifest)?;
             let mut manifest: RenderManifest =
                 serde_json::from_slice(&bytes).context("Invalid Natural Voice render manifest")?;
-            manifest.status = ManifestStatus::ReviewRequired;
-            manifest
-                .diagnostics
-                .review_reasons
-                .push("speech_plan:semantic_anchor_mapping_review".to_owned());
-            for plan in plans
-                .plans
-                .iter()
-                .filter(|plan| !plan.semantic_anchors.is_empty())
-            {
-                manifest.diagnostics.review_reasons.push(format!(
-                    "segment-{}:semantic_anchor_mapping_review",
-                    plan.index
-                ));
+            let mapping_reasons = std::iter::once(
+                "speech_plan:semantic_anchor_mapping_review".to_owned(),
+            )
+            .chain(
+                plans
+                    .plans
+                    .iter()
+                    .filter(|plan| plan.semantic_anchor_invalid)
+                    .map(|plan| format!("segment-{}:semantic_anchor_mapping_review", plan.index)),
+            );
+            manifest.diagnostics.review_reasons.extend(mapping_reasons);
+            // Dragon HD has no word/bookmark events, so unmapped source actions cannot be timed.
+            // Keep the mapping gap in diagnostics and publish when measured timing stayed in cap.
+            if timing_pipeline != NaturalTimingPipeline::UnanchoredContinuous {
+                manifest.status = ManifestStatus::ReviewRequired;
             }
             fs::write(&render_manifest, serde_json::to_vec_pretty(&manifest)?)?;
         }

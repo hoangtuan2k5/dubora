@@ -1255,6 +1255,7 @@ fn parse_plan_response(
             plan.repair_model_spoken_length();
             plan.compact_optional_framing();
             plan.repair_model_emphasis();
+            plan.repair_model_pauses();
             plan.validate(allowed_styles)?;
             if let Some(timeline) = timeline {
                 let required = timeline
@@ -1263,6 +1264,11 @@ fn parse_plan_response(
                     .filter(|phrase| phrase.required)
                     .map(|phrase| (phrase.id.clone(), phrase.text.clone()))
                     .collect::<Vec<_>>();
+                plan.semantic_anchors.retain(|anchor| {
+                    required
+                        .iter()
+                        .any(|(anchor_id, _)| anchor_id == &anchor.anchor_id)
+                });
                 let inferred_anchor =
                     infer_missing_semantic_anchors(&mut plan, &required, timeline);
                 plan.compact_anchor_leads();

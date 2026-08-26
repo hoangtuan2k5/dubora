@@ -37,7 +37,7 @@ use crate::sync_timeline::{
     SOURCE_TIMELINE_VERSION, SourceTimeline, SyncLayout, allocate_blocks_best_effort,
     allocate_measured_group, allocate_measured_group_with_anchors, allocate_segments,
     allocation_groups, apply_measured_spillback, apply_measured_spillback_except,
-    group_exceeds_tempo_cap,
+    cover_hard_anchor_windows, group_exceeds_tempo_cap,
 };
 use crate::translate_gemini::{
     SpeechPlanRevisionRequest, revise_speech_plan, revise_speech_plans_batch, revision_word_budget,
@@ -63,7 +63,7 @@ const CONCISE_REVISION_BATCH_SIZE: usize = 20;
 const DURATION_CALIBRATION_VERSION: u8 = 1;
 const MIN_DURATION_CALIBRATION_SAMPLES: usize = 5;
 const MAX_DURATION_CALIBRATION_SAMPLES: usize = 64;
-const MAX_DURATION_RATE_REPAIR_PERCENT: i8 = 12;
+const MAX_DURATION_RATE_REPAIR_PERCENT: i8 = 20;
 
 #[cfg(test)]
 type TestRestResponder = Box<dyn Fn(&str) -> Result<Vec<u8>> + Send + Sync>;
@@ -149,6 +149,7 @@ fn is_provisional_review_reason(reason: &str) -> bool {
         ":measured_allocation_infeasible:",
         ":measured_anchor_allocation_infeasible:",
         ":concise_revision_unresolved",
+        ":duration_repair_unresolved",
         ":semantic_repair_unavailable",
         ":semantic_repair_unresolved",
     ]
@@ -1893,6 +1894,12 @@ pub async fn generate_all_tts_for_aligned_utterances(
             layout,
             &hard_anchored_block_ids(&measured_anchor_map),
         );
+        cover_hard_anchor_windows(
+            &mut render_allocations,
+            &measured,
+            layout,
+            &measured_anchor_map,
+        );
         let duration_feasible =
             complete && !group_exceeds_tempo_cap(&group, &render_allocations, &measured);
 
@@ -2076,15 +2083,18 @@ pub async fn generate_all_tts_for_aligned_utterances(
                             semantic_evidence.insert(id, evidence);
                         }
                         entries.push(entry);
+                    } else if duration_repair {
+                        // Azure rate undershoot still leaves the slot over 1.13x. Fall through
+                        // to a Gemini concise rewrite instead of fail-closing on SSML alone.
+                        diagnostics.review_reasons.push(format!(
+                            "utterance-{}:duration_repair_unresolved",
+                            base.utterance.id
+                        ));
+                        concise_candidates.push(base);
                     } else {
                         diagnostics.review_reasons.push(format!(
-                            "utterance-{}:{}_repair_unresolved",
-                            base.utterance.id,
-                            if duration_repair {
-                                "duration"
-                            } else {
-                                "semantic"
-                            },
+                            "utterance-{}:semantic_repair_unresolved",
+                            base.utterance.id
                         ));
                         let (entry, evidence) = pending_entry(base, &allocation);
                         if let Some((id, evidence)) = evidence {
@@ -2192,8 +2202,17 @@ pub async fn generate_all_tts_for_aligned_utterances(
             } else {
                 match revise_speech_plans_batch(gemini_keys, request_batch, 1).await {
                     Ok(revisions) => {
-                        revision_cache.entries.insert(cache_key, revisions.clone());
-                        revision_cache_dirty = true;
+                        let returned = revisions
+                            .iter()
+                            .map(|plan| plan.index)
+                            .collect::<HashSet<_>>();
+                        if request_batch
+                            .iter()
+                            .all(|request| returned.contains(&request.plan.index))
+                        {
+                            revision_cache.entries.insert(cache_key, revisions.clone());
+                            revision_cache_dirty = true;
+                        }
                         revisions
                     }
                     Err(error) => {
@@ -2213,6 +2232,34 @@ pub async fn generate_all_tts_for_aligned_utterances(
                     .into_iter()
                     .map(|revision| (revision.index, revision)),
             );
+            let missing = request_batch
+                .iter()
+                .filter(|request| !revised_by_index.contains_key(&request.plan.index))
+                .cloned()
+                .collect::<Vec<_>>();
+            for request in missing {
+                match revise_speech_plans_batch(gemini_keys, std::slice::from_ref(&request), 1)
+                    .await
+                {
+                    Ok(revisions) => {
+                        revised_by_index.extend(
+                            revisions
+                                .into_iter()
+                                .map(|revision| (revision.index, revision)),
+                        );
+                    }
+                    Err(error) => {
+                        progress.event(ProgressEvent::new(
+                            Stage::Tts,
+                            video,
+                            format!(
+                                "Concise revision for speech part {} was unavailable: {error:#}",
+                                request.plan.index
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
     if revision_cache_dirty {
@@ -2442,8 +2489,12 @@ fn apply_final_semantic_evidence(
         diagnostics
             .anchor_drifts_ms
             .extend(anchors.iter().map(|anchor| anchor.drift_ms));
+        let duration_safe = entry.tempo <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+            && entry.rendered_audio_ms <= entry.end_ms.saturating_sub(entry.start_ms);
+        let early_drift = alignment.drift_ms.is_some_and(|drift| drift < 0)
+            && alignment.reason.as_deref() == Some("semantic_anchor_drift");
         entry.alignment = EntryAlignment {
-            status: if alignment.accepted {
+            status: if alignment.accepted || (duration_safe && early_drift) {
                 EntryAlignmentStatus::Aligned
             } else {
                 review_required = true;
@@ -2517,6 +2568,7 @@ fn finalize_measured_schedule(
             layout,
             &hard_anchored_block_ids(measured_anchors),
         );
+        cover_hard_anchor_windows(allocations, &measured, layout, measured_anchors);
         for entry in entries.iter_mut() {
             let Some(block) = layout
                 .blocks
@@ -4729,6 +4781,46 @@ mod tests {
     }
 
     #[test]
+    fn final_anchor_gate_muxes_duration_safe_early_tail_actions() {
+        let bookmark = "dubora-u16-ap-26-action-1".to_owned();
+        let evidence = HashMap::from([(
+            "utterance-16".to_owned(),
+            SemanticEvidence {
+                events: vec![TimingEvent {
+                    kind: TimingEventKind::Bookmark,
+                    offset_ms: 4_000,
+                    duration_ms: 0,
+                    mark: Some(bookmark.clone()),
+                    text: None,
+                }],
+                expected: vec![(bookmark, 127_818, MAX_ANCHOR_DRIFT_MS)],
+            },
+        )]);
+        let mut entries = vec![ScheduledAudio {
+            id: "utterance-16".to_owned(),
+            path: PathBuf::from("utterance-16.mp3"),
+            start_ms: 121_920,
+            end_ms: 126_960,
+            source_segments: vec![26],
+            measured_audio_ms: 5_040,
+            speech_end_ms: None,
+            rendered_audio_ms: 5_040,
+            tempo: 1.0,
+            island_id: Some("island-3".to_owned()),
+            cache_identity: "cache".to_owned(),
+            alignment: EntryAlignment::default(),
+        }];
+        let mut diagnostics = ManifestDiagnostics::default();
+        assert!(!apply_final_semantic_evidence(
+            &mut entries,
+            &evidence,
+            &mut diagnostics
+        ));
+        assert_eq!(entries[0].alignment.status, EntryAlignmentStatus::Aligned);
+        assert!(entries[0].alignment.anchors[0].drift_ms < 0);
+    }
+
+    #[test]
     fn final_anchor_gate_leaves_unanchored_entries_not_applicable() {
         let mut entries = vec![ScheduledAudio {
             id: "utterance-1".to_owned(),
@@ -4847,6 +4939,7 @@ mod tests {
             AlignedFollowUp::DurationRepair
         );
         assert_eq!(duration_repair_rate(1_242, 1_000), Some(10));
+        assert_eq!(duration_repair_rate(1_318, 1_000), Some(17));
         assert!(duration_repair_rate(1_400, 1_000).is_none());
     }
 
@@ -4910,6 +5003,7 @@ mod tests {
             "island-1:measured_allocation_infeasible:base",
             "island-1:measured_anchor_allocation_infeasible:anchor",
             "utterance-1:concise_revision_unresolved",
+            "utterance-1:duration_repair_unresolved",
             "utterance-1:semantic_repair_unavailable",
             "utterance-1:semantic_repair_unresolved",
         ] {

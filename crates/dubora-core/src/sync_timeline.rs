@@ -1096,6 +1096,90 @@ pub fn apply_measured_spillback_except(
     }
 }
 
+/// Keep a block's slot covering its measured hard source actions.
+///
+/// Duration packing and spillback may steal a tail to help a later over-cap neighbor. If that tail
+/// holds `nhấn Enter` / click timing, semantic repair cannot recover: the expected source time is
+/// then after `slot_end`. Extend the slot and push the next start when the next block is not
+/// itself hard-anchored.
+pub fn cover_hard_anchor_windows(
+    allocations: &mut HashMap<String, AllocatedBlock>,
+    measured_audio_ms: &HashMap<String, u32>,
+    layout: &SyncLayout,
+    measured_anchors: &HashMap<String, Vec<MeasuredAnchor>>,
+) {
+    let hard_ids = measured_anchors
+        .iter()
+        .filter(|(_, anchors)| {
+            anchors
+                .iter()
+                .any(|anchor| anchor.coupling == Coupling::Anchored)
+        })
+        .map(|(block_id, _)| block_id.clone())
+        .collect::<HashSet<_>>();
+    for group in allocation_groups(layout) {
+        let mut ordered = group.block_ids.clone();
+        ordered.sort_by_key(|block_id| {
+            allocations
+                .get(block_id)
+                .map_or(u32::MAX, |block| block.render_start_ms)
+        });
+        let island_end = layout
+            .islands
+            .iter()
+            .find(|island| island.id == group.id)
+            .map_or(u32::MAX, |island| island.end_ms);
+        for index in 0..ordered.len() {
+            let block_id = ordered[index].clone();
+            let Some(min_end) = measured_anchors.get(&block_id).and_then(|anchors| {
+                anchors
+                    .iter()
+                    .filter(|anchor| anchor.coupling == Coupling::Anchored)
+                    .map(|anchor| anchor.source_ms)
+                    .max()
+            }) else {
+                continue;
+            };
+            let Some(current) = allocations.get(&block_id) else {
+                continue;
+            };
+            if current.slot_end_ms >= min_end {
+                continue;
+            }
+            let new_end = min_end.min(island_end);
+            if new_end <= current.slot_end_ms {
+                continue;
+            }
+            if let Some(next_id) = ordered.get(index + 1) {
+                let Some(next) = allocations.get(next_id) else {
+                    continue;
+                };
+                if hard_ids.contains(next_id) && next.render_start_ms < new_end {
+                    continue;
+                }
+                if next.render_start_ms < new_end {
+                    let next_measured = measured_audio_ms.get(next_id).copied();
+                    if let Some(next) = allocations.get_mut(next_id) {
+                        next.render_start_ms = new_end;
+                        if next.slot_end_ms <= next.render_start_ms {
+                            next.slot_end_ms = next.render_start_ms.saturating_add(1);
+                        }
+                        if let Some(measured) = next_measured {
+                            refresh_allocated_block(next, measured);
+                        }
+                    }
+                }
+            }
+            if let Some(current) = allocations.get_mut(&block_id) {
+                current.slot_end_ms = new_end;
+                if let Some(measured) = measured_audio_ms.get(&block_id).copied() {
+                    refresh_allocated_block(current, measured);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn group_exceeds_tempo_cap(
     group: &AllocationGroup,
     allocations: &HashMap<String, AllocatedBlock>,
@@ -1963,7 +2047,7 @@ fn action_ranges(text: &str) -> Vec<(usize, usize)> {
     // technical narration uses it mostly in phrases such as "type safety" and "type parameter",
     // while the subtitle does not prove that a visible edit is happening at that exact word.
     let indicators = [
-        "click", "press", "run", "open", "close", "select", "choose", "enter", "scroll", "look",
+        "click", "press", "run", "open", "close", "select", "choose", "enter", "scroll",
         // The Natural Voice input may already be translated. Keep only explicit click/press
         // imperatives here; verbs such as "chạy" and "chọn" are common explanatory prose.
         "nhấn", "bấm", "ấn",
@@ -1993,6 +2077,14 @@ fn action_ranges(text: &str) -> Vec<(usize, usize)> {
         if index > 0 && is_vietnamese_action_verb(&token_key(words[index - 1])) {
             continue;
         }
+        // Trailing comma marks a participle ("are open, the shadows"), not an imperative.
+        if word.contains(',') {
+            continue;
+        }
+        // Capability/preposition prose ("I can open", "on Open Router") is not a click-along cue.
+        if index > 0 && is_descriptive_action_context(words[index - 1]) {
+            continue;
+        }
         // These are common explanatory constructions, not visible user actions. Requiring an
         // object-like continuation keeps "run it" and similar prose from becoming hard anchors.
         if matches!(
@@ -2007,13 +2099,13 @@ fn action_ranges(text: &str) -> Vec<(usize, usize)> {
                 | ("type", "so")
                 | ("run", "our")
                 | ("run", "it")
+                | ("open", "router")
+                | ("open", "code")
+                | ("open", "source")
         ) {
             continue;
         }
-        let mut end = (index + 1).min(words.len() - 1);
-        if key == "look" && index + 1 < words.len() {
-            end = (index + 2).min(words.len() - 1);
-        }
+        let end = (index + 1).min(words.len() - 1);
         ranges.push((index, end));
     }
     ranges
@@ -2021,6 +2113,47 @@ fn action_ranges(text: &str) -> Vec<(usize, usize)> {
 
 fn is_vietnamese_action_verb(value: &str) -> bool {
     matches!(value, "nhấn" | "bấm" | "ấn")
+}
+
+fn is_descriptive_action_context(previous: &str) -> bool {
+    if ends_sentence(previous) {
+        return false;
+    }
+    matches!(
+        token_key(previous).as_str(),
+        "can"
+            | "could"
+            | "will"
+            | "would"
+            | "should"
+            | "may"
+            | "might"
+            | "to"
+            | "are"
+            | "is"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "being"
+            | "has"
+            | "have"
+            | "had"
+            | "also"
+            | "and"
+            | "or"
+            | "but"
+            | "on"
+            | "in"
+            | "at"
+            | "from"
+            | "with"
+            | "of"
+            | "for"
+            | "the"
+            | "a"
+            | "an"
+    )
 }
 
 fn ends_sentence(text: &str) -> bool {
@@ -2536,6 +2669,42 @@ mod tests {
     }
 
     #[test]
+    fn action_candidates_ignore_descriptive_looks_and_named_products() {
+        let source = write_fixture(
+            "action-descriptive",
+            "1\n00:00:00,000 --> 00:00:04,000\nOpen Router and Open Code as a stealth model\n\n2\n00:00:04,000 --> 00:00:08,000\nI can open each cap and enter my name\n\n3\n00:00:08,000 --> 00:00:12,000\nThe pills look pretty good, too.\n\n4\n00:00:12,000 --> 00:00:16,000\nOpen the terminal and run the app.\n",
+        );
+        let timeline = SourceTimeline::from_files(&source, &source).unwrap();
+        let actions = timeline
+            .phrases
+            .iter()
+            .filter(|phrase| phrase.required)
+            .map(|phrase| phrase.text.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        assert!(
+            actions.iter().all(|phrase| !phrase.contains("router")),
+            "{actions:?}"
+        );
+        assert!(
+            actions.iter().all(|phrase| !phrase.contains("look")),
+            "{actions:?}"
+        );
+        assert!(
+            actions.iter().all(|phrase| !phrase.contains("each")),
+            "{actions:?}"
+        );
+        assert!(
+            actions.iter().all(|phrase| !phrase.contains("enter")),
+            "{actions:?}"
+        );
+        assert!(
+            actions.iter().any(|phrase| phrase.starts_with("open")),
+            "{actions:?}"
+        );
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
     fn caps_island_length_when_caption_source_has_no_pause_barriers() {
         let mut value = String::new();
         for index in 0..8 {
@@ -2868,5 +3037,51 @@ mod tests {
         apply_measured_spillback_except(&mut allocations, &measured, &layout, &skip);
         assert_eq!(allocations["block-16"].render_start_ms, 124_000);
         assert!((allocations["block-16"].tempo - 1.372).abs() < 0.001);
+    }
+
+    #[test]
+    fn cover_hard_anchor_windows_restores_a_stolen_enter_tail() {
+        let (mut layout, mut allocations, mut measured) = spillback_layout();
+        layout.blocks.push(NarrationBlock {
+            id: "block-17".to_owned(),
+            start_ms: 128_879,
+            end_ms: 134_643,
+            preferred_start_ms: 128_879,
+            source_segments: vec![27],
+            anchor_ids: Vec::new(),
+            island_id: "island-3".to_owned(),
+        });
+        layout.islands[0].block_ids.push("block-17".to_owned());
+        allocations.insert(
+            "block-17".to_owned(),
+            AllocatedBlock {
+                block_id: "block-17".to_owned(),
+                island_id: "island-3".to_owned(),
+                render_start_ms: 126_960,
+                slot_end_ms: 134_643,
+                predicted_audio_ms: 6_000,
+                rendered_audio_ms: 6_000,
+                tempo: 1.0,
+            },
+        );
+        measured.insert("block-17".to_owned(), 6_000);
+        allocations.get_mut("block-16").unwrap().render_start_ms = 121_920;
+        allocations.get_mut("block-16").unwrap().slot_end_ms = 126_960;
+        refresh_allocated_block(allocations.get_mut("block-16").unwrap(), 5_040);
+        let mut anchors = HashMap::new();
+        anchors.insert(
+            "block-16".to_owned(),
+            vec![MeasuredAnchor {
+                source_ms: 127_818,
+                raw_offset_ms: 4_800,
+                tolerance_ms: 250,
+                confidence: TimingConfidence::CaptionDerived,
+                coupling: Coupling::Anchored,
+            }],
+        );
+        cover_hard_anchor_windows(&mut allocations, &measured, &layout, &anchors);
+        assert!(allocations["block-16"].slot_end_ms >= 127_818);
+        assert!(allocations["block-17"].render_start_ms >= 127_818);
+        assert!(allocations["block-16"].slot_end_ms <= allocations["block-17"].render_start_ms);
     }
 }

@@ -264,6 +264,37 @@ impl SpeechPlan {
         self.emphasis = repaired;
     }
 
+    pub(crate) fn repair_model_pauses(&mut self) {
+        let original = std::mem::take(&mut self.pauses);
+        let mut repaired = Vec::with_capacity(MAX_PAUSES);
+        let mut pause_texts = HashSet::new();
+        let mut total_pause_ms = 0_u32;
+        for pause in original {
+            if repaired.len() == MAX_PAUSES {
+                break;
+            }
+            let phrase = pause.after.trim();
+            if phrase.is_empty()
+                || !pause_texts.insert(phrase.to_owned())
+                || !(MIN_PAUSE_MS..=MAX_PAUSE_MS).contains(&pause.duration_ms)
+                || unique_phrase_position(&self.spoken_text, phrase).is_none()
+            {
+                continue;
+            }
+            let next_total = total_pause_ms.saturating_add(u32::from(pause.duration_ms));
+            if next_total.saturating_mul(100) > self.target_duration_ms.saturating_mul(33) {
+                continue;
+            }
+            total_pause_ms = next_total;
+            repaired.push(Pause {
+                after: phrase.to_owned(),
+                duration_ms: pause.duration_ms,
+                reason: pause.reason,
+            });
+        }
+        self.pauses = repaired;
+    }
+
     /// Keeps an LLM's invalidly short or long performance text from changing subtitle meaning.
     pub(crate) fn repair_model_spoken_length(&mut self) {
         if validate_spoken_length(
@@ -318,7 +349,7 @@ impl SpeechPlan {
     /// Remove only exact empty tutorial framing while keeping the display text unchanged.
     /// Prefixes and suffixes are compacted only when the spoken/display ratio remains valid.
     pub(crate) fn compact_optional_framing(&mut self) {
-        const PREFIXES: [&str; 20] = [
+        const PREFIXES: [&str; 24] = [
             "Sau đó, bạn có thể ",
             "sau đó, bạn có thể ",
             "Bạn có thể ",
@@ -339,6 +370,10 @@ impl SpeechPlan {
             "trong video này, ",
             "Thì chúng ta sẽ tiến hành ",
             "thì chúng ta sẽ tiến hành ",
+            "Thành thật mà nói, ",
+            "thành thật mà nói, ",
+            "Nói thật là ",
+            "nói thật là ",
         ];
         const SUFFIXES: [&str; 6] = [
             " trong video hôm nay",
@@ -702,6 +737,27 @@ mod tests {
     }
 
     #[test]
+    fn repair_model_pauses_drops_phrases_that_are_not_unique() {
+        let mut plan = plan();
+        plan.pauses = vec![
+            Pause {
+                after: "Spring Boot".to_owned(),
+                duration_ms: 180,
+                reason: PauseReason::Transition,
+            },
+            Pause {
+                after: "does not occur".to_owned(),
+                duration_ms: 180,
+                reason: PauseReason::Transition,
+            },
+        ];
+        plan.repair_model_pauses();
+        assert_eq!(plan.pauses.len(), 1);
+        assert_eq!(plan.pauses[0].after, "Spring Boot");
+        plan.validate(&["serious".to_owned()]).unwrap();
+    }
+
+    #[test]
     fn rejects_ambiguous_or_excessive_intent() {
         let mut plan = plan();
         plan.emphasis.push(Emphasis {
@@ -804,6 +860,17 @@ mod tests {
         }];
         plan.compact_optional_framing();
         assert_eq!(plan.spoken_text, "Bạn có thể nhấn Run để chạy.");
+    }
+
+    #[test]
+    fn compact_optional_framing_strips_commentary_hedge_prefixes() {
+        let mut plan = SpeechPlan::plain(
+            31,
+            "Thành thật mà nói, đây là một kết quả thực sự ấn tượng.",
+            4_000,
+        );
+        plan.compact_optional_framing();
+        assert_eq!(plan.spoken_text, "đây là một kết quả thực sự ấn tượng.");
     }
 
     #[test]
