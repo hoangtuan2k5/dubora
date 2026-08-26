@@ -66,6 +66,17 @@ pub fn time_to_seconds(time: &str) -> Result<f64> {
     Ok((hours * 3600 + minutes * 60 + whole_seconds) as f64 + milliseconds as f64 / 1000.0)
 }
 
+/// Format a millisecond offset as an SRT timestamp (`HH:MM:SS,mmm`).
+pub fn format_srt_timestamp_ms(milliseconds: u32) -> String {
+    let millis = milliseconds % 1_000;
+    let total_seconds = milliseconds / 1_000;
+    let seconds = total_seconds % 60;
+    let total_minutes = total_seconds / 60;
+    let minutes = total_minutes % 60;
+    let hours = total_minutes / 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
+}
+
 fn parse_srt_content(content: &str) -> Result<Vec<SrtSegment>> {
     let content = content.replace("\r\n", "\n").replace('\r', "\n");
     let timing = Regex::new(r"^(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})")?;
@@ -123,5 +134,8 @@ mod tests {
             }]
         );
         assert!((time_to_seconds("01:02:03,004").unwrap() - 3723.004).abs() < f64::EPSILON);
+        assert_eq!(format_srt_timestamp_ms(0), "00:00:00,000");
+        assert_eq!(format_srt_timestamp_ms(8_890), "00:00:08,890");
+        assert_eq!(format_srt_timestamp_ms(62_385), "00:01:02,385");
     }
 }

@@ -18,8 +18,8 @@ use crate::paths::{
 };
 use crate::progress::{ProgressEvent, ProgressReporter, Stage};
 use crate::source_transcription::transcribe_audio;
-use crate::speech_plan::SpeechPlanDocument;
-use crate::srt::{SrtSegment, parse_srt, write_srt};
+use crate::speech_plan::{SpeechPlan, SpeechPlanDocument};
+use crate::srt::{SrtSegment, format_srt_timestamp_ms, parse_srt, write_srt};
 use crate::sync_timeline::{
     GranularSourceWord, SourceTimeline, SyncLayout, TimingMode, build_sync_layout,
 };
@@ -1100,6 +1100,8 @@ async fn create_dub_for_video(
                 &provider_metrics_path,
                 serde_json::to_vec_pretty(&metrics::snapshot())?,
             );
+            let companion = companion_segments_from_render(&plans.plans, &manifest)?;
+            write_srt(&job_dir.join("companion.srt"), &companion)?;
         }
         rendered_sync_layout = Some(sync_layout);
     } else {
@@ -1176,7 +1178,18 @@ async fn create_dub_for_video(
         let voiceover = voiceover.clone();
         let output = output.clone();
         let output_srt = output_srt.clone();
-        let vi_srt = vi_srt.clone();
+        let vi_srt = if natural_render {
+            let companion = job_dir.join("companion.srt");
+            if !companion.is_file() {
+                anyhow::bail!(
+                    "Natural Voice companion SRT is missing: {}",
+                    companion.display()
+                );
+            }
+            companion
+        } else {
+            vi_srt.clone()
+        };
         let label_video = label.clone();
         let audio_polish = AudioPolishOptions {
             duck_original: options.duck_original,
@@ -1301,6 +1314,72 @@ fn require_natural_render_manifest(natural_render: bool, manifest: &Path) -> Res
         );
     }
     Ok(())
+}
+
+fn companion_segments_from_render(
+    plans: &[SpeechPlan],
+    manifest: &RenderManifest,
+) -> Result<Vec<SrtSegment>> {
+    if manifest.entries.is_empty() {
+        bail!("Cannot build companion SRT from an empty render manifest");
+    }
+    let mut drafts = Vec::with_capacity(manifest.entries.len());
+    for (index, entry) in manifest.entries.iter().enumerate() {
+        let mut parts = Vec::new();
+        for source_index in &entry.source_segments {
+            let plan = plans
+                .iter()
+                .find(|plan| plan.index == *source_index)
+                .with_context(|| format!("Missing speech plan for companion cue {source_index}"))?;
+            let text = plan.display_text.trim();
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+        if parts.is_empty() {
+            bail!("Companion SRT cue {} has empty text", entry.id);
+        }
+        let speech_end = entry
+            .start_ms
+            .saturating_add(entry.rendered_audio_ms.max(1));
+        let next_start = manifest.entries.get(index + 1).map(|next| next.start_ms);
+        let end_ms = next_start
+            .map(|start| speech_end.min(start))
+            .unwrap_or(speech_end)
+            .max(entry.start_ms.saturating_add(1));
+        drafts.push((entry.start_ms, end_ms, parts.join(" ")));
+    }
+
+    let mut merged: Vec<(u32, u32, String)> = Vec::new();
+    for draft in drafts {
+        if let Some((_, end_ms, text)) = merged.last_mut()
+            && !ends_spoken_sentence(text)
+        {
+            text.push(' ');
+            text.push_str(&draft.2);
+            *end_ms = draft.1;
+            continue;
+        }
+        merged.push(draft);
+    }
+
+    Ok(merged
+        .into_iter()
+        .enumerate()
+        .map(|(index, (start_ms, end_ms, text))| SrtSegment {
+            index: index + 1,
+            start: format_srt_timestamp_ms(start_ms),
+            end: format_srt_timestamp_ms(end_ms),
+            text,
+        })
+        .collect())
+}
+
+fn ends_spoken_sentence(text: &str) -> bool {
+    text.chars()
+        .rev()
+        .find(|character| !character.is_whitespace())
+        .is_some_and(|character| matches!(character, '.' | '!' | '?' | '…' | '。' | '！' | '？'))
 }
 
 fn display_segments_from_plans(
@@ -1813,6 +1892,128 @@ mod tests {
         assert_eq!(displayed[0].start, source[0].start);
         assert_eq!(displayed[0].end, source[0].end);
         assert_eq!(displayed[0].text, "spoken text");
+    }
+
+    #[test]
+    fn companion_srt_follows_measured_speech_windows() {
+        let plans = vec![
+            crate::speech_plan::SpeechPlan::plain(1, "Câu một.", 2_000),
+            crate::speech_plan::SpeechPlan::plain(2, "Câu hai.", 3_000),
+        ];
+        let manifest = RenderManifest::new(
+            ManifestStatus::UnanchoredContinuous,
+            TimingPipelineId::UnanchoredContinuous,
+            vec![
+                ScheduledAudio {
+                    id: "utterance-1".to_owned(),
+                    path: PathBuf::from("utterance_1.mp3"),
+                    start_ms: 0,
+                    end_ms: 8_890,
+                    source_segments: vec![1, 2],
+                    measured_audio_ms: 9_888,
+                    speech_end_ms: None,
+                    rendered_audio_ms: 8_890,
+                    tempo: 1.112,
+                    island_id: Some("island-1".to_owned()),
+                    cache_identity: "cache-1".to_owned(),
+                    alignment: crate::utterance::EntryAlignment::default(),
+                },
+                ScheduledAudio {
+                    id: "utterance-2".to_owned(),
+                    path: PathBuf::from("utterance_2.mp3"),
+                    start_ms: 8_890,
+                    end_ms: 16_000,
+                    source_segments: vec![2],
+                    measured_audio_ms: 6_000,
+                    speech_end_ms: None,
+                    rendered_audio_ms: 6_000,
+                    tempo: 1.0,
+                    island_id: Some("island-1".to_owned()),
+                    cache_identity: "cache-2".to_owned(),
+                    alignment: crate::utterance::EntryAlignment::default(),
+                },
+            ],
+        );
+        let cues = companion_segments_from_render(&plans, &manifest).unwrap();
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].start, "00:00:00,000");
+        assert_eq!(cues[0].end, "00:00:08,890");
+        assert_eq!(cues[0].text, "Câu một. Câu hai.");
+        assert_eq!(cues[1].start, "00:00:08,890");
+        assert_eq!(cues[1].end, "00:00:14,890");
+        assert_eq!(cues[1].text, "Câu hai.");
+
+        let cut = vec![
+            crate::speech_plan::SpeechPlan::plain(1, "Tôi là", 1_000),
+            crate::speech_plan::SpeechPlan::plain(2, "Hoàng Tuấn.", 1_000),
+        ];
+        let cut_manifest = RenderManifest::new(
+            ManifestStatus::UnanchoredContinuous,
+            TimingPipelineId::UnanchoredContinuous,
+            vec![
+                ScheduledAudio {
+                    id: "utterance-1".to_owned(),
+                    path: PathBuf::from("utterance_1.mp3"),
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    source_segments: vec![1],
+                    measured_audio_ms: 1_000,
+                    speech_end_ms: None,
+                    rendered_audio_ms: 1_000,
+                    tempo: 1.0,
+                    island_id: Some("island-1".to_owned()),
+                    cache_identity: "cache-1".to_owned(),
+                    alignment: crate::utterance::EntryAlignment::default(),
+                },
+                ScheduledAudio {
+                    id: "utterance-2".to_owned(),
+                    path: PathBuf::from("utterance_2.mp3"),
+                    start_ms: 1_000,
+                    end_ms: 2_000,
+                    source_segments: vec![2],
+                    measured_audio_ms: 1_000,
+                    speech_end_ms: None,
+                    rendered_audio_ms: 1_000,
+                    tempo: 1.0,
+                    island_id: Some("island-1".to_owned()),
+                    cache_identity: "cache-2".to_owned(),
+                    alignment: crate::utterance::EntryAlignment::default(),
+                },
+            ],
+        );
+        let healed = companion_segments_from_render(&cut, &cut_manifest).unwrap();
+        assert_eq!(healed.len(), 1);
+        assert_eq!(healed[0].start, "00:00:00,000");
+        assert_eq!(healed[0].end, "00:00:02,000");
+        assert_eq!(healed[0].text, "Tôi là Hoàng Tuấn.");
+
+        let mut ip = crate::speech_plan::SpeechPlan::plain(1, "Mở 192.168.0.1 và RTX 4060.", 2_000);
+        ip.spoken_text =
+            "Mở một chín hai chấm một sáu tám chấm không chấm một và RTX bốn không sáu không."
+                .to_owned();
+        let ip_manifest = RenderManifest::new(
+            ManifestStatus::UnanchoredContinuous,
+            TimingPipelineId::UnanchoredContinuous,
+            vec![ScheduledAudio {
+                id: "utterance-1".to_owned(),
+                path: PathBuf::from("utterance_1.mp3"),
+                start_ms: 0,
+                end_ms: 2_000,
+                source_segments: vec![1],
+                measured_audio_ms: 2_000,
+                speech_end_ms: None,
+                rendered_audio_ms: 2_000,
+                tempo: 1.0,
+                island_id: Some("island-1".to_owned()),
+                cache_identity: "cache-1".to_owned(),
+                alignment: crate::utterance::EntryAlignment::default(),
+            }],
+        );
+        let visible = companion_segments_from_render(&[ip], &ip_manifest).unwrap();
+        assert_eq!(visible[0].text, "Mở 192.168.0.1 và RTX 4060.");
+        assert!(!visible[0].text.contains("bốn không"));
+        assert!(!visible[0].text.contains("gạch chéo"));
+        assert!(!visible[0].text.contains("một chín hai"));
     }
 
     #[test]

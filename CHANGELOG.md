@@ -15,6 +15,7 @@ heading when you want a new GitHub Release; `## [Unreleased]` is ignored.
 
 - Spell dotted model versions such as Qwen 3.8 as `ba chấm tám` instead of thirty-eight
 - Spell GPU SKUs such as RTX 4060 digit-by-digit (`bốn không sáu không`)
+- Natural Voice companion `.vi-dub.srt` keeps whole sentences timed to speech, while display text preserves IPs, URLs, paths, and model numbers
 
 ## [0.2.0] - 2026-08-26
 
