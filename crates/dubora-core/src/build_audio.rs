@@ -65,7 +65,8 @@ fn pad_clamp(
     } else if speech_end_ms.is_none() {
         Some(f64::from(available_ms) / 1_000.0)
     } else if probed_ms.saturating_sub(available_ms) <= PAD_ONLY_TOLERANCE_MS
-        && speech_end_stretched_ms.is_some_and(|value| value <= available_ms)
+        && speech_end_stretched_ms
+            .is_some_and(|value| value.saturating_sub(available_ms) <= PAD_ONLY_TOLERANCE_MS)
     {
         Some(f64::from(available_ms) / 1_000.0)
     } else {
@@ -373,6 +374,14 @@ mod tests {
         .unwrap();
         assert!(chain.contains("atrim=duration=2.000"));
         assert!(!chain.contains("acrossfade"));
+    }
+
+    #[test]
+    fn allows_one_millisecond_speech_end_rounding_past_the_slot() {
+        let clamp = pad_clamp(15_041, 15_042, 1.0, Some(15_042)).unwrap();
+        assert_eq!(clamp.available_s, 15.041);
+        assert_eq!(clamp.atrim_duration_s, Some(15.041));
+        assert!(pad_clamp(15_041, 15_200, 1.0, Some(15_200)).is_err());
     }
 
     #[test]

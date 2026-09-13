@@ -2268,6 +2268,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
             serde_json::to_vec_pretty(&revision_cache)?,
         )?;
     }
+    let mut neural_repair_sources = HashMap::<String, PendingUtterance>::new();
     for mut base in concise_candidates {
         let allocation = render_allocations
             .get(&base.utterance.block_id)
@@ -2382,6 +2383,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
         for (block_id, anchors) in measured_anchors(std::slice::from_ref(&base), timeline) {
             measured_anchor_map.insert(block_id, anchors);
         }
+        neural_repair_sources.insert(format!("utterance-{}", base.utterance.id), base.clone());
         let (entry, evidence) = pending_entry(base, &allocation);
         if let Some((id, evidence)) = evidence {
             semantic_evidence.insert(id, evidence);
@@ -2391,13 +2393,99 @@ pub async fn generate_all_tts_for_aligned_utterances(
     duration_calibration.write(output_dir)?;
     // Reallocate once more after concise revisions. Revisions may change measured durations
     // substantially, so a pre-revision infeasibility is only provisional evidence.
-    let final_failed_groups = finalize_measured_schedule(
+    let mut final_failed_groups = finalize_measured_schedule(
         layout,
         &mut entries,
         &mut render_allocations,
         &measured_anchor_map,
         mode,
     );
+    if voice.capabilities.manual_prosody == CapabilityState::Supported {
+        let mut repaired_any = false;
+        let over_cap = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.tempo > MAX_TIME_STRETCH_TEMPO + f64::EPSILON)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in over_cap {
+            let slot_ms = entries[index]
+                .end_ms
+                .saturating_sub(entries[index].start_ms)
+                .max(1);
+            let Some(rate_percent) =
+                duration_repair_rate(entries[index].measured_audio_ms, slot_ms)
+            else {
+                continue;
+            };
+            let Some(pending) = neural_repair_sources.get(&entries[index].id).cloned() else {
+                continue;
+            };
+            let Some(block) = layout
+                .blocks
+                .iter()
+                .find(|block| block.source_segments == entries[index].source_segments)
+            else {
+                continue;
+            };
+            let Some(allocation) = render_allocations.get(&block.id).cloned() else {
+                continue;
+            };
+            progress.event(ProgressEvent::new(
+                Stage::Tts,
+                video,
+                format!(
+                    "Applying one post-revision duration repair to {}.",
+                    entries[index].id
+                ),
+            ));
+            let candidate_path = revision_candidate_path(
+                &output_dir.join(format!("utterance_{}.mp3", pending.utterance.id)),
+                20_003,
+            );
+            match synthesize_revised_utterance(
+                config,
+                ffmpeg,
+                voice,
+                pending.utterance.clone(),
+                timeline,
+                &candidate_path,
+                rate_percent,
+                &[],
+                pause_fit,
+            )
+            .await
+            {
+                Ok(candidate)
+                    if f64::from(candidate.measured_audio_ms) / f64::from(slot_ms)
+                        <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON =>
+                {
+                    for (id, anchors) in
+                        measured_anchors(std::slice::from_ref(&candidate), timeline)
+                    {
+                        measured_anchor_map.insert(id, anchors);
+                    }
+                    let (entry, evidence) = pending_entry(candidate, &allocation);
+                    if let Some((id, evidence)) = evidence {
+                        semantic_evidence.insert(id, evidence);
+                    }
+                    entries[index] = entry;
+                    repaired_any = true;
+                }
+                Ok(_) => remove_audio_artifacts(&candidate_path),
+                Err(_) => remove_audio_artifacts(&candidate_path),
+            }
+        }
+        if repaired_any {
+            final_failed_groups = finalize_measured_schedule(
+                layout,
+                &mut entries,
+                &mut render_allocations,
+                &measured_anchor_map,
+                mode,
+            );
+        }
+    }
     diagnostics
         .review_reasons
         .retain(|reason| !is_provisional_review_reason(reason));
@@ -4791,6 +4879,270 @@ mod tests {
     }
 
     #[test]
+    fn finalize_measured_schedule_uses_successor_slack_on_qwen_namminh_sync() {
+        let layout = crate::sync_timeline::SyncLayout {
+            blocks: vec![
+                crate::sync_timeline::NarrationBlock {
+                    id: "block-22".to_owned(),
+                    start_ms: 267_520,
+                    end_ms: 281_000,
+                    preferred_start_ms: 267_520,
+                    source_segments: vec![48, 49, 50],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-9".to_owned(),
+                },
+                crate::sync_timeline::NarrationBlock {
+                    id: "block-23".to_owned(),
+                    start_ms: 281_000,
+                    end_ms: 298_520,
+                    preferred_start_ms: 281_000,
+                    source_segments: vec![51, 52, 53, 54],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-9".to_owned(),
+                },
+                crate::sync_timeline::NarrationBlock {
+                    id: "block-24".to_owned(),
+                    start_ms: 298_520,
+                    end_ms: 316_080,
+                    preferred_start_ms: 298_520,
+                    source_segments: vec![55, 56, 57],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-9".to_owned(),
+                },
+            ],
+            islands: vec![crate::sync_timeline::SyncIsland {
+                id: "island-9".to_owned(),
+                start_ms: 267_520,
+                end_ms: 316_080,
+                block_ids: vec![
+                    "block-22".to_owned(),
+                    "block-23".to_owned(),
+                    "block-24".to_owned(),
+                ],
+                hard_boundary_before: false,
+            }],
+        };
+        let mut entries = vec![
+            ScheduledAudio {
+                id: "utterance-22".to_owned(),
+                path: PathBuf::from("utterance_22.mp3"),
+                start_ms: 267_520,
+                end_ms: 281_000,
+                source_segments: vec![48, 49, 50],
+                measured_audio_ms: 16_056,
+                speech_end_ms: None,
+                rendered_audio_ms: 13_480,
+                tempo: 16_056.0 / 13_480.0,
+                island_id: Some("island-9".to_owned()),
+                cache_identity: "u22".to_owned(),
+                alignment: EntryAlignment::default(),
+            },
+            ScheduledAudio {
+                id: "utterance-23".to_owned(),
+                path: PathBuf::from("utterance_23.mp3"),
+                start_ms: 281_000,
+                end_ms: 298_520,
+                source_segments: vec![51, 52, 53, 54],
+                measured_audio_ms: 16_104,
+                speech_end_ms: None,
+                rendered_audio_ms: 16_104,
+                tempo: 1.0,
+                island_id: Some("island-9".to_owned()),
+                cache_identity: "u23".to_owned(),
+                alignment: EntryAlignment::default(),
+            },
+            ScheduledAudio {
+                id: "utterance-24".to_owned(),
+                path: PathBuf::from("utterance_24.mp3"),
+                start_ms: 298_520,
+                end_ms: 316_080,
+                source_segments: vec![55, 56, 57],
+                measured_audio_ms: 14_784,
+                speech_end_ms: None,
+                rendered_audio_ms: 14_784,
+                tempo: 1.0,
+                island_id: Some("island-9".to_owned()),
+                cache_identity: "u24".to_owned(),
+                alignment: EntryAlignment::default(),
+            },
+        ];
+        let mut allocations = HashMap::new();
+        for entry in &entries {
+            allocations.insert(
+                format!("block-{}", entry.id.strip_prefix("utterance-").unwrap()),
+                AllocatedBlock {
+                    block_id: format!("block-{}", entry.id.strip_prefix("utterance-").unwrap()),
+                    island_id: "island-9".to_owned(),
+                    render_start_ms: entry.start_ms,
+                    slot_end_ms: entry.end_ms,
+                    predicted_audio_ms: entry.measured_audio_ms,
+                    rendered_audio_ms: entry.rendered_audio_ms,
+                    tempo: entry.tempo,
+                },
+            );
+        }
+
+        let failed = finalize_measured_schedule(
+            &layout,
+            &mut entries,
+            &mut allocations,
+            &HashMap::new(),
+            NaturalMode::Sync,
+        );
+
+        assert!(failed.is_empty(), "{failed:?}");
+        for entry in &entries {
+            assert!(
+                entry.tempo <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON,
+                "{} tempo {}",
+                entry.id,
+                entry.tempo
+            );
+        }
+        assert!(entries[0].end_ms > 281_000);
+    }
+
+    #[test]
+    fn finalize_measured_schedule_pulls_qwen_island2_slack_through_at_cap_neighbor() {
+        let layout = crate::sync_timeline::SyncLayout {
+            blocks: vec![
+                crate::sync_timeline::NarrationBlock {
+                    id: "block-5".to_owned(),
+                    start_ms: 47_120,
+                    end_ms: 62_080,
+                    preferred_start_ms: 47_120,
+                    source_segments: vec![11, 12, 13],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-2".to_owned(),
+                },
+                crate::sync_timeline::NarrationBlock {
+                    id: "block-6".to_owned(),
+                    start_ms: 62_080,
+                    end_ms: 70_160,
+                    preferred_start_ms: 62_080,
+                    source_segments: vec![14, 15],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-2".to_owned(),
+                },
+                crate::sync_timeline::NarrationBlock {
+                    id: "block-7".to_owned(),
+                    start_ms: 70_160,
+                    end_ms: 84_240,
+                    preferred_start_ms: 70_160,
+                    source_segments: vec![16, 17, 18],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-2".to_owned(),
+                },
+                crate::sync_timeline::NarrationBlock {
+                    id: "block-8".to_owned(),
+                    start_ms: 84_240,
+                    end_ms: 97_520,
+                    preferred_start_ms: 84_240,
+                    source_segments: vec![19, 20, 21],
+                    anchor_ids: Vec::new(),
+                    island_id: "island-2".to_owned(),
+                },
+            ],
+            islands: vec![crate::sync_timeline::SyncIsland {
+                id: "island-2".to_owned(),
+                start_ms: 47_120,
+                end_ms: 97_520,
+                block_ids: vec![
+                    "block-5".to_owned(),
+                    "block-6".to_owned(),
+                    "block-7".to_owned(),
+                    "block-8".to_owned(),
+                ],
+                hard_boundary_before: false,
+            }],
+        };
+        let specs = [
+            (
+                "utterance-5",
+                "block-5",
+                47_120,
+                62_080,
+                16_872,
+                vec![11, 12, 13],
+            ),
+            (
+                "utterance-6",
+                "block-6",
+                62_080,
+                70_160,
+                12_120,
+                vec![14, 15],
+            ),
+            (
+                "utterance-7",
+                "block-7",
+                70_160,
+                84_240,
+                13_152,
+                vec![16, 17, 18],
+            ),
+            (
+                "utterance-8",
+                "block-8",
+                84_240,
+                97_520,
+                12_408,
+                vec![19, 20, 21],
+            ),
+        ];
+        let mut entries = Vec::new();
+        let mut allocations = HashMap::new();
+        for (id, block_id, start, end, measured, segs) in specs {
+            let slot = end - start;
+            let tempo = (f64::from(measured) / f64::from(slot)).max(1.0);
+            entries.push(ScheduledAudio {
+                id: id.to_owned(),
+                path: PathBuf::from(format!("{id}.mp3")),
+                start_ms: start,
+                end_ms: end,
+                source_segments: segs,
+                measured_audio_ms: measured,
+                speech_end_ms: None,
+                rendered_audio_ms: ((f64::from(measured) / tempo).ceil() as u32).min(slot),
+                tempo,
+                island_id: Some("island-2".to_owned()),
+                cache_identity: id.to_owned(),
+                alignment: EntryAlignment::default(),
+            });
+            allocations.insert(
+                block_id.to_owned(),
+                AllocatedBlock {
+                    block_id: block_id.to_owned(),
+                    island_id: "island-2".to_owned(),
+                    render_start_ms: start,
+                    slot_end_ms: end,
+                    predicted_audio_ms: measured,
+                    rendered_audio_ms: ((f64::from(measured) / tempo).ceil() as u32).min(slot),
+                    tempo,
+                },
+            );
+        }
+
+        let failed = finalize_measured_schedule(
+            &layout,
+            &mut entries,
+            &mut allocations,
+            &HashMap::new(),
+            NaturalMode::Sync,
+        );
+
+        assert!(failed.is_empty(), "{failed:?}");
+        for entry in &entries {
+            assert!(
+                entry.tempo <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON,
+                "{} tempo {}",
+                entry.id,
+                entry.tempo
+            );
+        }
+    }
+
+    #[test]
     fn final_anchor_gate_uses_the_final_start_and_tempo() {
         let bookmark = "dubora-u1-ap-1-action-1".to_owned();
         let evidence = HashMap::from([(
@@ -5005,6 +5357,7 @@ mod tests {
         assert_eq!(duration_repair_rate(1_242, 1_000), Some(10));
         assert_eq!(duration_repair_rate(1_318, 1_000), Some(17));
         assert!(duration_repair_rate(1_400, 1_000).is_none());
+        assert_eq!(duration_repair_rate(16_896, 14_271), Some(5));
     }
 
     #[test]

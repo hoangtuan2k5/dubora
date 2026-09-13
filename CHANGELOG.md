@@ -17,6 +17,8 @@ heading when you want a new GitHub Release; `## [Unreleased]` is ignored.
 - Spell GPU SKUs such as RTX 4060 digit-by-digit (`bốn không sáu không`)
 - Natural Voice companion `.vi-dub.srt` keeps whole sentences timed to speech, while display text preserves IPs, URLs, paths, and model numbers
 - Pack unused same-island slack through fitted utterances so a later over-cap cue can stay within 1.13x
+- Delay a fitted successor to feed unused following slack into a dense cue, and ignore setup prose such as "run properly" as a hard action anchor
+- Allow 1 ms encoder rounding of `speechEnd` past the allocated slot instead of failing the mixer
 
 ## [0.2.0] - 2026-08-26
 
