@@ -952,7 +952,7 @@ checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 
 [[package]]
 name = "dubora-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "dubora-core",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "dubora-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "dubora-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "futures-util",

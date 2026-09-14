@@ -11,6 +11,11 @@ heading when you want a new GitHub Release; `## [Unreleased]` is ignored.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-14
+
+Keep dense Natural Voice jobs inside the 1.13x cap, match companion subtitles
+to complete spoken sentences, and fix GPU/version pronunciation.
+
 ### Fixed
 
 - Spell dotted model versions such as Qwen 3.8 as `ba chấm tám` instead of thirty-eight
@@ -84,6 +89,7 @@ First Dubora cut: shared Rust pipeline, Linux CLI, and Windows desktop app.
 - WebView2 black window during dub
 - YouTube imports kept as MP4 with repaired subtitles
 
-[Unreleased]: https://github.com/hoangtuan2k5/dubora/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/hoangtuan2k5/dubora/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.1
 [0.2.0]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.0
 [0.1.0]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.1.0
