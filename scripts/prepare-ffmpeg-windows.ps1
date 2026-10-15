@@ -39,6 +39,8 @@ $probe = & (Join-Path $Destination "ffmpeg.exe") -hide_banner -filters 2>&1 | Ou
 if ($probe -notmatch '(?m)^\s*\S+\s+rubberband\s+') {
     throw "Bundled FFmpeg is missing the rubberband filter"
 }
+& (Join-Path $Destination "ffmpeg.exe") -version 2>&1 |
+    Out-File -Encoding utf8 (Join-Path $Destination "BUILD-INFO.txt")
 
 Remove-Item -Recurse -Force $TempDir
 Write-Host "Prepared FFmpeg $Version resources in $Destination"

@@ -159,6 +159,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.changelog.outputs.tag }}
           RELEASE_TITLE: ${{ steps.changelog.outputs.title }}
+          THIRD_PARTY_SOURCE_URL: ${{ vars.THIRD_PARTY_SOURCE_URL }}
+          THIRD_PARTY_SOURCE_SHA256: ${{ vars.THIRD_PARTY_SOURCE_SHA256 }}
         run: |
           mapfile -d '' assets < <(find release-assets -type f -name '*.exe' -print0)
           if (( ${#assets[@]} == 0 )); then
@@ -169,7 +171,15 @@ jobs:
             echo "GitHub Release ${RELEASE_TAG} already exists; skip. Bump CHANGELOG.md to publish again."
             exit 0
           fi
+          # The reviewed archive must cover the exact vendor binaries in this build.
+          test -n "$THIRD_PARTY_SOURCE_URL" || { echo "Missing reviewed third-party source archive URL" >&2; exit 1; }
+          [[ "$THIRD_PARTY_SOURCE_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "Missing source archive SHA-256" >&2; exit 1; }
+          curl --fail --location --proto '=https' --proto-redir '=https' \
+            "$THIRD_PARTY_SOURCE_URL" --output third-party-source.zip
+          echo "$THIRD_PARTY_SOURCE_SHA256  third-party-source.zip" | sha256sum --check
+          unzip -t third-party-source.zip
           gh release create "$RELEASE_TAG" "${assets[@]}" \
+            third-party-source.zip THIRD_PARTY_NOTICES.md LICENSE \
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TITLE" \
             --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -11,6 +11,11 @@ Repository: https://github.com/hoangtuan2k5/dubora
 Ứng dụng lồng tiếng Việt cho video (Azure Speech + FFmpeg).
 Liên hệ: tuan@hoangtuan.dev
 
+Dubora source code is MIT licensed. Bundled FFmpeg and yt-dlp binaries have
+separate licenses, including GPLv3 components. See THIRD_PARTY_NOTICES.md
+and the license files installed in the ffmpeg/ and yt-dlp/ resource folders.
+Corresponding third-party source accompanies the GitHub binary release.
+
 ---
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

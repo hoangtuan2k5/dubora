@@ -1,48 +1,52 @@
 # Dubora
 
-Create Vietnamese dubbed videos from video files and matching SRT subtitles.
+**Tiếng Việt** | [English](README.en.md)
 
-Author: Hoàng Chiều Nguyễn Tuấn  
-Email: tuan@hoangtuan.dev  
-GitHub: [hoangtuan2k5](https://github.com/hoangtuan2k5)  
-Repository: [hoangtuan2k5/dubora](https://github.com/hoangtuan2k5/dubora)
+Tạo video lồng tiếng Việt từ video và phụ đề SRT tương ứng.
 
-The pipeline:
+Tác giả: Hoàng Chiều Nguyễn Tuấn\
+Email: tuan@hoangtuan.dev\
+GitHub: [hoangtuan2k5](https://github.com/hoangtuan2k5)\
+Kho mã nguồn: [hoangtuan2k5/dubora](https://github.com/hoangtuan2k5/dubora)
 
-1. Read source video from `assets/video/`.
-2. Find the matching `.srt` file in `assets/srt/`.
-3. Clean rolling/duplicated subtitles.
-4. Treat cleaned subtitles as Vietnamese by default.
-5. Generate Vietnamese voiceover with Azure Florian Dragon HD Latest.
-6. Build final MP4 with Vietnamese audio only.
-7. Copy the cleaned Vietnamese SRT beside the MP4 with the same basename for player auto-loading.
+Quy trình xử lý:
 
-The Rust implementation ships one shared pipeline through:
+1. Đọc video nguồn trong `assets/video/`.
+2. Tìm file `.srt` tương ứng trong `assets/srt/`.
+3. Làm sạch phụ đề cuộn và nội dung trùng lặp.
+4. Mặc định coi phụ đề đã làm sạch là tiếng Việt.
+5. Sinh giọng lồng tiếng bằng Azure Florian Dragon HD Latest.
+6. Tạo MP4 với hình ảnh gốc và âm thanh tiếng Việt.
+7. Ghi phụ đề tiếng Việt cạnh MP4, cùng tên gốc để trình phát tự nhận diện.
+   Natural Voice gộp câu hoàn chỉnh và đặt thời gian theo lời nói đã render;
+   pipeline cũ sao chép phụ đề tiếng Việt đã làm sạch.
 
-- `dubora`, a Linux CLI in `crates/dubora-cli`
-- `Dubora`, a Windows Tauri 2 desktop app in `apps/desktop`
-- `dubora-core`, the library used by both frontends
+Bản Rust dùng chung một pipeline cho:
 
-The Python parity reference lives under `python_reference/`. Root-level `.py`
-files remain as compatibility entry points, so existing commands such as
-`python3 run_dub.py` continue to work.
+- `dubora`: CLI Linux trong `crates/dubora-cli`.
+- `Dubora`: ứng dụng desktop Windows dùng Tauri 2 trong `apps/desktop`.
+- `dubora-core`: thư viện xử lý chung của CLI và desktop.
 
-## Rust CLI (Linux)
+Bản Python tham chiếu nằm trong `python_reference/`. Các file `.py` ở thư mục
+gốc vẫn giữ vai trò entry point tương thích, nên các lệnh như
+`python3 run_dub.py` vẫn hoạt động.
 
-Prerequisites:
+## CLI Rust (Linux)
 
-- Rust 1.85+
-- FFmpeg and FFprobe available in `PATH`
-- FFmpeg must include the `rubberband` audio filter
-- `yt-dlp` available in `PATH` to import a YouTube video and its subtitle
+Yêu cầu:
 
-Build the release binary:
+- Rust 1.85 trở lên.
+- FFmpeg và FFprobe có trong `PATH`.
+- FFmpeg có filter âm thanh `rubberband`.
+- `yt-dlp` có trong `PATH` nếu cần nhập video và phụ đề từ YouTube.
+
+Build binary release:
 
 ```bash
 cargo build --release -p dubora-cli
 ```
 
-Run it from a project root or pass `--root` explicitly:
+Chạy từ thư mục gốc dự án hoặc chỉ định bằng `--root`:
 
 ```bash
 export AZURE_KEY=...
@@ -57,207 +61,227 @@ export GEMINI_API_KEYS=key_1,key_2
 ./target/release/dubora --root /data/courses/my-course
 ```
 
-`<root>/.env` is also supported (`AZURE_KEY`, `AZURE_REGION`, `AZURE_VOICE`,
-`AZURE_VOICE_STYLE`, `GEMINI_API_KEYS`). Use
-`--translate` to translate and polish English SRT files with Gemini 3.5 Flash-Lite. Multiple
-Gemini keys are used round-robin once per logical request.
+Cũng có thể cấu hình trong `<root>/.env` với các biến `AZURE_KEY`, `AZURE_REGION`,
+`AZURE_VOICE`, `AZURE_VOICE_STYLE` và `GEMINI_API_KEYS`. Bật `--translate` để dịch
+và trau chuốt phụ đề tiếng Anh sang tiếng Việt bằng Gemini 3.5 Flash-Lite.
+Nếu có nhiều Gemini key, ứng dụng luân phiên key theo từng yêu cầu logic.
 
 ### Natural Voice
 
-Natural Voice is opt-in. Gemini creates structured Speech Plans and Dubora renders only the SSML
-controls supported by the selected Azure voice. Timing-capable voices use source-aligned whole
-utterances; timing-unsupported Dragon HD voices use one continuous REST utterance per source
-narration block and do not claim semantic-anchor alignment. It requires `GEMINI_API_KEYS` even when
-the input SRT is already Vietnamese.
+Natural Voice là tính năng tùy chọn. Gemini tạo Speech Plan có cấu trúc, sau đó
+Dubora chỉ render các điều khiển SSML mà giọng Azure đã chọn hỗ trợ. Giọng có
+timing event dùng các đoạn nói hoàn chỉnh theo timeline nguồn. Dragon HD không
+hỗ trợ timing event dùng một lượt tổng hợp REST liên tục cho mỗi khối lời dẫn
+nguồn, không khẳng định đã căn chỉnh semantic anchor. Tính năng này cần
+`GEMINI_API_KEYS` ngay cả khi SRT đầu vào đã là tiếng Việt.
 
 ```bash
-# Balanced is the default: move an elastic block by at most 250 ms inside its sync island.
+# Balanced mặc định: cho phép dịch chuyển khối linh hoạt tối đa 250 ms trong sync island.
 ./target/release/dubora --natural-voice "course/part/lesson.mp4"
 
-# Prefer exact starts, or allow up to 500 ms of local movement for elastic explanation.
+# Giữ thời điểm bắt đầu chính xác, hoặc cho phép dịch chuyển phần giải thích tối đa 500 ms.
 ./target/release/dubora --natural-voice --natural-mode sync "course/part/lesson.mp4"
 ./target/release/dubora --natural-voice --natural-mode natural "course/part/lesson.mp4"
 
-# Translate English subtitles first, then build the Natural Voice Speech Plan from the indexed
-# Vietnamese SRT.
+# Dịch phụ đề tiếng Anh trước, rồi tạo Speech Plan từ SRT tiếng Việt đã đánh chỉ mục.
 ./target/release/dubora --translate --natural-voice "course/part/lesson.mp4"
 
-# Keep raw Natural Voice TTS files without TailOnly pause-fit recovery.
+# Giữ file TTS gốc, không thu hồi khoảng lặng đầu/cuối bằng TailOnly pause-fit.
 ./target/release/dubora --natural-voice --no-pause-fit "course/part/lesson.mp4"
 
-# Optional audio polish; every flag is off by default.
+# Các tùy chọn xử lý âm thanh đều mặc định tắt.
 ./target/release/dubora --duck-original --voiceover-eq --loudness-normalize "course/part/lesson.mp4"
 
-# Optional source-word timing experiment (uploads a temporary mono track to Azure Speech).
-# The default remains caption-derived and does not upload source audio.
+# Thử nghiệm timing từng từ nguồn: gửi một track mono tạm thời lên Azure Speech.
+# Mặc định lấy timing từ phụ đề và không gửi âm thanh nguồn.
 DUBORA_SOURCE_LOCALE=en-US ./target/release/dubora --natural-voice \
   --source-timing azure-fast "course/part/lesson.mp4"
 ```
 
-Natural Voice applies TailOnly encoder lead/tail recovery by default. Use
-`--no-pause-fit` or `DUBORA_INTERNAL_PAUSE_FIT=0` to restore raw TTS timing.
-Use `DUBORA_INTERNAL_JOIN_FADES=0` only to restore the pre-PR4 mixer joins.
-`--duck-original` keeps the source audio bed at -22 dB, `--voiceover-eq` applies an 80 Hz
-voiceover high-pass, and `--loudness-normalize` targets -17 LUFS for voiceover only. These
-audio-polish options are opt-in and remain off by default.
+Natural Voice mặc định dùng TailOnly để thu hồi khoảng đệm đầu/cuối của file TTS.
+Dùng `--no-pause-fit` hoặc `DUBORA_INTERNAL_PAUSE_FIT=0` để dùng timing TTS gốc.
+Chỉ dùng `DUBORA_INTERNAL_JOIN_FADES=0` nếu cần khôi phục cách nối clip trước PR4.
+`--duck-original` giữ âm thanh nguồn ở mức -22 dB; `--voiceover-eq` áp dụng
+high-pass 80 Hz; `--loudness-normalize` nhắm mức -17 LUFS cho riêng voiceover.
+Tất cả tùy chọn xử lý âm thanh này đều mặc định tắt.
 
-For timing-capable voices, Dubora synthesizes each source-aligned utterance once and measures the
-whole island before choosing a follow-up. A block may use at most one mutually exclusive follow-up:
-a supported timing repair, or one batched concise revision followed by one whole-utterance
-resynthesis. Accepted audio uses final time-stretch within `1.13x`. Unresolved anchors, structural
-timing conflicts, or infeasible islands mark the render `reviewRequired`; the aligned path never
-splits or compacts an utterance into segment files. Dubora never overlaps speech or silently
-truncates content. Source-aligned diagnostics report `granular`, `captionDerived`, or `cueOnly`
-timing evidence. Dragon HD uses punctuation and supported semantic breaks only; no fake prosody or
-timing-event alignment is claimed. A continuous block that remains over the `1.13x` cap becomes
-`reviewRequired` as one whole block, never a mixture of `utterance_*` and `seg_*` files.
+Với giọng có timing event, Dubora tổng hợp từng đoạn nói theo nguồn rồi đo cả
+sync island trước khi chọn bước xử lý tiếp. Mỗi khối chỉ có tối đa một bước:
+sửa timing bằng điều khiển được hỗ trợ, hoặc viết gọn theo batch rồi tổng hợp
+lại toàn bộ đoạn nói. Audio được chấp nhận có time-stretch tối đa `1.13x`.
+Xung đột cấu trúc timing, island không thể phân bổ hoặc ràng buộc căn chỉnh bắt
+buộc chưa giải quyết sẽ đặt bản render thành `reviewRequired`. Độ lệch sớm của
+thao tác ở cuối câu có thể được chấp nhận nếu duration an toàn; độ lệch đo được
+vẫn được ghi trong diagnostics.
 
-The source-aligned path keeps one Rust-owned timeline: Gemini chooses wording and delivery only;
-Rust owns source timing, semantic-anchor windows, allocation, and SSML rendering. Each run writes
-`source_timeline.json`, `render_manifest.json`, `sync_report.json`, and secret-free
-`provider_metrics.json` under the ignored `work/` directory. A `reviewRequired` manifest is never
-sent to FFmpeg, so an uncertain island cannot overwrite a previous output.
-The CLI progress event and `sync_report.json` include the affected entry and `mm:ss.mmm` review
-window so the region can be checked in the existing player.
-To calculate a local Gemini estimate, set `DUBORA_GEMINI_INPUT_USD_PER_MILLION` and
-`DUBORA_GEMINI_OUTPUT_USD_PER_MILLION`; otherwise the report explicitly records that provider
-rates are unavailable.
+Dragon HD ghi nhận semantic-anchor mapping còn thiếu trong diagnostics và có
+thể xuất kết quả khi duration đo được phù hợp, không khẳng định semantic
+alignment. Nhánh aligned không chia hoặc ép đoạn nói thành các file segment.
+Dubora không chồng lời nói hoặc âm thầm cắt nội dung. Diagnostics của nhánh
+source-aligned ghi rõ loại bằng chứng timing: `granular`, `captionDerived`
+hoặc `cueOnly`. Dragon HD dùng dấu câu, semantic break và điều khiển phát âm
+được hỗ trợ; không giả lập prosody hoặc căn chỉnh bằng timing event. Khối nói
+liên tục còn vượt `1.13x` sẽ thành `reviewRequired` nguyên khối, không trộn
+file `utterance_*` với `seg_*`.
+
+Nhánh source-aligned giữ một timeline do Rust quản lý. Gemini chỉ chọn cách
+diễn đạt và thể hiện; Rust quản lý timing nguồn, cửa sổ semantic anchor, phân
+bổ và render SSML. Mỗi lần chạy ghi `source_timeline.json`,
+`render_manifest.json`, `sync_report.json` và `provider_metrics.json` không
+chứa secret trong thư mục `work/` đã được Git bỏ qua. Manifest
+`reviewRequired` không được chuyển tới FFmpeg, nên không ghi đè output trước đó.
+Sự kiện tiến độ CLI và `sync_report.json` ghi đoạn bị ảnh hưởng cùng khoảng
+thời gian `mm:ss.mmm` để kiểm tra bằng trình phát hiện có.
+
+Để ước tính chi phí Gemini cục bộ, đặt `DUBORA_GEMINI_INPUT_USD_PER_MILLION`
+và `DUBORA_GEMINI_OUTPUT_USD_PER_MILLION`. Nếu không có, báo cáo ghi rõ chưa
+có đơn giá nhà cung cấp.
 
 ```bash
 export DUBORA_FFMPEG=/usr/bin/ffmpeg
 export DUBORA_FFPROBE=/usr/bin/ffprobe
 ```
 
-Azure is the Rust provider; Edge TTS remains in the Python reference.
+Bản Rust dùng Azure; Edge TTS vẫn có trong bản Python tham chiếu.
 
-The `--source-timing azure-fast` CLI option and the Desktop **Azure Fast granular** selector enable
-the same opt-in source-word timing path. Dubora extracts a temporary
-16 kHz mono WAV under ignored work/, requests Azure Fast Transcription word timestamps, aligns
-recognized words to the source SRT with bounded matching, and interpolates unmatched spans only
-after the coverage gate passes. It keeps the original subtitle text/timestamps unchanged. The
-transcript is cached by source-video metadata and locale; a provider error or low alignment
-coverage falls back to the normal caption-derived or cue-only timeline and records the reason in
-source_timeline.json.
-For translated or otherwise low-coverage input, the fallback may remain cueOnly and project only a
-unique exact required action anchor; Dubora never reports that projection as granular timing.
-Azure receives the extracted audio only in this opt-in mode, so review the service's retention and
-regional data-processing policy before enabling it. Set DUBORA_AZURE_STT_USD_PER_AUDIO_HOUR when
-you want provider_metrics.json to include a local transcription cost estimate; otherwise it
-reports provider_rate_unavailable and still records audio duration, bytes, latency, and cache hits.
+Option CLI `--source-timing azure-fast` và lựa chọn desktop **Azure Fast granular**
+cùng bật chế độ timing từng từ nguồn. Dubora trích WAV mono 16 kHz tạm thời
+trong `work/`, yêu cầu Azure Fast Transcription trả timestamp từng từ, đối
+chiếu từ nhận dạng với SRT nguồn theo phạm vi giới hạn, rồi chỉ nội suy phần
+thiếu sau khi đạt ngưỡng độ phủ. Source timing không sửa nội dung hay timestamp
+của phụ đề đầu vào. Natural Voice tạo companion SRT riêng từ các câu hoàn
+chỉnh đã render, giữ cách viết kỹ thuật hiển thị như IP, URL, đường dẫn và số
+phiên bản model.
 
-Verify:
+Transcript được cache theo metadata video và locale. Khi provider lỗi hoặc
+độ phủ căn chỉnh thấp, ứng dụng dùng lại timeline từ phụ đề hoặc cue và ghi
+lý do trong `source_timeline.json`. Với đầu vào đã dịch hoặc độ phủ thấp,
+fallback có thể vẫn là `cueOnly` và chỉ ánh xạ một required action anchor
+khớp chính xác, duy nhất; Dubora không báo ánh xạ đó là granular timing.
+
+Azure chỉ nhận audio trích xuất khi bật chế độ này. Hãy xem chính sách lưu
+trữ và xử lý dữ liệu theo vùng của dịch vụ trước khi bật. Đặt
+`DUBORA_AZURE_STT_USD_PER_AUDIO_HOUR` nếu muốn `provider_metrics.json` có
+ước tính chi phí transcription cục bộ; nếu không, báo cáo ghi
+`provider_rate_unavailable` và vẫn thống kê thời lượng audio, số byte,
+latency và cache hit.
+
+Kiểm tra:
 
 ```bash
 cargo test -p dubora-core
 ffmpeg -filters | grep rubberband
 ```
 
-## Windows Desktop
+## Desktop Windows
 
-The desktop app includes a **Tải từ YouTube** field at the top of **Thư viện**.
-Paste a `youtube.com` or `youtu.be` URL after choosing a project root, then choose a
-quality from lowest through 1080p or highest. It saves an MP4 under `assets/video/`
-and one matching SRT under `assets/srt/`. Subtitle language
-fallback is English, European languages, Chinese, Portuguese, Japanese, Korean,
-Indonesian, Hindi, Arabic, then any other available language.
+Ứng dụng có ô **Tải từ YouTube** ở đầu **Thư viện**. Sau khi chọn thư mục gốc
+dự án, dán URL `youtube.com` hoặc `youtu.be` rồi chọn chất lượng từ thấp nhất,
+1080p đến cao nhất. Ứng dụng lưu MP4 vào `assets/video/` và SRT tương ứng vào
+`assets/srt/`. Thứ tự chọn ngôn ngữ phụ đề dự phòng là tiếng Anh, các ngôn ngữ
+châu Âu, tiếng Trung, Bồ Đào Nha, Nhật, Hàn, Indonesia, Hindi, Ả Rập, rồi các
+ngôn ngữ còn lại có sẵn.
 
-### Dubora Hub and library organization
+### Dubora Hub và tổ chức thư viện
 
-**Dubora Hub** is the first item in the desktop sidebar. It plays a source video
-inside the app with its matching input SRT, native volume controls, 0.5x–2x speed
-selection, seeking, and fullscreen. The Library also has a play button for each
-video, so a video can be opened without leaving the file-management workflow.
+**Dubora Hub** là mục đầu tiên ở sidebar. Hub phát video nguồn trong ứng dụng
+với SRT đầu vào tương ứng, điều khiển âm lượng, tốc độ 0.5x–2x, tua và toàn
+màn hình. Thư viện cũng có nút phát cho từng video để mở ngay trong quá trình
+quản lý file.
 
-The Library supports list and grid views, sorting by name or added date, and
-grouping by name, added date, course, or no grouping. A course is the first
-directory under `assets/video/`; for example, `assets/video/Rust Basics/lesson-01.mp4`
-appears under the `Rust Basics` course group. Grid view uses the video frame directly
-and does not generate or persist thumbnail files.
+Thư viện hỗ trợ chế độ danh sách hoặc lưới, sắp xếp theo tên hoặc ngày thêm,
+và nhóm theo tên, ngày thêm, khóa học hoặc không nhóm. Khóa học là thư mục
+đầu tiên dưới `assets/video/`; ví dụ `assets/video/Rust Basics/lesson-01.mp4`
+thuộc nhóm `Rust Basics`. Chế độ lưới dùng trực tiếp khung hình video, không
+sinh hoặc lưu file thumbnail.
 
-Create a playlist in the Library or Hub, select that playlist, then select videos in
-the Library and use **Add**. Playlists are stored locally in the Dubora app config
-and are scoped to their project root. Renaming or deleting a video also updates its
-playlist entries.
+Tạo playlist trong Thư viện hoặc Hub, chọn playlist đó, rồi chọn video trong
+Thư viện và bấm **Add**. Playlist được lưu cục bộ trong config Dubora, riêng
+theo từng thư mục gốc dự án. Đổi tên hoặc xóa video cũng cập nhật mục tương
+ứng trong playlist.
 
-### Build via GitHub Actions (recommended)
+### Build bằng GitHub Actions (khuyến nghị)
 
-Workflow: `.github/workflows/build-windows.yml` (runs on `windows-latest`).
-Each successful push to `main` builds both `x64` and `x86` targets, then creates
-a GitHub Release tagged `v<app-version>-build.<run-number>` with the NSIS
-installers and portable `.exe` files attached. Manual workflow runs upload
-artifacts but do not publish a release.
+Workflow `.github/workflows/build-windows.yml` chạy trên `windows-latest`.
+Push vào `main` khớp bộ lọc đường dẫn sẽ build cả `x64` và `x86`. Job release
+đọc mục phiên bản có số mới nhất trong `CHANGELOG.md`, tạo release
+`v<version>` với NSIS installer và file `.exe` portable nếu release đó chưa
+tồn tại. Việc phát hành cần source archive bên thứ ba đã được duyệt và
+checksum như mô tả trong [Third-Party Notices](THIRD_PARTY_NOTICES.md).
+Chạy workflow thủ công chỉ upload artifact, không tạo release.
 
 ```bash
-# After the repo is on GitHub:
+# Sau khi repo đã có trên GitHub:
 gh workflow run "Build Windows"
 gh run watch
-# Download artifacts when finished:
+# Tải artifact khi hoàn tất:
 gh run download -n dubora-windows-x64
 gh run download -n dubora-windows-x86
 ```
 
-Release assets include architecture-specific NSIS installers
-(`Dubora-x64-installer-*.exe`, `Dubora-x86-installer-*.exe`) and raw app
-binaries when present.
+Release asset gồm NSIS installer riêng cho từng kiến trúc
+(`Dubora-x64-installer-*.exe`, `Dubora-x86-installer-*.exe`) và binary ứng
+dụng riêng nếu có.
 
-### Build locally on Windows
+### Build cục bộ trên Windows
 
 ```powershell
 .\scripts\prepare-ffmpeg-windows.ps1
+.\scripts\prepare-ytdlp-windows.ps1
 cd apps\desktop
 npm install
 npm run tauri build
 ```
 
-The preparation script downloads the pinned Gyan FFmpeg 8.1.2 essentials build,
-verifies its checksum, stages binaries under
-`apps/desktop/src-tauri/resources/ffmpeg/`, and asserts the `rubberband` filter
-exists. See `THIRD_PARTY_NOTICES.md` before distributing an installer.
+Script chuẩn bị tải Gyan FFmpeg 8.1.2 essentials đã pin, xác minh checksum,
+đặt binary vào `apps/desktop/src-tauri/resources/ffmpeg/` và kiểm tra filter
+`rubberband`. Xem `THIRD_PARTY_NOTICES.md` trước khi phân phối installer.
 
-The desktop app stores project root and Azure settings under the local Tauri
-app config directory. UI copy is Vietnamese; icons use Tabler Icons.
-After loading the Azure voice list, selecting a voice exposes its supported expressive
-styles and Natural Voice capabilities (emphasis, prosody, semantic breaks, and style). The `vi-VN`
-filter also includes multilingual voices that support Vietnamese. In **Thư viện**, enable
-**Natural Voice** and choose Sync, Balanced, or Natural timing. Natural Voice needs at least one
-Gemini key stored in **Thiết lập → Google AI Studio**. Desktop also exposes the source timing
-selector next to the Natural Voice mode; Caption timing remains the default.
+Desktop lưu thư mục gốc dự án và thiết lập Azure trong thư mục config Tauri
+cục bộ. Giao diện dùng tiếng Việt, icon dùng Tabler Icons. Sau khi tải danh
+sách giọng Azure, chọn giọng để xem expressive style và các khả năng Natural
+Voice được hỗ trợ: emphasis, prosody, semantic break và style. Bộ lọc `vi-VN`
+cũng gồm các giọng đa ngôn ngữ hỗ trợ tiếng Việt.
 
-Dev UI only (no native shell) from `apps/desktop`:
+Trong **Thư viện**, bật **Natural Voice** và chọn Sync, Balanced hoặc Natural.
+Natural Voice cần ít nhất một Gemini key trong **Thiết lập → Google AI Studio**.
+Desktop cũng có lựa chọn source timing cạnh chế độ Natural Voice;
+Caption timing là mặc định.
+
+Chỉ build giao diện, không chạy native shell, từ `apps/desktop`:
 
 ```bash
 npm install
 npm run build
 ```
 
-## Python Reference Setup
+## Thiết lập bản Python tham chiếu
 
-The reference implementation lives in `python_reference/dubora_reference/`;
-the root-level Python files are compatibility shims for existing commands.
-Its regression tests live in `python_reference/tests/` and remain separate from
-the production Rust pipeline.
+Bản tham chiếu nằm trong `python_reference/dubora_reference/`. Các file
+Python ở thư mục gốc là shim tương thích cho lệnh hiện có. Regression test
+nằm trong `python_reference/tests/`, tách biệt với pipeline Rust chính.
 
-Prerequisites:
+Yêu cầu:
 
-- Python 3.10+
-- FFmpeg available in `PATH`
-- FFmpeg must include the `rubberband` audio filter
+- Python 3.10 trở lên.
+- FFmpeg có trong `PATH`.
+- FFmpeg có filter âm thanh `rubberband`.
 
-Verify FFmpeg:
+Kiểm tra FFmpeg:
 
 ```bash
 ffmpeg -version
 ffmpeg -filters | grep rubberband
 ```
 
-On Windows PowerShell, use:
+Trên Windows PowerShell:
 
 ```powershell
 ffmpeg -version
 ffmpeg -filters | findstr rubberband
 ```
 
-Install Python dependencies from the project folder.
+Cài dependency Python từ thư mục dự án.
 
 Ubuntu/macOS:
 
@@ -277,13 +301,13 @@ py -3 -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-If PowerShell blocks venv activation, run this in the same terminal first:
+Nếu PowerShell chặn kích hoạt venv, chạy lệnh sau trong cùng terminal:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-Add Azure Speech credentials to `.env` in the project folder:
+Thêm thông tin Azure Speech vào `.env` trong thư mục dự án:
 
 ```text
 AZURE_KEY=...
@@ -291,13 +315,13 @@ AZURE_REGION=southeastasia
 GEMINI_API_KEYS=key_1,key_2
 ```
 
-The default Azure region is `southeastasia`.
+Region Azure mặc định là `southeastasia`.
 
-To create a Gemini key, open [Google AI Studio API Keys](https://aistudio.google.com/app/apikey),
-select **Create API key**, then add it to `GEMINI_API_KEYS`. Keep keys out of source control.
-The desktop app accepts the same list in **Thiết lập → Google AI Studio**.
+Để tạo Gemini key, mở [Google AI Studio API Keys](https://aistudio.google.com/app/apikey),
+chọn **Create API key** rồi thêm vào `GEMINI_API_KEYS`. Không đưa key vào Git.
+Desktop nhận cùng danh sách key trong **Thiết lập → Google AI Studio**.
 
-## Folder Layout
+## Cấu trúc thư mục
 
 ```text
 assets/
@@ -313,39 +337,36 @@ outputs/
 work/
 ```
 
-Put videos under `assets/video/`.
-
-Put subtitles under `assets/srt/`.
-
-The video and SRT should have the same relative path and basename:
+Đặt video trong `assets/video/`, phụ đề trong `assets/srt/`. Video và SRT phải
+có cùng đường dẫn tương đối và tên gốc:
 
 ```text
 assets/video/[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.mp4
 assets/srt/[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.srt
 ```
 
-If the subtitle course folder has a `CC-` prefix, that is also supported:
+Cũng hỗ trợ thư mục phụ đề khóa học có tiền tố `CC-`:
 
 ```text
 assets/video/[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.mp4
 assets/srt/CC-[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.srt
 ```
 
-## Run
+## Chạy bản Python tham chiếu
 
-Always run commands from `~/dubora`:
+Luôn chạy từ `~/dubora`:
 
 ```bash
 cd ~/dubora
 ```
 
-Process every video recursively:
+Xử lý đệ quy tất cả video:
 
 ```bash
 python3 run_dub.py
 ```
 
-This scans:
+Lệnh này tìm các file:
 
 ```text
 assets/video/**/*.mp4
@@ -354,25 +375,25 @@ assets/video/**/*.mkv
 assets/video/**/*.webm
 ```
 
-Process one video:
+Xử lý một video:
 
 ```bash
 python3 run_dub.py "[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.mp4"
 ```
 
-If the SRT is English and needs translation, opt in explicitly:
+Nếu SRT là tiếng Anh và cần dịch, bật tùy chọn:
 
 ```bash
 python3 run_dub.py --translate "[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.mp4"
 ```
 
-Regenerate existing TTS audio for a video:
+Sinh lại TTS cho một video:
 
 ```bash
 python3 run_dub.py --force-tts "[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.mp4"
 ```
 
-Regenerate existing TTS audio for all videos:
+Sinh lại TTS cho tất cả video:
 
 ```bash
 python3 run_dub.py --force-tts
@@ -385,33 +406,30 @@ outputs/[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introdu
 outputs/[NEW] Spring Boot 3, Spring 6 & Hibernate for Beginners/part1/1. Introduction.vi-dub.srt
 ```
 
-The default TTS provider is Azure Speech with:
+Provider TTS mặc định là Azure Speech với giọng:
 
 ```text
 de-DE-Florian:DragonHDLatestNeural
 ```
 
-Azure voices that expose expressive styles can use `AZURE_VOICE_STYLE` or the CLI
-`--voice-style` option. The desktop Settings screen lists styles supported by the selected voice.
-IP addresses are spoken character by character: `192.168.0.1` becomes
-`một chín hai chấm một sáu tám chấm không chấm một`, and `2001:db8::1` uses
-Vietnamese digit/hex names with `hai chấm` for `:`.
+Giọng Azure có expressive style dùng được `AZURE_VOICE_STYLE` hoặc option CLI
+`--voice-style`. Màn hình thiết lập desktop liệt kê style mà giọng đã chọn
+hỗ trợ. Địa chỉ IP được đọc từng ký tự: `192.168.0.1` thành
+`một chín hai chấm một sáu tám chấm không chấm một`; `2001:db8::1` dùng tên
+chữ số/hex tiếng Việt và `hai chấm` cho `:`.
 
-You can still run the old Edge provider if needed:
+Vẫn có thể dùng provider Edge cũ:
 
 ```bash
 python3 run_dub.py --provider edge
 ```
 
-## TTS Pronunciation
+## Phát âm TTS
 
-Subtitles keep technical terms in English. The default Azure Florian provider
-reads mixed Vietnamese and English terms directly.
+Phụ đề giữ thuật ngữ kỹ thuật bằng tiếng Anh. Provider Azure Florian mặc định
+đọc trực tiếp văn bản trộn tiếng Việt và tiếng Anh.
 
-The legacy Edge provider still uses a pronunciation map so Vietnamese voice does
-not spell acronyms awkwardly.
-
-Examples:
+Provider Edge cũ dùng bảng thay thế phát âm để tránh đọc acronym không tự nhiên:
 
 ```text
 CRUD    -> cờ rút
@@ -424,35 +442,35 @@ MVC     -> em vi xi
 AOP     -> ây ô pi
 ```
 
-This only changes the spoken text sent to TTS. It does not change the SRT text.
+Việc thay thế chỉ tác động văn bản gửi tới TTS, không đổi nội dung SRT.
 
-## Matching Rules
+## Quy tắc ghép video với phụ đề
 
-For a video:
+Với video:
 
 ```text
 assets/video/<course>/<part>/<section>/<lesson>.mp4
 ```
 
-the runner first tries:
+Runner tìm trước ở:
 
 ```text
 assets/srt/<course>/<part>/<section>/<lesson>.srt
 ```
 
-then tries the `CC-` folder fallback:
+Sau đó thử thư mục dự phòng `CC-`:
 
 ```text
 assets/srt/CC-<course>/<part>/<section>/<lesson>.srt
 ```
 
-If no matching SRT exists, the script stops and prints the paths it tried.
+Nếu không có SRT tương ứng, script dừng và in các đường dẫn đã thử.
 
-## Notes
+## Ghi chú
 
-- `work/` stores intermediate cleaned/translated SRT, TTS segments, and voiceover audio.
-- By default, input SRT files are assumed to already be Vietnamese.
-- `outputs/` stores final dubbed videos and matching `*.vi-dub.srt` subtitle files.
-- By default, the final video keeps only the original video stream and the Vietnamese audio track;
-  opt-in audio polish can also retain a quiet source bed.
-- Output keeps the same folder structure as `assets/video/`.
+- `work/` lưu SRT làm sạch/đã dịch, các đoạn TTS và audio voiceover trung gian.
+- Mặc định coi SRT đầu vào đã là tiếng Việt.
+- `outputs/` lưu video lồng tiếng và phụ đề `*.vi-dub.srt` tương ứng.
+- Mặc định video cuối chỉ giữ hình ảnh gốc và audio tiếng Việt; các tùy chọn
+  xử lý âm thanh cho phép giữ thêm âm thanh nguồn ở mức nhỏ.
+- Output giữ cấu trúc thư mục tương ứng với `assets/video/`.

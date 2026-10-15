@@ -1,7 +1,8 @@
-# Stage the official latest yt-dlp Windows binary for the Dubora installer.
+# Pin the official yt-dlp release for the binary, checksums, and notices.
 $ErrorActionPreference = "Stop"
 
-$Release = "https://github.com/yt-dlp/yt-dlp/releases/latest/download"
+$Version = "2026.08.19"
+$Release = "https://github.com/yt-dlp/yt-dlp/releases/download/$Version"
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) "dubora-ytdlp-$([guid]::NewGuid())"
 $Binary = Join-Path $TempDir "yt-dlp.exe"
 $Checksums = Join-Path $TempDir "SHA2-256SUMS"
@@ -23,5 +24,9 @@ if ($ActualSha256 -ne $ExpectedSha256) {
 }
 
 Copy-Item $Binary (Join-Path $Destination "yt-dlp.exe") -Force
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$Version/LICENSE" -OutFile (Join-Path $Destination "LICENSE")
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/$Version/THIRD_PARTY_LICENSES.txt" -OutFile (Join-Path $Destination "THIRD_PARTY_LICENSES.txt")
+"Version: $Version`nBinary SHA-256: $ActualSha256`nSource: https://github.com/yt-dlp/yt-dlp/tree/$Version" |
+    Set-Content -Encoding utf8 (Join-Path $Destination "BUILD-INFO.txt")
 Remove-Item -Recurse -Force $TempDir
 Write-Host "Prepared verified yt-dlp resource in $Destination"

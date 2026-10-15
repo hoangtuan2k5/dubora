@@ -27,6 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m unittest python_reference.tests.test_run_dub
+          python -m unittest python_reference.tests.test_release_source
           version="$(python3 scripts/changelog-release.py version)"
           tag="$(python3 scripts/changelog-release.py tag)"
           test "$tag" = "v${version}"
