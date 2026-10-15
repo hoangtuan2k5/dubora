@@ -4,6 +4,23 @@
 
 Tạo video lồng tiếng Việt từ video và phụ đề SRT tương ứng.
 
+## Tải xuống và cài đặt
+
+**[Tải Dubora cho Windows — bản phát hành mới nhất](https://github.com/hoangtuan2k5/dubora/releases/latest)**
+
+1. Mở link trên và tìm mục **Assets**.
+2. Với Windows 64-bit, tải `Dubora-x64-installer-…-setup.exe` rồi chạy để cài đặt.
+3. Mở Dubora, chọn thư mục dự án và nhập Azure Speech key trong **Thiết lập**.
+   Thêm Gemini key nếu dùng dịch phụ đề hoặc Natural Voice.
+
+Installer đã kèm FFmpeg và yt-dlp; không cần cài Rust, Python hay Node.js để dùng.
+File `Dubora-…-portable-dubora.exe` là binary ứng dụng riêng, không phải bộ portable
+đầy đủ kèm công cụ; nên dùng installer. CLI Linux được build từ source theo hướng
+dẫn bên dưới. Azure/Gemini có thể phát sinh chi phí theo tài khoản API của bạn.
+
+Link `/releases/latest` tự trỏ tới bản release mới nhất, không cần đổi README khi
+có phiên bản mới.
+
 Tác giả: Hoàng Chiều Nguyễn Tuấn\
 Email: tuan@hoangtuan.dev\
 GitHub: [hoangtuan2k5](https://github.com/hoangtuan2k5)\

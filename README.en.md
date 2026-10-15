@@ -4,6 +4,23 @@
 
 Create Vietnamese dubbed videos from video files and matching SRT subtitles.
 
+## Download and install
+
+**[Download Dubora for Windows — latest release](https://github.com/hoangtuan2k5/dubora/releases/latest)**
+
+1. Open the link above and find **Assets**.
+2. For 64-bit Windows, download `Dubora-x64-installer-…-setup.exe` and run the installer.
+3. Open Dubora, choose a project folder, and enter your Azure Speech key in **Thiết lập**
+   (Settings). Add a Gemini key for subtitle translation or Natural Voice.
+
+The installer includes FFmpeg and yt-dlp; Rust, Python, and Node.js are not required.
+`Dubora-…-portable-dubora.exe` is the standalone app binary, not a complete portable
+bundle with its tools; use the installer. Build the Linux CLI from source using the
+instructions below. Azure/Gemini usage may incur charges on your API account.
+
+The `/releases/latest` link automatically opens the latest release, so the README
+does not need a version-specific download URL.
+
 Author: Hoàng Chiều Nguyễn Tuấn\
 Email: tuan@hoangtuan.dev\
 GitHub: [hoangtuan2k5](https://github.com/hoangtuan2k5)\
