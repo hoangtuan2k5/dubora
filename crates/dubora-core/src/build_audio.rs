@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json;
@@ -17,6 +17,9 @@ const JOIN_FADE_MS: u32 = 30;
 const PAD_ONLY_TOLERANCE_MS: u32 = 26;
 // Rollback switch: DUBORA_INTERNAL_JOIN_FADES=0 restores the pre-PR4 clip joins.
 const JOIN_FADES_ENV: &str = "DUBORA_INTERNAL_JOIN_FADES";
+const MAX_MIX_INPUTS: usize = 32;
+// Leave room for Windows argument quoting and the fixed FFmpeg/output arguments.
+const MAX_MIX_COMMAND_UNITS: usize = 16_000;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PadClamp {
@@ -40,6 +43,11 @@ struct EntryFilterSpec {
     speech_end_ms: Option<u32>,
     delay_ms: u64,
     trim_mode: TrimMode,
+}
+
+struct MixClip {
+    path: PathBuf,
+    filter: EntryFilterSpec,
 }
 
 fn join_fades_enabled() -> bool {
@@ -185,9 +193,8 @@ pub fn build_voiceover_track_from_manifest(
         bail!("Manifest audio cache identity changed: {}", stale.id);
     }
 
-    let join_fades = join_fades_enabled();
-    let mut filters = Vec::with_capacity(entries.len());
-    for (position, (entry, input)) in entries.iter().zip(&inputs).enumerate() {
+    let mut clips = Vec::with_capacity(entries.len());
+    for (entry, input) in entries.iter().zip(&inputs) {
         let available_ms = entry.end_ms.saturating_sub(entry.start_ms);
         let actual_duration = ffmpeg.audio_duration(input)?;
         let actual_ms = (actual_duration * 1_000.0).ceil() as u32;
@@ -213,8 +220,9 @@ pub fn build_voiceover_track_from_manifest(
                 entry.id
             );
         }
-        let chain = entry_filter_chain(
-            EntryFilterSpec {
+        clips.push(MixClip {
+            path: input.clone(),
+            filter: EntryFilterSpec {
                 tempo,
                 rendered_audio_ms: entry.rendered_audio_ms,
                 available_ms,
@@ -223,35 +231,15 @@ pub fn build_voiceover_track_from_manifest(
                 delay_ms: u64::from(entry.start_ms),
                 trim_mode: TrimMode::Manifest,
             },
-            join_fades,
-        )?;
-        filters.push(format!("[{position}:a]{chain}[a{position}]"));
+        });
     }
-
-    let mixed = (0..entries.len())
-        .map(|position| format!("[a{position}]"))
-        .collect::<String>();
-    filters.push(format!(
-        "{mixed}amix=inputs={}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[outa]",
-        entries.len()
-    ));
-
-    fs::create_dir_all(work_dir)?;
-    let filter_path = work_dir.join("aligned_filter_complex.txt");
-    fs::write(&filter_path, filters.join(";"))?;
-    let mut command = ffmpeg.ffmpeg_command();
-    command.arg("-y");
-    for input in &inputs {
-        command.arg("-i").arg(input);
-    }
-    command
-        .arg("-filter_complex_script")
-        .arg(&filter_path)
-        .args(["-map", "[outa]", "-c:a", "libmp3lame", "-q:a", "2"])
-        .arg(output_audio);
-    ffmpeg
-        .checked(&mut command, "build aligned voiceover")
-        .with_context(|| format!("Failed to create {}", output_audio.display()))
+    render_voiceover(
+        ffmpeg,
+        &clips,
+        output_audio,
+        work_dir,
+        "aligned_filter_complex.txt",
+    )
 }
 
 /// Build a Natural Voice track without permitting the legacy unlimited tempo correction.
@@ -279,8 +267,7 @@ pub fn build_voiceover_track_with_tempo_cap(
         );
     }
 
-    let join_fades = join_fades_enabled();
-    let mut filters = Vec::with_capacity(segments.len());
+    let mut clips = Vec::with_capacity(segments.len());
     let mut previous_rendered_end = None;
     for (position, (segment, mp3)) in segments.iter().zip(&inputs).enumerate() {
         let start = time_to_seconds(&segment.start)?;
@@ -305,8 +292,9 @@ pub fn build_voiceover_track_with_tempo_cap(
         let available_ms = (available * 1_000.0).round().max(1.0) as u32;
         let actual_ms = (duration * 1_000.0).ceil().max(1.0) as u32;
         let rendered_audio_ms = (duration / tempo * 1_000.0).ceil().max(1.0) as u32;
-        let chain = entry_filter_chain(
-            EntryFilterSpec {
+        clips.push(MixClip {
+            path: mp3.clone(),
+            filter: EntryFilterSpec {
                 tempo,
                 rendered_audio_ms,
                 available_ms,
@@ -315,43 +303,319 @@ pub fn build_voiceover_track_with_tempo_cap(
                 delay_ms: (render_start * 1_000.0) as u64,
                 trim_mode: TrimMode::Always,
             },
-            join_fades,
-        )?;
-        filters.push(format!("[{position}:a]{chain}[a{position}]"));
+        });
         previous_rendered_end = Some(render_start + (duration / tempo).min(available));
     }
 
-    let mixed = (0..segments.len())
+    render_voiceover(ffmpeg, &clips, output_audio, work_dir, "filter_complex.txt")
+}
+
+fn path_command_units(path: &Path) -> usize {
+    // Counting every UTF-16 code unit twice also bounds backslash/quote escaping.
+    path.as_os_str().to_string_lossy().encode_utf16().count() * 2 + 8
+}
+
+fn mix_groups(clips: &[MixClip], fixed_units: usize) -> Result<Vec<std::ops::Range<usize>>> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    let mut units = fixed_units;
+    for (position, clip) in clips.iter().enumerate() {
+        let added = path_command_units(&clip.path);
+        if fixed_units + added > MAX_MIX_COMMAND_UNITS {
+            bail!(
+                "Audio path exceeds the safe FFmpeg command length: {}",
+                clip.path.display()
+            );
+        }
+        if position > start
+            && (position - start == MAX_MIX_INPUTS || units + added > MAX_MIX_COMMAND_UNITS)
+        {
+            groups.push(start..position);
+            start = position;
+            units = fixed_units;
+        }
+        units += added;
+    }
+    if start < clips.len() {
+        groups.push(start..clips.len());
+    }
+    Ok(groups)
+}
+
+fn mix_filter(
+    clips: &[MixClip],
+    origin_ms: u64,
+    end_ms: Option<u64>,
+    limiter: bool,
+) -> Result<String> {
+    let mut filters = Vec::with_capacity(clips.len() + 1);
+    for (position, clip) in clips.iter().enumerate() {
+        let mut spec = clip.filter;
+        spec.delay_ms = spec
+            .delay_ms
+            .checked_sub(origin_ms)
+            .context("Audio clips are not ordered at the chunk boundary")?;
+        let audio_ms = ceil_stretched_ms(spec.actual_ms, spec.tempo).min(spec.available_ms);
+        if let Some(end_ms) = end_ms
+            && clip.filter.delay_ms + u64::from(audio_ms) > end_ms
+        {
+            bail!("Audio chunk boundary would cut rendered speech");
+        }
+        let chain = entry_filter_chain(spec, join_fades_enabled())?;
+        filters.push(format!("[{position}:a]{chain}[a{position}]"));
+    }
+    let mixed = (0..clips.len())
         .map(|position| format!("[a{position}]"))
         .collect::<String>();
-    filters.push(format!(
-        "{mixed}amix=inputs={}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[outa]",
-        segments.len()
-    ));
+    let mut mix = format!(
+        "{mixed}amix=inputs={}:duration=longest:dropout_transition=0:normalize=0",
+        clips.len()
+    );
+    if let Some(end_ms) = end_ms {
+        let samples = end_ms
+            .checked_sub(origin_ms)
+            .context("Invalid audio chunk interval")?
+            * 48;
+        // Exact PCM lengths preserve silence between chunks without MP3 encoder padding.
+        mix.push_str(&format!(
+            ",aresample=48000,apad=whole_len={samples},atrim=end_sample={samples}"
+        ));
+    }
+    if limiter {
+        mix.push_str(",alimiter=limit=0.95");
+    }
+    filters.push(format!("{mix}[outa]"));
+    Ok(filters.join(";"))
+}
 
+fn render_voiceover(
+    ffmpeg: &FfmpegPaths,
+    clips: &[MixClip],
+    output_audio: &Path,
+    work_dir: &Path,
+    filter_name: &str,
+) -> Result<()> {
     fs::create_dir_all(work_dir)?;
-    let filter_path = work_dir.join("filter_complex.txt");
-    fs::write(&filter_path, filters.join(";"))?;
+    let filter_path = work_dir.join(filter_name);
+    let fixed_units = 512
+        + path_command_units(&ffmpeg.ffmpeg)
+        + path_command_units(&filter_path)
+        + path_command_units(output_audio);
+    let groups = mix_groups(clips, fixed_units)?;
+    // Validate every clip before starting potentially expensive renders.
+    for clip in clips {
+        entry_filter_chain(clip.filter, join_fades_enabled())?;
+    }
+    if groups.len() == 1 {
+        fs::write(&filter_path, mix_filter(clips, 0, None, true)?)?;
+        return render_mix(ffmpeg, clips, &filter_path, output_audio, false);
+    }
 
+    let chunk_dir = work_dir.join("voiceover-chunks");
+    fs::create_dir_all(&chunk_dir)?;
+    let mut chunks = Vec::with_capacity(groups.len());
+    let mut list = String::new();
+    for (index, group) in groups.iter().enumerate() {
+        let origin_ms = if index == 0 {
+            0
+        } else {
+            clips[group.start].filter.delay_ms
+        };
+        let end_ms = clips.get(group.end).map(|clip| clip.filter.delay_ms);
+        let filter = chunk_dir.join(format!("chunk-{index:05}.txt"));
+        fs::write(
+            &filter,
+            mix_filter(&clips[group.clone()], origin_ms, end_ms, false)?,
+        )?;
+        let audio = chunk_dir.join(format!("chunk-{index:05}.wav"));
+        render_mix(ffmpeg, &clips[group.clone()], &filter, &audio, true)?;
+        list.push_str(&format!("file 'voiceover-chunks/chunk-{index:05}.wav'\n"));
+        chunks.push(audio);
+    }
+    let concat = work_dir.join("voiceover-concat.txt");
+    fs::write(&concat, list)?;
     let mut command = ffmpeg.ffmpeg_command();
-    command.arg("-y");
-    for input in &inputs {
-        command.arg("-i").arg(input);
+    command
+        .arg("-y")
+        .args(["-f", "concat", "-safe", "0", "-i"])
+        .arg(&concat)
+        .args([
+            "-af",
+            "alimiter=limit=0.95",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+        ])
+        .arg(output_audio);
+    ffmpeg.checked(&mut command, "concatenate voiceover chunks")?;
+    for chunk in chunks {
+        let _ = fs::remove_file(chunk);
+    }
+    Ok(())
+}
+
+fn render_mix(
+    ffmpeg: &FfmpegPaths,
+    clips: &[MixClip],
+    filter: &Path,
+    output: &Path,
+    pcm: bool,
+) -> Result<()> {
+    let mut command = ffmpeg.ffmpeg_command();
+    command.args(["-y", "-filter_complex_threads", "1"]);
+    for clip in clips {
+        command.arg("-i").arg(&clip.path);
     }
     command
         .arg("-filter_complex_script")
-        .arg(&filter_path)
-        .args(["-map", "[outa]", "-c:a", "libmp3lame", "-q:a", "2"])
-        .arg(output_audio);
-
+        .arg(filter)
+        .args(["-map", "[outa]"]);
+    if pcm {
+        command.args([
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_f32le",
+            "-rf64",
+            "auto",
+        ]);
+    } else {
+        command.args(["-c:a", "libmp3lame", "-q:a", "2"]);
+    }
+    command.arg(output);
     ffmpeg
         .checked(&mut command, "build voiceover")
-        .with_context(|| format!("Failed to create {}", output_audio.display()))
+        .with_context(|| format!("Failed to create {}", output.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clip(path: PathBuf, delay_ms: u64) -> MixClip {
+        MixClip {
+            path,
+            filter: EntryFilterSpec {
+                tempo: 1.0,
+                rendered_audio_ms: 120,
+                available_ms: 200,
+                actual_ms: 120,
+                speech_end_ms: Some(120),
+                delay_ms,
+                trim_mode: TrimMode::Manifest,
+            },
+        }
+    }
+
+    #[test]
+    fn two_hour_groups_bound_input_count_and_quoted_unicode_paths() {
+        let clips = (0..1200)
+            .map(|i| {
+                clip(
+                    PathBuf::from(format!(
+                        "C:/Khóa học có khoảng trắng/{}/utterance_{i}.fitted.mp3",
+                        "Long folder name/".repeat(50)
+                    )),
+                    i * 6_000,
+                )
+            })
+            .collect::<Vec<_>>();
+        let groups = mix_groups(&clips, 1024).unwrap();
+        assert_eq!(groups.first().unwrap().start, 0);
+        assert_eq!(groups.last().unwrap().end, 1200);
+        for group in &groups {
+            assert!(group.len() <= MAX_MIX_INPUTS);
+            assert!(
+                1024 + clips[group.clone()]
+                    .iter()
+                    .map(|c| path_command_units(&c.path))
+                    .sum::<usize>()
+                    <= MAX_MIX_COMMAND_UNITS
+            );
+        }
+        assert!(groups.windows(2).all(|g| g[0].end == g[1].start));
+    }
+
+    #[test]
+    fn chunks_preserve_leading_gap_and_use_local_sample_exact_boundaries() {
+        let clips = vec![
+            clip("a.mp3".into(), 3_600_050),
+            clip("b.mp3".into(), 3_600_300),
+        ];
+        let local = mix_filter(&clips, 3_600_000, Some(3_601_000), false).unwrap();
+        assert!(local.contains("adelay=50:all=1"));
+        assert!(local.contains("adelay=300:all=1"));
+        assert!(local.contains("apad=whole_len=48000,atrim=end_sample=48000"));
+        assert!(!local.contains("alimiter"));
+        let first = mix_filter(&clips[..1], 0, Some(3_600_300), false).unwrap();
+        assert!(first.contains("adelay=3600050:all=1"));
+        assert!(mix_filter(&clips, 3_600_000, Some(3_600_400), false).is_err());
+        let mut short = clip("short.mp3".into(), 0);
+        short.filter.available_ms = 1000;
+        assert!(mix_filter(&[short], 0, Some(500), false).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires local FFmpeg with libmp3lame"]
+    fn lossless_chunks_match_single_mix_without_missing_or_repeating_boundary_speech() -> Result<()>
+    {
+        let dir = std::env::temp_dir().join(format!("dubora-chunk-audio-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let ffmpeg = FfmpegPaths::resolve(None);
+        let tone = dir.join("tone.wav");
+        let mut generate = ffmpeg.ffmpeg_command();
+        generate
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=0.12",
+            ])
+            .arg(&tone);
+        ffmpeg.checked(&mut generate, "generate tone")?;
+        let clips = (0..65)
+            .map(|i| clip(tone.clone(), 50 + i * 250))
+            .collect::<Vec<_>>();
+        let reference_filter = dir.join("reference.txt");
+        fs::write(&reference_filter, mix_filter(&clips, 0, None, true)?)?;
+        let reference = dir.join("reference.mp3");
+        render_mix(&ffmpeg, &clips, &reference_filter, &reference, false)?;
+        let chunked = dir.join("chunked.mp3");
+        render_voiceover(&ffmpeg, &clips, &chunked, &dir, "filter.txt")?;
+        let decode = |path: &Path| -> Result<Vec<f32>> {
+            let mut command = ffmpeg.ffmpeg_command();
+            let output = command
+                .arg("-i")
+                .arg(path)
+                .args(["-f", "f32le", "-acodec", "pcm_f32le", "-"])
+                .output()?;
+            assert!(output.status.success());
+            Ok(output
+                .stdout
+                .chunks_exact(4)
+                .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+                .collect())
+        };
+        let expected = decode(&reference)?;
+        let actual = decode(&chunked)?;
+        assert_eq!(actual.len(), expected.len());
+        let difference = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            difference < 0.002,
+            "chunk boundary waveform difference: {difference}"
+        );
+        assert!(!dir.join("voiceover-chunks/chunk-00000.wav").exists());
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn allows_a_small_encoded_pad_tail_without_cutting_speech() {

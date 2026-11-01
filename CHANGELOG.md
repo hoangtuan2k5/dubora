@@ -11,6 +11,24 @@ heading when you want a new GitHub Release; `## [Unreleased]` is ignored.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-01
+
+Keep long-video audio builds within Windows command limits and resume completed
+Gemini batches after an interrupted job.
+
+### Fixed
+
+- Mix at most 32 audio inputs per FFmpeg process and also bound quoted command length
+- Preserve timeline gaps with sample-exact lossless PCM chunks and one final MP3 encode
+- Checkpoint validated translation and Speech Plan batches and invalidate changed request context
+- Resume small translation fallback batches without replaying completed large batches
+- Retry transient Gemini failures at most three times while respecting supported Retry-After values
+
+### Changed
+
+- Keep temporary Windows build artifacts for three days
+- Stage release assets in a draft and publish only after the reviewed third-party source archive passes verification
+
 ## [0.2.1] - 2026-09-14
 
 Keep dense Natural Voice jobs inside the 1.13x cap, match companion subtitles
@@ -89,7 +107,8 @@ First Dubora cut: shared Rust pipeline, Linux CLI, and Windows desktop app.
 - WebView2 black window during dub
 - YouTube imports kept as MP4 with repaired subtitles
 
-[Unreleased]: https://github.com/hoangtuan2k5/dubora/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/hoangtuan2k5/dubora/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.2
 [0.2.1]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.1
 [0.2.0]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.0
 [0.1.0]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.1.0

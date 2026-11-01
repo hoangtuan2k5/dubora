@@ -118,7 +118,7 @@ jobs:
           name: dubora-windows-${{ matrix.arch }}
           if-no-files-found: error
           path: release-assets/${{ matrix.arch }}/*.exe
-          retention-days: 14
+          retention-days: 3
 
   release:
     name: Publish GitHub Release
@@ -167,8 +167,23 @@ jobs:
             echo "No .exe release assets found" >&2
             exit 1
           fi
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          release_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [[ "$release_draft" == "false" ]]; then
             echo "GitHub Release ${RELEASE_TAG} already exists; skip. Bump CHANGELOG.md to publish again."
+            exit 0
+          fi
+          if [[ "$release_draft" == "true" ]]; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" THIRD_PARTY_NOTICES.md LICENSE --clobber
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" THIRD_PARTY_NOTICES.md LICENSE \
+              --draft --target "$GITHUB_SHA" --title "$RELEASE_TITLE" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+          if [[ -z "$THIRD_PARTY_SOURCE_URL" || -z "$THIRD_PARTY_SOURCE_SHA256" ]]; then
+            echo "::warning::Release ${RELEASE_TAG} remains a draft until reviewed third-party source is configured."
+            echo "Release ${RELEASE_TAG} remains a draft: configure THIRD_PARTY_SOURCE_URL and THIRD_PARTY_SOURCE_SHA256 before publication." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # The reviewed archive must cover the exact vendor binaries in this build.
@@ -178,8 +193,5 @@ jobs:
             "$THIRD_PARTY_SOURCE_URL" --output third-party-source.zip
           echo "$THIRD_PARTY_SOURCE_SHA256  third-party-source.zip" | sha256sum --check
           unzip -t third-party-source.zip
-          gh release create "$RELEASE_TAG" "${assets[@]}" \
-            third-party-source.zip THIRD_PARTY_NOTICES.md LICENSE \
-            --target "$GITHUB_SHA" \
-            --title "$RELEASE_TITLE" \
-            --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release upload "$RELEASE_TAG" third-party-source.zip --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest

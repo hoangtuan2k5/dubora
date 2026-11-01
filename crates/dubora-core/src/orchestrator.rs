@@ -23,7 +23,7 @@ use crate::srt::{SrtSegment, format_srt_timestamp_ms, parse_srt, write_srt};
 use crate::sync_timeline::{
     GranularSourceWord, SourceTimeline, SyncLayout, TimingMode, build_sync_layout,
 };
-use crate::translate_gemini::{create_speech_plans, translate_srt};
+use crate::translate_gemini::{create_speech_plans_for_voice, translate_srt};
 use crate::tts_azure::{
     generate_all_tts, generate_all_tts_for_aligned_utterances, generate_all_tts_for_speech_plans,
     generate_all_tts_for_unanchored_utterances, load_duration_calibration_chars_per_second,
@@ -874,12 +874,12 @@ async fn create_dub_for_video(
             ));
             plans
         } else {
-            let plans_result = create_speech_plans(
+            let plans_result = create_speech_plans_for_voice(
                 &gemini.keys,
                 &plan_input_srt,
                 false,
                 mode,
-                &voice.styles,
+                &voice,
                 Some(&source_timeline),
                 calibrated_chars_per_second,
             )
@@ -1448,13 +1448,10 @@ fn is_at_least_as_new(output: SystemTime, video: SystemTime, srt: SystemTime) ->
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
     use crate::speech_plan::NaturalMode;
-
-    static FAKE_PROVIDER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn shared_natural_timing_selector_reaches_both_timing_capable_branches() -> Result<()> {
@@ -1579,8 +1576,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn fake_provider_runs_both_natural_timing_branches_with_budget() -> Result<()> {
-        let _lock = FAKE_PROVIDER_LOCK
-            .get_or_init(|| Mutex::new(()))
+        let _lock = crate::translate_gemini::TEST_PROVIDER_LOCK
             .lock()
             .expect("fake provider test lock poisoned");
         let directory = test_directory("fake-provider-budget");

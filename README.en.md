@@ -83,6 +83,18 @@ export GEMINI_API_KEYS=key_1,key_2
 `--translate` to translate and polish English SRT files with Gemini 3.5 Flash-Lite. Multiple
 Gemini keys are used round-robin once per logical request.
 
+The Rust pipeline mixes audio in groups of at most 32 files and also bounds FFmpeg
+command length for long videos on Windows. Temporary lossless PCM chunks retain
+their timeline positions before one final MP3 encode; PCM files are removed after
+a successful mix. This step requires additional temporary disk space.
+
+Subtitle translation and Speech Plan generation checkpoint each validated batch in
+`work/.../.gemini-batches/`. Keep `work/` and rerun an interrupted job to reuse
+completed batches. Leave `--force-tts` off to reuse TTS. Network errors, HTTP 408/429,
+and selected 5xx responses receive at most three attempts. An unsupported
+`Retry-After` value or a wait longer than 30 seconds stops the job so it can be
+resumed later. Authentication failures are not retried.
+
 ### Natural Voice
 
 Natural Voice is opt-in. Gemini creates structured Speech Plans and Dubora renders only the SSML
@@ -211,9 +223,12 @@ Workflow: `.github/workflows/build-windows.yml` (runs on `windows-latest`).
 Pushes to `main` that match the workflow's path filters build both `x64` and `x86`
 targets. The release job reads the latest numbered section of `CHANGELOG.md` and
 creates `v<version>` with NSIS installers and portable `.exe` files when that tag
-does not already have a release. Publication requires the reviewed third-party
-source archive and checksum described in [Third-Party Notices](THIRD_PARTY_NOTICES.md).
-Manual workflow runs upload artifacts but do not publish a release.
+does not already have a release. Build assets are staged in a draft first and
+published only after the reviewed third-party source archive and checksum pass
+verification as described in [Third-Party Notices](THIRD_PARTY_NOTICES.md).
+Existing drafts are updated on a rerun. Manual workflow runs upload artifacts
+but do not create a release. Temporary artifacts are kept for three days;
+release attachments remain available.
 
 ```bash
 # After the repo is on GitHub:

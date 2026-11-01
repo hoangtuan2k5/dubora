@@ -83,6 +83,18 @@ Cũng có thể cấu hình trong `<root>/.env` với các biến `AZURE_KEY`, `
 và trau chuốt phụ đề tiếng Anh sang tiếng Việt bằng Gemini 3.5 Flash-Lite.
 Nếu có nhiều Gemini key, ứng dụng luân phiên key theo từng yêu cầu logic.
 
+Pipeline Rust ghép audio theo nhóm tối đa 32 file, đồng thời giới hạn độ dài
+lệnh FFmpeg để xử lý video dài trên Windows. Các nhóm dùng PCM lossless tạm
+thời, giữ nguyên vị trí trên timeline rồi encode MP3 một lần; file PCM được
+xóa sau khi ghép thành công. Bước này cần thêm dung lượng đĩa tạm thời.
+
+Dịch phụ đề và tạo Speech Plan lưu từng batch đã kiểm tra trong
+`work/.../.gemini-batches/`. Nếu tác vụ bị gián đoạn, giữ nguyên `work/` và
+chạy lại để dùng tiếp các batch đã xong. Không cần bật `--force-tts` khi muốn
+dùng lại TTS. Lỗi mạng, HTTP 408/429 và một số lỗi 5xx được thử tối đa 3 lần;
+nếu `Retry-After` yêu cầu chờ quá 30 giây hoặc có định dạng không hỗ trợ,
+tác vụ dừng để có thể chạy lại sau. Lỗi xác thực không được thử lại.
+
 ### Natural Voice
 
 Natural Voice là tính năng tùy chọn. Gemini tạo Speech Plan có cấu trúc, sau đó
@@ -223,9 +235,11 @@ Workflow `.github/workflows/build-windows.yml` chạy trên `windows-latest`.
 Push vào `main` khớp bộ lọc đường dẫn sẽ build cả `x64` và `x86`. Job release
 đọc mục phiên bản có số mới nhất trong `CHANGELOG.md`, tạo release
 `v<version>` với NSIS installer và file `.exe` portable nếu release đó chưa
-tồn tại. Việc phát hành cần source archive bên thứ ba đã được duyệt và
-checksum như mô tả trong [Third-Party Notices](THIRD_PARTY_NOTICES.md).
-Chạy workflow thủ công chỉ upload artifact, không tạo release.
+tồn tại. File build được đưa vào draft trước; chỉ publish khi source archive
+bên thứ ba đã được duyệt và checksum được xác minh như mô tả trong
+[Third-Party Notices](THIRD_PARTY_NOTICES.md). Draft có sẵn được cập nhật khi
+chạy lại. Chạy workflow thủ công chỉ upload artifact, không tạo release.
+Artifact tạm được giữ ba ngày; file đính kèm release được giữ lâu dài.
 
 ```bash
 # Sau khi repo đã có trên GitHub:
