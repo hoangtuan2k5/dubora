@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::azure_timing::{TimingEvent, TimingEventKind};
+use crate::duration_solver::MAX_TIME_STRETCH_TEMPO;
 use crate::speech_plan::SpeechPlan;
 use crate::srt::{SrtSegment, time_to_seconds};
 #[cfg(test)]
@@ -75,6 +76,7 @@ pub struct ScheduledAudio {
 #[serde(rename_all = "camelCase")]
 pub enum EntryAlignmentStatus {
     Aligned,
+    TimestampFallback,
     #[default]
     NotApplicable,
     ReviewRequired,
@@ -266,6 +268,15 @@ impl RenderManifest {
                     "Audio render manifest entry {} has a stale sync island",
                     entry.id
                 );
+            }
+            if entry.alignment.status == EntryAlignmentStatus::TimestampFallback {
+                if !entry.alignment.anchors.is_empty()
+                    || entry.tempo > MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+                    || entry.rendered_audio_ms > entry.end_ms.saturating_sub(entry.start_ms)
+                {
+                    bail!("Invalid timestamp fallback for {}", entry.id);
+                }
+                continue;
             }
             let expected_anchors = entry
                 .source_segments

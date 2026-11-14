@@ -2561,11 +2561,17 @@ fn apply_final_semantic_evidence(
     let mut review_required = false;
     for entry in entries {
         let Some(evidence) = evidence.get(&entry.id) else {
-            entry.alignment = EntryAlignment::default();
+            entry.alignment = EntryAlignment {
+                status: EntryAlignmentStatus::TimestampFallback,
+                anchors: Vec::new(),
+            };
             continue;
         };
         if evidence.expected.is_empty() {
-            entry.alignment = EntryAlignment::default();
+            entry.alignment = EntryAlignment {
+                status: EntryAlignmentStatus::TimestampFallback,
+                anchors: Vec::new(),
+            };
             continue;
         }
         let (alignment, anchors) = rendered_anchor_evidence(
@@ -2574,6 +2580,16 @@ fn apply_final_semantic_evidence(
             entry.start_ms,
             entry.tempo,
         );
+        if anchors.len() < evidence.expected.len()
+            && entry.tempo <= MAX_TIME_STRETCH_TEMPO + f64::EPSILON
+            && entry.rendered_audio_ms <= entry.end_ms.saturating_sub(entry.start_ms)
+        {
+            entry.alignment = EntryAlignment {
+                status: EntryAlignmentStatus::TimestampFallback,
+                anchors: Vec::new(),
+            };
+            continue;
+        }
         diagnostics
             .anchor_drifts_ms
             .extend(anchors.iter().map(|anchor| anchor.drift_ms));
@@ -5237,7 +5253,7 @@ mod tests {
     }
 
     #[test]
-    fn final_anchor_gate_leaves_unanchored_entries_not_applicable() {
+    fn final_anchor_gate_uses_timestamp_fallback_without_evidence() {
         let mut entries = vec![ScheduledAudio {
             id: "utterance-1".to_owned(),
             path: PathBuf::from("utterance-1.mp3"),
@@ -5261,9 +5277,37 @@ mod tests {
         ));
         assert_eq!(
             entries[0].alignment.status,
-            EntryAlignmentStatus::NotApplicable
+            EntryAlignmentStatus::TimestampFallback
         );
         assert!(entries[0].alignment.anchors.is_empty());
+
+        let evidence = HashMap::from([(
+            "utterance-1".to_owned(),
+            SemanticEvidence {
+                events: Vec::new(),
+                expected: vec![("utterance-1-a1".to_owned(), 500, 300)],
+            },
+        )]);
+        assert!(!apply_final_semantic_evidence(
+            &mut entries,
+            &evidence,
+            &mut diagnostics
+        ));
+        assert_eq!(
+            entries[0].alignment.status,
+            EntryAlignmentStatus::TimestampFallback
+        );
+        assert!(entries[0].alignment.anchors.is_empty());
+        entries[0].tempo = MAX_TIME_STRETCH_TEMPO + 0.1;
+        assert!(apply_final_semantic_evidence(
+            &mut entries,
+            &evidence,
+            &mut diagnostics
+        ));
+        assert_eq!(
+            entries[0].alignment.status,
+            EntryAlignmentStatus::ReviewRequired
+        );
     }
 
     #[test]
