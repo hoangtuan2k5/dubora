@@ -11,6 +11,17 @@ heading when you want a new GitHub Release; `## [Unreleased]` is ignored.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-25
+
+### Changed
+
+- Increase concurrent Azure TTS requests from four to eight when Natural Voice is disabled.
+- Stagger retries after synthesis failures.
+
+### Fixed
+
+- Fall back to subtitle timing when Natural Voice semantic anchors are missing.
+
 ## [0.2.2] - 2026-11-01
 
 Keep long-video audio builds within Windows command limits and resume completed
@@ -107,7 +118,8 @@ First Dubora cut: shared Rust pipeline, Linux CLI, and Windows desktop app.
 - WebView2 black window during dub
 - YouTube imports kept as MP4 with repaired subtitles
 
-[Unreleased]: https://github.com/hoangtuan2k5/dubora/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/hoangtuan2k5/dubora/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.3
 [0.2.2]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.2
 [0.2.1]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.1
 [0.2.0]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.0

@@ -50,7 +50,7 @@ use crate::utterance::{
     validate_semantic_alignment,
 };
 
-const CONCURRENCY: usize = 4;
+const CONCURRENCY: usize = 8;
 const RETRIES: usize = 3;
 const SPEECH_PLAN_CACHE_PROVIDER: &str = "azure-speech-plan-v2";
 const MAX_SPEECH_PLAN_REVISIONS: u8 = 1;
@@ -3055,6 +3055,12 @@ async fn synthesize_continuous_audio(
     }
 }
 
+// Stagger workers after a failed request instead of retrying all eight together.
+fn segment_retry_delay(attempt: usize, segment_index: usize) -> Duration {
+    let backoff_ms = 1_000_u64 * (1_u64 << attempt.saturating_sub(1).min(5));
+    Duration::from_millis(backoff_ms + (segment_index as u64 % 8) * 125)
+}
+
 async fn generate_segment(
     client: &Client,
     config: &AzureConfig,
@@ -3104,7 +3110,7 @@ async fn generate_segment(
         }
         let _ = fs::remove_file(&tmp);
         if attempt < RETRIES {
-            sleep(Duration::from_secs(1)).await;
+            sleep(segment_retry_delay(attempt, segment.index)).await;
         }
     }
 
@@ -5250,6 +5256,14 @@ mod tests {
         ));
         assert_eq!(entries[0].alignment.status, EntryAlignmentStatus::Aligned);
         assert!(entries[0].alignment.anchors[0].drift_ms < 0);
+    }
+
+    #[test]
+    fn segment_retries_back_off_and_stagger_workers() {
+        assert_eq!(segment_retry_delay(1, 8), Duration::from_millis(1_000));
+        assert_eq!(segment_retry_delay(2, 8), Duration::from_millis(2_000));
+        assert_eq!(segment_retry_delay(1, 9), Duration::from_millis(1_125));
+        assert_eq!(segment_retry_delay(2, 15), Duration::from_millis(2_875));
     }
 
     #[test]
