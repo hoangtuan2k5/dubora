@@ -1,7 +1,7 @@
 # Pin the official yt-dlp release for the binary, checksums, and notices.
 $ErrorActionPreference = "Stop"
 
-$Version = "2026.08.19"
+$Version = "2026.11.23"
 $Release = "https://github.com/yt-dlp/yt-dlp/releases/download/$Version"
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) "dubora-ytdlp-$([guid]::NewGuid())"
 $Binary = Join-Path $TempDir "yt-dlp.exe"

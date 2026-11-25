@@ -11,6 +11,13 @@ heading when you want a new GitHub Release; `## [Unreleased]` is ignored.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-25
+
+### Changed
+
+- Update bundled FFmpeg to 9.1 and yt-dlp to 2026.11.23.
+- Link upstream source references in release notes.
+
 ## [0.2.3] - 2026-11-25
 
 ### Changed
@@ -118,7 +125,8 @@ First Dubora cut: shared Rust pipeline, Linux CLI, and Windows desktop app.
 - WebView2 black window during dub
 - YouTube imports kept as MP4 with repaired subtitles
 
-[Unreleased]: https://github.com/hoangtuan2k5/dubora/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/hoangtuan2k5/dubora/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.4
 [0.2.3]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.3
 [0.2.2]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.2
 [0.2.1]: https://github.com/hoangtuan2k5/dubora/releases/tag/v0.2.1

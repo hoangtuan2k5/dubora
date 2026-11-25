@@ -5,10 +5,10 @@
 
 $ErrorActionPreference = "Stop"
 
-$Version = "8.1.2"
+$Version = "9.1"
 $ArchiveName = "ffmpeg-$Version-essentials_build.zip"
 $Url = "https://github.com/GyanD/codexffmpeg/releases/download/$Version/$ArchiveName"
-$ExpectedSha256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
+$ExpectedSha256 = "b9bbbb3acece000cbeec994f856649354e52c773807841e78908374b24d658fd"
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) "dubora-ffmpeg-$([guid]::NewGuid())"
 $Archive = Join-Path $TempDir $ArchiveName
 $Extracted = Join-Path $TempDir "extracted"

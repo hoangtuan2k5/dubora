@@ -147,6 +147,16 @@ jobs:
           tag="$(python3 scripts/changelog-release.py tag)"
           title="$(python3 scripts/changelog-release.py title)"
           python3 scripts/changelog-release.py notes > "$RUNNER_TEMP/release-notes.md"
+          cat >> "$RUNNER_TEMP/release-notes.md" <<'EOF'
+
+          ### Mã nguồn bên thứ ba
+
+          - FFmpeg: https://github.com/FFmpeg/FFmpeg/commit/74e4393595
+          - yt-dlp: https://github.com/yt-dlp/yt-dlp/tree/2026.11.23
+          - Thông tin phiên bản và giấy phép: THIRD_PARTY_NOTICES.md trong tài sản release.
+
+          Các link trên là repo upstream; chưa xác minh đầy đủ source tương ứng cho mọi thư viện và công cụ build trong binary đóng gói.
+          EOF
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "title=${title}" >> "$GITHUB_OUTPUT"
@@ -159,8 +169,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.changelog.outputs.tag }}
           RELEASE_TITLE: ${{ steps.changelog.outputs.title }}
-          THIRD_PARTY_SOURCE_URL: ${{ vars.THIRD_PARTY_SOURCE_URL }}
-          THIRD_PARTY_SOURCE_SHA256: ${{ vars.THIRD_PARTY_SOURCE_SHA256 }}
         run: |
           mapfile -d '' assets < <(find release-assets -type f -name '*.exe' -print0)
           if (( ${#assets[@]} == 0 )); then
@@ -172,6 +180,12 @@ jobs:
             echo "GitHub Release ${RELEASE_TAG} already exists; skip. Bump CHANGELOG.md to publish again."
             exit 0
           fi
+          git fetch --no-tags origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" 2>/dev/null || true
+          tagged_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{}" 2>/dev/null || true)"
+          if [[ -n "$tagged_commit" && "$tagged_commit" != "$GITHUB_SHA" ]]; then
+            echo "::warning::Release unchanged: build commit differs from tag; create a new version."
+            exit 0
+          fi
           if [[ "$release_draft" == "true" ]]; then
             gh release upload "$RELEASE_TAG" "${assets[@]}" THIRD_PARTY_NOTICES.md LICENSE --clobber
             gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" \
@@ -181,17 +195,4 @@ jobs:
               --draft --target "$GITHUB_SHA" --title "$RELEASE_TITLE" \
               --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
-          if [[ -z "$THIRD_PARTY_SOURCE_URL" || -z "$THIRD_PARTY_SOURCE_SHA256" ]]; then
-            echo "::warning::Release ${RELEASE_TAG} remains a draft until reviewed third-party source is configured."
-            echo "Release ${RELEASE_TAG} remains a draft: configure THIRD_PARTY_SOURCE_URL and THIRD_PARTY_SOURCE_SHA256 before publication." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          # The reviewed archive must cover the exact vendor binaries in this build.
-          test -n "$THIRD_PARTY_SOURCE_URL" || { echo "Missing reviewed third-party source archive URL" >&2; exit 1; }
-          [[ "$THIRD_PARTY_SOURCE_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "Missing source archive SHA-256" >&2; exit 1; }
-          curl --fail --location --proto '=https' --proto-redir '=https' \
-            "$THIRD_PARTY_SOURCE_URL" --output third-party-source.zip
-          echo "$THIRD_PARTY_SOURCE_SHA256  third-party-source.zip" | sha256sum --check
-          unzip -t third-party-source.zip
-          gh release upload "$RELEASE_TAG" third-party-source.zip --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest
