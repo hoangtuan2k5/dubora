@@ -29,13 +29,17 @@
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "publisher": "Hoàng Tuấn",
     "copyright": "Copyright © 2026 Hoàng Chiều Nguyễn Tuấn <tuan@hoangtuan.dev> — https://hoangtuan.dev",
     "homepage": "https://github.com/hoangtuan2k5/dubora",
@@ -64,7 +68,18 @@
         "sidebarImage": "installer/nsis-sidebar.bmp",
         "headerImage": "installer/nsis-header.bmp"
       }
-    }
+    },
+    "createUpdaterArtifacts": true
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFBM0MyOTQ4MjFGM0MzQwpSV1E4UEIrQ2xNS2pBUWUwMEZKcmdEaXZlSjBTUVUxcTF0VDZtZHRlUHVheGd4Rndvc081RHd5Two=",
+      "endpoints": [
+        "https://github.com/hoangtuan2k5/dubora/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }

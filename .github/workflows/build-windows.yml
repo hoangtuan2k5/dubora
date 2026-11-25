@@ -72,6 +72,9 @@ jobs:
         run: .\scripts\prepare-ytdlp-windows.ps1
 
       - name: Build Tauri app (NSIS)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         working-directory: apps/desktop
         run: npm run tauri build -- --target ${{ matrix.target }}
 
@@ -109,6 +112,11 @@ jobs:
             $kind = if ($file.FullName -match "[\\/]bundle[\\/]nsis[\\/]") { "installer" } else { "portable" }
             $destination = Join-Path $stage "Dubora-$env:BUILD_ARCH-$kind-$($file.Name)"
             Copy-Item $file.FullName $destination -Force
+            if ($kind -eq "installer") {
+              $signature = "$($file.FullName).sig"
+              if (-not (Test-Path $signature)) { throw "Missing updater signature for $($file.FullName)" }
+              Copy-Item $signature "$destination.sig" -Force
+            }
             Write-Host "Staged $destination"
           }
 
@@ -117,7 +125,9 @@ jobs:
         with:
           name: dubora-windows-${{ matrix.arch }}
           if-no-files-found: error
-          path: release-assets/${{ matrix.arch }}/*.exe
+          path: |
+            release-assets/${{ matrix.arch }}/*.exe
+            release-assets/${{ matrix.arch }}/*.sig
           retention-days: 3
 
   release:
@@ -195,4 +205,18 @@ jobs:
               --draft --target "$GITHUB_SHA" --title "$RELEASE_TITLE" \
               --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
+          python3 - <<'PYMANIFEST'
+          import glob, json, os
+          from pathlib import Path
+          platforms = {}
+          for arch, target in [('x64', 'windows-x86_64'), ('x86', 'windows-i686')]:
+              paths = glob.glob(f'release-assets/Dubora-{arch}-installer-*.exe')
+              if len(paths) != 1:
+                  raise SystemExit(f'Expected one {arch} installer, found {len(paths)}')
+              path = Path(paths[0])
+              signature = Path(str(path) + '.sig').read_text().strip()
+              platforms[target] = {'url': f'https://github.com/hoangtuan2k5/dubora/releases/download/{os.environ["RELEASE_TAG"]}/{path.name}', 'signature': signature}
+          Path('latest.json').write_text(json.dumps({'version': os.environ['RELEASE_TAG'].removeprefix('v'), 'platforms': platforms}, indent=2))
+          PYMANIFEST
+          gh release upload "$RELEASE_TAG" latest.json --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest

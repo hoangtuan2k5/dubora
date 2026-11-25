@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   IconAlertTriangle,
@@ -2078,6 +2080,8 @@ function App() {
                 <p className="field-hint">Hiển thị 5 key; thêm nhiều hơn thì cuộn xuống. Dùng <code>gemini-3.5-flash-lite</code>; key được xoay theo từng batch.</p>
               </article>
 
+              <UpdatePanel processing={busy} />
+
               <article className="panel status-panel">
                 <div className="panel-title"><span className="number">04</span><div><h2>FFmpeg engine</h2><p>Yêu cầu filter rubberband.</p></div></div>
                 <div className={`engine-status ${ffmpeg?.ready ? "ready" : "missing"}`}>
@@ -2446,3 +2450,30 @@ function App() {
 }
 
 export default App;
+
+function UpdatePanel({ processing }: { processing: boolean }) {
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [update, setUpdate] = useState<Awaited<ReturnType<typeof check>>>(null);
+  async function checkUpdate() {
+    setBusy(true); setStatus("Đang kiểm tra phiên bản…");
+    try {
+      const result = await check(); setUpdate(result);
+      setStatus(result ? `Đã có phiên bản ${result.version}.` : "Bạn đang dùng phiên bản mới nhất.");
+    } catch (error) { setStatus(`Không kiểm tra được bản cập nhật: ${String(error)}`); }
+    finally { setBusy(false); }
+  }
+  async function installUpdate() {
+    if (!update) return;
+    setBusy(true); setStatus("Đang tải và cài bản cập nhật…");
+    try { await update.downloadAndInstall(); await relaunch(); }
+    catch (error) { setStatus(`Không cài được bản cập nhật: ${String(error)}`); setBusy(false); }
+  }
+  return <article className="panel status-panel">
+    <div className="panel-title"><span className="number">05</span><div><h2>Cập nhật ứng dụng</h2><p>Kiểm tra và cài phiên bản mới.</p></div></div>
+    <button className="secondary-button" onClick={() => void checkUpdate()} disabled={busy}>Kiểm tra cập nhật</button>
+    {update && <button className="primary-button" onClick={() => void installUpdate()} disabled={busy || processing}>Tải và cài cập nhật</button>}
+    {processing && <p className="field-hint">Đợi xử lý video xong trước khi cài cập nhật.</p>}
+    {status && <p className="field-hint" role="status">{status}</p>}
+  </article>;
+}

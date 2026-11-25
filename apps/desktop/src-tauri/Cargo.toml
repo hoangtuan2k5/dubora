@@ -28,3 +28,5 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 dubora-core = { path = "../../../crates/dubora-core" }
+tauri-plugin-updater = "2.14.1"
+tauri-plugin-process = "2.4.0"
