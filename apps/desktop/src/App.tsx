@@ -65,6 +65,11 @@ const DEFAULT_CONFIG: AppConfig = {
   azureVoice: DEFAULT_AZURE_VOICE,
   azureVoiceStyle: "",
   geminiKeys: "",
+  aiProvider: "gemini",
+  geminiModel: "gemini-3.5-flash-lite",
+  aiBaseUrl: "",
+  aiModel: "",
+  aiApiKey: "",
   playlists: [],
 };
 
@@ -590,6 +595,9 @@ function App() {
   );
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [savedConfig, setSavedConfig] = useState(DEFAULT_CONFIG);
+  const aiReady = config.aiProvider === "gemini"
+    ? !!config.geminiKeys.trim() && !!config.geminiModel.trim()
+    : !!config.aiApiKey.trim() && !!config.aiModel.trim() && !!config.aiBaseUrl.trim();
   const [videos, setVideos] = useState<VideoInfo[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -1318,10 +1326,9 @@ function App() {
                   </li>
                   <li>
                     <div>
-                      <strong>Thêm Gemini key nếu cần dịch hoặc Natural Voice</strong>
+                      <strong>Cấu hình AI nếu cần dịch hoặc Natural Voice</strong>
                       <span>
-                        Tạo key ở Google AI Studio, dán vào mục Gemini API keys trong Thiết lập.
-                        Key này cần cho <strong>Dịch bằng Gemini</strong> và <strong>Natural Voice</strong>.
+                        Chọn Gemini hoặc OpenAI-compatible trong Thiết lập, rồi nhập model và API key.
                       </span>
                     </div>
                   </li>
@@ -1437,7 +1444,7 @@ function App() {
                     Chọn <strong>Create API key</strong>, sau đó copy key vừa tạo.
                   </li>
                   <li>
-                    Trong Dubora, vào <strong>Thiết lập</strong> → <strong>Google AI Studio</strong>
+                    Trong Dubora, vào <strong>Thiết lập</strong> → <strong>AI dịch và Natural Voice</strong>
                     → dán key vào <strong>Gemini API keys</strong> → <strong>Lưu thiết lập</strong>.
                   </li>
                   <li>
@@ -1446,9 +1453,8 @@ function App() {
                   </li>
                 </ol>
                 <div className="guide-tip">
-                  <strong>Khi dùng:</strong> quay lại Thư viện, bật <strong>Dịch bằng Gemini</strong>
-                  {" "}hoặc <strong>Natural Voice</strong> trước khi bấm Dub. App dùng
-                  {" "}<code>gemini-3.5-flash-lite</code> để dịch, chỉnh câu SRT và lập Speech Plan.
+                  <strong>Khi dùng:</strong> quay lại Thư viện, bật <strong>Dịch phụ đề</strong>
+                  {" "}hoặc <strong>Natural Voice</strong> trước khi bấm Dub. Model Gemini có thể đổi trong Thiết lập.
                 </div>
               </article>
 
@@ -1461,12 +1467,12 @@ function App() {
                   </div>
                 </div>
                 <ol>
-                  <li>Thêm ít nhất một Gemini API key trong <strong>Thiết lập</strong>.</li>
+                  <li>Cấu hình provider AI và API key trong <strong>Thiết lập</strong>.</li>
                   <li>Vào <strong>Thư viện</strong> và bật <strong>Natural Voice</strong>.</li>
                   <li>Chọn nhịp: <strong>Đồng bộ sát</strong>, <strong>Cân bằng</strong> (mặc định), hoặc <strong>Tự nhiên tối đa</strong>.</li>
                 </ol>
                 <div className="guide-tip">
-                  <strong>Cách Dubora xử lý:</strong> Gemini tạo Speech Plan (cách nói, điểm nhấn,
+                  <strong>Cách Dubora xử lý:</strong> AI tạo Speech Plan (cách nói, điểm nhấn,
                   ngắt câu), Azure chỉ nhận SSML mà voice đang chọn hỗ trợ, rồi Dubora đo thời lượng
                   audio và anchor nội bộ khi voice hỗ trợ timing events. Chế độ <strong>Cân bằng</strong>
                   cho phép dịch chuyển một block giải thích tối đa 250 ms trong cùng sync island;
@@ -1481,7 +1487,7 @@ function App() {
                 <div className="guide-tip">
                   <strong>Nếu cần kiểm tra:</strong> Dubora ghi timeline nguồn, manifest, báo cáo timing
                   cần review và bộ đếm request/cache không chứa key vào thư mục <code>work/</code>.
-                  Gemini chỉ đề xuất câu nói; Rust giữ quyền quyết định timestamp, anchor và SSML.
+                  AI chỉ đề xuất câu nói; Rust giữ quyền quyết định timestamp, anchor và SSML.
                   Manifest <strong>reviewRequired</strong> sẽ dừng trước FFmpeg để không ghi đè output cũ;
                   progress và <code>sync_report.json</code> nêu entry cùng khoảng <code>mm:ss.mmm</code>
                   cần nghe/xem lại.
@@ -1609,11 +1615,11 @@ function App() {
                     thị READY khi engine ổn.
                   </li>
                   <li>
-                    <strong>Phụ đề mặc định là tiếng Việt.</strong> Với SRT tiếng Anh, thêm Gemini
-                    API key trong Thiết lập rồi bật <strong>Dịch bằng Gemini</strong> khi chạy.
+                    <strong>Phụ đề mặc định là tiếng Việt.</strong> Với SRT tiếng Anh, cấu hình AI
+                    trong Thiết lập rồi bật <strong>Dịch phụ đề</strong> khi chạy.
                   </li>
                   <li>
-                    <strong>Natural Voice là opt-in.</strong> Cần Gemini API key; mặc định vẫn là
+                    <strong>Natural Voice là opt-in.</strong> Cần cấu hình AI; mặc định vẫn là
                     pipeline Azure nhanh và ổn định như trước.
                   </li>
                   <li>
@@ -2050,7 +2056,15 @@ function App() {
               </article>
 
               <article className="panel config-panel">
-                <div className="panel-title"><span className="number">03</span><div><h2>Google AI Studio</h2><p>Cần cho dịch phụ đề và Natural Voice.</p></div></div>
+                <div className="panel-title"><span className="number">03</span><div><h2>AI dịch và Natural Voice</h2><p>Chọn provider và model cho các tính năng tùy chọn.</p></div></div>
+                <label htmlFor="ai-provider">Provider</label>
+                <div className="select-wrap"><select id="ai-provider" value={config.aiProvider} onChange={(event) => setConfig({ ...config, aiProvider: event.target.value as AppConfig["aiProvider"] })}>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="openai-compatible">OpenAI-compatible (Chat Completions)</option>
+                </select></div>
+                {config.aiProvider === "gemini" ? <>
+                <label htmlFor="gemini-model">Gemini model</label>
+                <div className="input-wrap"><input id="gemini-model" value={config.geminiModel} onChange={(event) => setConfig({ ...config, geminiModel: event.target.value })} placeholder="gemini-3.5-flash-lite" /></div>
                 <label htmlFor="gemini-keys">Gemini API keys</label>
                 <div className="gemini-key-editor">
                   <div className="gemini-key-editor-head">
@@ -2077,7 +2091,16 @@ function App() {
                     spellCheck={false}
                   />
                 </div>
-                <p className="field-hint">Hiển thị 5 key; thêm nhiều hơn thì cuộn xuống. Dùng <code>gemini-3.5-flash-lite</code>; key được xoay theo từng batch.</p>
+                <p className="field-hint">Hiển thị 5 key; thêm nhiều hơn thì cuộn xuống. Key được xoay theo từng batch.</p>
+                </> : <>
+                  <label htmlFor="ai-base-url">Base URL</label>
+                  <div className="input-wrap"><input id="ai-base-url" type="url" value={config.aiBaseUrl} onChange={(event) => setConfig({ ...config, aiBaseUrl: event.target.value })} placeholder="http://localhost:20128/v1" autoComplete="off" /></div>
+                  <label htmlFor="ai-model">Model</label>
+                  <div className="input-wrap"><input id="ai-model" value={config.aiModel} onChange={(event) => setConfig({ ...config, aiModel: event.target.value })} placeholder="Tên model từ 9Router" autoComplete="off" /></div>
+                  <label htmlFor="ai-api-key">API key</label>
+                  <div className="input-wrap"><input id="ai-api-key" type="password" value={config.aiApiKey} onChange={(event) => setConfig({ ...config, aiApiKey: event.target.value })} placeholder="API key của router" autoComplete="off" /></div>
+                  <p className="field-hint">Nhập URL gốc kết thúc bằng /v1; model cần hỗ trợ phản hồi JSON. Localhost là máy đang chạy Dubora.</p>
+                </>}
               </article>
 
               <UpdatePanel processing={busy} />
@@ -2203,22 +2226,22 @@ function App() {
                   />
                   <OptionChip
                     id="translate"
-                    label="Dịch bằng Gemini"
+                    label="Dịch phụ đề"
                     title="Tự dịch phụ đề sang tiếng Việt"
-                    body="Gemini dịch và chỉnh câu sau bước clean subtitle, trước khi tạo giọng."
-                    hint="Cần nhập ít nhất một Gemini API key trong Thiết lập."
+                    body="AI dịch và chỉnh câu sau bước clean subtitle, trước khi tạo giọng."
+                    hint="Cần cấu hình provider AI trong Thiết lập."
                     checked={translate}
-                    disabled={!config.geminiKeys.trim()}
+                    disabled={!aiReady && !translate}
                     onChange={setTranslate}
                   />
                   <OptionChip
                     id="natural-voice"
                     label="Natural Voice"
                     title="Lập cách nói tự nhiên?"
-                    body="Gemini lập Speech Plan, Azure nhận SSML theo khả năng giọng và Dubora chỉ kéo giãn âm thanh trong giới hạn an toàn."
-                    hint="Cần ít nhất một Gemini API key. Mặc định Cân bằng: block giải thích chỉ được dịch chuyển tối đa 250 ms trong cùng sync island."
+                    body="AI lập Speech Plan, Azure nhận SSML theo khả năng giọng và Dubora chỉ kéo giãn âm thanh trong giới hạn an toàn."
+                    hint="Cần cấu hình provider AI. Mặc định Cân bằng: block giải thích chỉ được dịch chuyển tối đa 250 ms trong cùng sync island."
                     checked={naturalVoice}
-                    disabled={!config.geminiKeys.trim()}
+                    disabled={!aiReady && !naturalVoice}
                     onChange={setNaturalVoice}
                   />
                   {naturalVoice && (

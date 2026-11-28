@@ -16,7 +16,7 @@ use tokio::time::sleep;
 
 use crate::azure_timing::{TimingEvent, TimingEventKind, synthesize_ssml_with_timing};
 use crate::azure_voices::{AzureVoice, CapabilityState, VoiceModelFamily};
-use crate::config::AzureConfig;
+use crate::config::{AzureConfig, GeminiConfig};
 #[cfg(test)]
 use crate::duration_solver::SEGMENT_HEADROOM_MS;
 use crate::duration_solver::{
@@ -687,7 +687,7 @@ pub async fn generate_all_tts_for_speech_plans(
     mode: NaturalMode,
     timeline: &SourceTimeline,
     layout: &SyncLayout,
-    gemini_keys: &[String],
+    gemini_keys: &GeminiConfig,
     voice: &AzureVoice,
     output_dir: &Path,
     manifest_path: &Path,
@@ -1046,7 +1046,7 @@ pub async fn generate_all_tts_for_unanchored_utterances(
     mode: NaturalMode,
     timeline: &SourceTimeline,
     layout: &SyncLayout,
-    gemini_keys: &[String],
+    gemini_keys: &GeminiConfig,
     voice: &AzureVoice,
     output_dir: &Path,
     manifest_path: &Path,
@@ -1563,7 +1563,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
     mode: NaturalMode,
     timeline: &SourceTimeline,
     layout: &SyncLayout,
-    gemini_keys: &[String],
+    gemini_keys: &GeminiConfig,
     voice: &AzureVoice,
     output_dir: &Path,
     manifest_path: &Path,
@@ -2195,7 +2195,7 @@ pub async fn generate_all_tts_for_aligned_utterances(
             ),
         ));
         for request_batch in requests.chunks(CONCISE_REVISION_BATCH_SIZE) {
-            let cache_key = revision_cache_key(request_batch, 1)?;
+            let cache_key = revision_cache_key(request_batch, 1, gemini_keys)?;
             let revisions = if let Some(cached) = revision_cache.entries.get(&cache_key) {
                 record_gemini_cache_hit();
                 cached.clone()
@@ -2728,6 +2728,7 @@ struct RevisionCache {
 fn revision_cache_key(
     requests: &[SpeechPlanRevisionRequest],
     revision_number: u8,
+    provider: &GeminiConfig,
 ) -> Result<String> {
     let material = requests
         .iter()
@@ -2743,7 +2744,7 @@ fn revision_cache_key(
     Ok(tts_cache_key(
         "gemini-whole-revision-v3",
         &revision_number.to_string(),
-        "",
+        &provider.cache_identity(),
         &serde_json::to_string(&material)?,
     ))
 }

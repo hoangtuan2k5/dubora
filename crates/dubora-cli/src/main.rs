@@ -16,6 +16,12 @@ enum ProviderArg {
     Edge,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AiProviderArg {
+    Gemini,
+    OpenaiCompatible,
+}
+
 impl From<ProviderArg> for Provider {
     fn from(value: ProviderArg) -> Self {
         match value {
@@ -85,11 +91,11 @@ struct Args {
     #[arg(long)]
     force_tts: bool,
 
-    /// Translate and polish English SRT to Vietnamese with Gemini.
+    /// Translate and polish English SRT to Vietnamese with the selected AI provider.
     #[arg(long)]
     translate: bool,
 
-    /// Use Gemini Speech Plans and capability-aware Azure SSML for more natural delivery.
+    /// Use AI Speech Plans and capability-aware Azure SSML for more natural delivery.
     #[arg(long)]
     natural_voice: bool,
 
@@ -120,6 +126,18 @@ struct Args {
     /// Gemini API key; repeat this option to round-robin multiple keys.
     #[arg(long)]
     gemini_key: Vec<String>,
+
+    /// AI provider for translation and Natural Voice (default: gemini).
+    #[arg(long, value_enum)]
+    ai_provider: Option<AiProviderArg>,
+
+    /// Model name for the selected AI provider.
+    #[arg(long)]
+    ai_model: Option<String>,
+
+    /// OpenAI-compatible API base URL, including /v1.
+    #[arg(long)]
+    ai_base_url: Option<String>,
 
     /// Azure TTS voice ShortName. Default Florian HD; also recommended: vi-VN-NamMinhNeural, vi-VN-HoaiMyNeural.
     #[arg(long)]
@@ -155,6 +173,44 @@ async fn main() -> Result<()> {
     let mut gemini_keys = load_env_keys(&root);
     gemini_keys.extend(args.gemini_key);
 
+    let ai_config = if args.translate || args.natural_voice {
+        let provider = args
+            .ai_provider
+            .or_else(
+                || match read_setting(&root, "DUBORA_AI_PROVIDER").as_deref() {
+                    Some("openai-compatible") => Some(AiProviderArg::OpenaiCompatible),
+                    Some("gemini") | None => Some(AiProviderArg::Gemini),
+                    _ => None,
+                },
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!("DUBORA_AI_PROVIDER must be gemini or openai-compatible")
+            })?;
+        let model = args
+            .ai_model
+            .or_else(|| read_setting(&root, "DUBORA_AI_MODEL"));
+        Some(match provider {
+            AiProviderArg::Gemini => {
+                let config = GeminiConfig::new(gemini_keys)?;
+                if let Some(model) = model {
+                    config.with_model(model)?
+                } else {
+                    config
+                }
+            }
+            AiProviderArg::OpenaiCompatible => GeminiConfig::openai_compatible(
+                &args
+                    .ai_base_url
+                    .or_else(|| read_setting(&root, "OPENAI_BASE_URL"))
+                    .unwrap_or_default(),
+                &model.unwrap_or_default(),
+                &read_setting(&root, "OPENAI_API_KEY").unwrap_or_default(),
+            )?,
+        })
+    } else {
+        None
+    };
+
     let mut azure = load_azure_config(&root)?
         .ok_or_else(|| anyhow::anyhow!("Missing AZURE_KEY. Add it to <root>/.env or export it"))?;
     if let Some(voice) = args.voice.as_deref() {
@@ -167,9 +223,7 @@ async fn main() -> Result<()> {
         root,
         provider,
         azure: Some(azure),
-        gemini: (args.translate || args.natural_voice)
-            .then(|| GeminiConfig::new(gemini_keys))
-            .transpose()?,
+        gemini: ai_config,
         ffmpeg: FfmpegPaths::resolve(None),
     };
     let options = DubOptions {
@@ -186,6 +240,18 @@ async fn main() -> Result<()> {
 
     create_dubs(&config, args.target.as_deref(), options, &StdoutProgress).await?;
     Ok(())
+}
+
+fn read_setting(root: &std::path::Path, name: &str) -> Option<String> {
+    std::env::var(name).ok().or_else(|| {
+        std::fs::read_to_string(root.join(".env"))
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == name).then(|| value.trim().trim_matches(['\'', '"']).to_owned())
+            })
+    })
 }
 
 fn load_azure_config(root: &std::path::Path) -> Result<Option<AzureConfig>> {

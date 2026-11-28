@@ -11,7 +11,7 @@ Create Vietnamese dubbed videos from video files and matching SRT subtitles.
 1. Open the link above and find **Assets**.
 2. For 64-bit Windows, download `Dubora-x64-installer-…-setup.exe` and run the installer.
 3. Open Dubora, choose a project folder, and enter your Azure Speech key in **Thiết lập**
-   (Settings). Add a Gemini key for subtitle translation or Natural Voice.
+   (Settings). Configure an AI provider for subtitle translation or Natural Voice.
 
 The installer includes FFmpeg and yt-dlp; Rust, Python, and Node.js are not required.
 `Dubora-…-portable-dubora.exe` is the standalone app binary, not a complete portable
@@ -83,6 +83,30 @@ export GEMINI_API_KEYS=key_1,key_2
 `--translate` to translate and polish English SRT files with Gemini 3.5 Flash-Lite. Multiple
 Gemini keys are used round-robin once per logical request.
 
+In desktop, **Settings → AI translation and Natural Voice** selects the provider
+and model. For 9Router, choose **OpenAI-compatible** and enter its base URL
+(for example `http://localhost:20128/v1`), model and API key. `localhost` means
+the machine running Dubora; use the router host's address if it runs elsewhere.
+The desktop API key is stored in its local configuration file; use HTTPS when
+connecting to a router over an untrusted network.
+
+Configure the CLI through environment variables or `<root>/.env`, for example:
+
+```bash
+DUBORA_AI_PROVIDER=openai-compatible
+DUBORA_AI_MODEL=provider/model
+OPENAI_BASE_URL=http://localhost:20128/v1
+OPENAI_API_KEY=your_router_key
+```
+
+When entering these in a shell instead of `.env`, prefix each line with `export`.
+
+`DUBORA_AI_PROVIDER=gemini` is the default; `DUBORA_AI_MODEL` also changes the
+Gemini model. `--ai-provider`, `--ai-model`, and `--ai-base-url` override these
+settings. OpenAI-compatible providers must support Chat Completions and JSON
+object mode; quality depends on the model. Use `--force` or the desktop reprocess
+option to rerun a video with existing output after changing models.
+
 The Rust pipeline mixes audio in groups of at most 32 files and also bounds FFmpeg
 command length for long videos on Windows. Temporary lossless PCM chunks retain
 their timeline positions before one final MP3 encode; PCM files are removed after
@@ -97,10 +121,10 @@ resumed later. Authentication failures are not retried.
 
 ### Natural Voice
 
-Natural Voice is opt-in. Gemini creates structured Speech Plans and Dubora renders only the SSML
+Natural Voice is opt-in. The AI provider creates structured Speech Plans and Dubora renders only the SSML
 controls supported by the selected Azure voice. Timing-capable voices use source-aligned whole
 utterances; timing-unsupported Dragon HD voices use one continuous REST utterance per source
-narration block and do not claim semantic-anchor alignment. It requires `GEMINI_API_KEYS` even when
+narration block and do not claim semantic-anchor alignment. It requires AI configuration even when
 the input SRT is already Vietnamese.
 
 ```bash
@@ -148,7 +172,7 @@ timing evidence. Dragon HD uses punctuation, supported semantic breaks, and pron
 no fake prosody or timing-event alignment is claimed. A continuous block that remains over the `1.13x` cap becomes
 `reviewRequired` as one whole block, never a mixture of `utterance_*` and `seg_*` files.
 
-The source-aligned path keeps one Rust-owned timeline: Gemini chooses wording and delivery only;
+The source-aligned path keeps one Rust-owned timeline: AI chooses wording and delivery only;
 Rust owns source timing, semantic-anchor windows, allocation, and SSML rendering. Each run writes
 `source_timeline.json`, `render_manifest.json`, `sync_report.json`, and secret-free
 `provider_metrics.json` under the ignored `work/` directory. A `reviewRequired` manifest is never
@@ -263,8 +287,8 @@ app config directory. UI copy is Vietnamese; icons use Tabler Icons.
 After loading the Azure voice list, selecting a voice exposes its supported expressive
 styles and Natural Voice capabilities (emphasis, prosody, semantic breaks, and style). The `vi-VN`
 filter also includes multilingual voices that support Vietnamese. In **Thư viện**, enable
-**Natural Voice** and choose Sync, Balanced, or Natural timing. Natural Voice needs at least one
-Gemini key stored in **Thiết lập → Google AI Studio**. Desktop also exposes the source timing
+**Natural Voice** and choose Sync, Balanced, or Natural timing. Natural Voice needs an AI provider
+configured in **Thiết lập → AI dịch và Natural Voice**. Desktop also exposes the source timing
 selector next to the Natural Voice mode; Caption timing remains the default.
 
 Dev UI only (no native shell) from `apps/desktop`:

@@ -4,7 +4,7 @@
 //! credentials or source text and are reset for each video, so a work-directory report is enough
 //! to audit a paid run without adding another persistence dependency.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -16,6 +16,7 @@ pub enum GeminiRequestKind {
 }
 
 static GEMINI_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static OPENAI_COMPATIBLE: AtomicBool = AtomicBool::new(false);
 static GEMINI_PLANNING_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static GEMINI_TRANSLATION_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static GEMINI_REVISION_REQUESTS: AtomicU64 = AtomicU64::new(0);
@@ -33,6 +34,7 @@ static AZURE_TRANSCRIPTION_AUDIO_MS: AtomicU64 = AtomicU64::new(0);
 static AZURE_TRANSCRIPTION_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
 
 pub fn reset() {
+    OPENAI_COMPATIBLE.store(false, Ordering::Relaxed);
     for counter in [
         &GEMINI_REQUESTS,
         &GEMINI_PLANNING_REQUESTS,
@@ -53,6 +55,10 @@ pub fn reset() {
     ] {
         counter.store(0, Ordering::Relaxed);
     }
+}
+
+pub fn use_openai_compatible() {
+    OPENAI_COMPATIBLE.store(true, Ordering::Relaxed);
 }
 
 pub fn record_gemini_request(kind: GeminiRequestKind, input_chars: usize) {
@@ -118,17 +124,21 @@ pub fn snapshot() -> Value {
     let output_price = std::env::var("DUBORA_GEMINI_OUTPUT_USD_PER_MILLION")
         .ok()
         .and_then(|value| value.parse::<f64>().ok());
-    let estimated_cost = input_price.zip(output_price).map(|(input, output)| {
-        (estimated_tokens(gemini_input_chars) as f64 / 1_000_000.0) * input
-            + (estimated_tokens(gemini_output_chars) as f64 / 1_000_000.0) * output
-    });
+    let openai = OPENAI_COMPATIBLE.load(Ordering::Relaxed);
+    let estimated_cost = (!openai)
+        .then(|| input_price.zip(output_price))
+        .flatten()
+        .map(|(input, output)| {
+            (estimated_tokens(gemini_input_chars) as f64 / 1_000_000.0) * input
+                + (estimated_tokens(gemini_output_chars) as f64 / 1_000_000.0) * output
+        });
     let transcription_audio_ms = AZURE_TRANSCRIPTION_AUDIO_MS.load(Ordering::Relaxed);
     let transcription_rate = std::env::var("DUBORA_AZURE_STT_USD_PER_AUDIO_HOUR")
         .ok()
         .and_then(|value| value.parse::<f64>().ok());
     let transcription_cost =
         transcription_rate.map(|rate| transcription_audio_ms as f64 / 3_600_000.0 * rate);
-    serde_json::json!({
+    let mut result = serde_json::json!({
         "geminiLogicalRequests": GEMINI_REQUESTS.load(Ordering::Relaxed),
         "geminiPlanningRequests": GEMINI_PLANNING_REQUESTS.load(Ordering::Relaxed),
         "geminiTranslationRequests": GEMINI_TRANSLATION_REQUESTS.load(Ordering::Relaxed),
@@ -155,7 +165,21 @@ pub fn snapshot() -> Value {
         } else {
             "provider_rate_unavailable"
         },
-    })
+    });
+    if openai {
+        let object = result.as_object_mut().expect("metrics are an object");
+        let gemini_keys: Vec<_> = object
+            .keys()
+            .filter(|key| key.starts_with("gemini"))
+            .cloned()
+            .collect();
+        for key in gemini_keys {
+            let value = object.remove(&key).expect("key exists");
+            object.insert(key.replacen("gemini", "openaiCompatible", 1), value);
+        }
+        object.insert("aiProvider".into(), "openai-compatible".into());
+    }
+    result
 }
 
 #[cfg(test)]
@@ -189,6 +213,12 @@ mod tests {
         assert_eq!(value["azureTranscriptionAudioMs"], 3_600_000);
         assert_eq!(value["azureTranscriptionLatencyMs"], 250);
         assert!(value.get("key").is_none());
+        use_openai_compatible();
+        let value = snapshot();
+        assert_eq!(value["aiProvider"], "openai-compatible");
+        assert_eq!(value["openaiCompatiblePlanningRequests"], 1);
+        assert!(value["openaiCompatibleEstimatedCostUsd"].is_null());
+        assert!(value.get("geminiLogicalRequests").is_none());
         reset();
     }
 }

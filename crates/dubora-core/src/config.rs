@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::FfmpegPaths;
@@ -12,6 +12,7 @@ pub const AZURE_VOICE: &str = "de-DE-Florian:DragonHDLatestNeural";
 pub const RECOMMENDED_AZURE_VOICES: &[&str] =
     &[AZURE_VOICE, "vi-VN-NamMinhNeural", "vi-VN-HoaiMyNeural"];
 pub const DEFAULT_AZURE_REGION: &str = "southeastasia";
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.5-flash-lite";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -40,6 +41,8 @@ pub struct AzureConfig {
 #[derive(Clone, Debug)]
 pub struct GeminiConfig {
     pub keys: Vec<String>,
+    pub model: String,
+    pub openai_base_url: Option<String>,
 }
 
 impl GeminiConfig {
@@ -52,7 +55,51 @@ impl GeminiConfig {
         if keys.is_empty() {
             bail!("Missing GEMINI_API_KEYS. Add one or more Gemini API keys");
         }
-        Ok(Self { keys })
+        Ok(Self {
+            keys,
+            model: DEFAULT_GEMINI_MODEL.to_owned(),
+            openai_base_url: None,
+        })
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Result<Self> {
+        let model = model.into();
+        if model.trim().is_empty() {
+            bail!("Model name cannot be empty");
+        }
+        self.model = model.trim().to_owned();
+        Ok(self)
+    }
+
+    pub fn openai_compatible(base_url: &str, model: &str, key: &str) -> Result<Self> {
+        let url = reqwest::Url::parse(base_url.trim()).context("Invalid AI base URL")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            bail!("AI base URL must be an HTTP(S) URL without credentials, query, or fragment");
+        }
+        if key.trim().is_empty() {
+            bail!("Missing OpenAI-compatible API key");
+        }
+        let mut config = Self::new(vec![key.trim().to_owned()])?.with_model(model)?;
+        config.openai_base_url = Some(url.as_str().trim_end_matches('/').to_owned());
+        Ok(config)
+    }
+
+    pub fn cache_identity(&self) -> String {
+        format!(
+            "{}:{}",
+            self.openai_base_url.as_deref().unwrap_or("gemini"),
+            self.model
+        )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 }
 
@@ -179,6 +226,32 @@ impl Default for DubOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_model_and_endpoint_are_validated_and_separate_cache_entries() {
+        let gemini = GeminiConfig::new(vec!["key".into()]).unwrap();
+        assert_eq!(gemini.model, DEFAULT_GEMINI_MODEL);
+        assert!(gemini.clone().with_model(" ").is_err());
+        let different_model = gemini.clone().with_model("another-model").unwrap();
+        assert_ne!(gemini.cache_identity(), different_model.cache_identity());
+        let router =
+            GeminiConfig::openai_compatible("http://localhost:20128/v1/", "provider/model", "key")
+                .unwrap();
+        assert_eq!(
+            router.openai_base_url.as_deref(),
+            Some("http://localhost:20128/v1")
+        );
+        assert_ne!(gemini.cache_identity(), router.cache_identity());
+        assert!(
+            GeminiConfig::openai_compatible("http://user:pass@localhost/v1", "model", "key")
+                .is_err()
+        );
+        assert!(
+            GeminiConfig::openai_compatible("http://localhost/v1?key=secret", "model", "key")
+                .is_err()
+        );
+        assert!(GeminiConfig::openai_compatible("http://localhost/v1", "model", " ").is_err());
+    }
 
     #[test]
     fn validates_region_before_it_can_enter_the_azure_url() {

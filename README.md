@@ -11,7 +11,7 @@ Tạo video lồng tiếng Việt từ video và phụ đề SRT tương ứng.
 1. Mở link trên và tìm mục **Assets**.
 2. Với Windows 64-bit, tải `Dubora-x64-installer-…-setup.exe` rồi chạy để cài đặt.
 3. Mở Dubora, chọn thư mục dự án và nhập Azure Speech key trong **Thiết lập**.
-   Thêm Gemini key nếu dùng dịch phụ đề hoặc Natural Voice.
+   Cấu hình provider AI nếu dùng dịch phụ đề hoặc Natural Voice.
 
 Installer đã kèm FFmpeg và yt-dlp; không cần cài Rust, Python hay Node.js để dùng.
 File `Dubora-…-portable-dubora.exe` là binary ứng dụng riêng, không phải bộ portable
@@ -83,6 +83,30 @@ Cũng có thể cấu hình trong `<root>/.env` với các biến `AZURE_KEY`, `
 và trau chuốt phụ đề tiếng Anh sang tiếng Việt bằng Gemini 3.5 Flash-Lite.
 Nếu có nhiều Gemini key, ứng dụng luân phiên key theo từng yêu cầu logic.
 
+Trong desktop, mục **Thiết lập → AI dịch và Natural Voice** cho phép chọn provider
+và đổi model. Với 9Router, chọn **OpenAI-compatible**, nhập Base URL (ví dụ
+`http://localhost:20128/v1`), model và API key từ 9Router. `localhost` là máy
+đang chạy Dubora; nếu router chạy trên máy khác, dùng địa chỉ máy đó.
+API key được lưu trong file cấu hình cục bộ của desktop; dùng HTTPS khi kết nối
+router qua mạng không tin cậy.
+
+CLI hỗ trợ biến môi trường hoặc file `<root>/.env`, ví dụ nội dung file:
+
+```bash
+DUBORA_AI_PROVIDER=openai-compatible
+DUBORA_AI_MODEL=provider/model
+OPENAI_BASE_URL=http://localhost:20128/v1
+OPENAI_API_KEY=your_router_key
+```
+
+Nếu nhập trong shell thay vì file `.env`, thêm `export` trước mỗi biến.
+
+`DUBORA_AI_PROVIDER=gemini` là mặc định; `DUBORA_AI_MODEL` cũng cho phép đổi
+model Gemini. Có thể dùng `--ai-provider`, `--ai-model` và `--ai-base-url` để
+ghi đè cấu hình. Provider OpenAI-compatible cần hỗ trợ Chat Completions và JSON
+object mode; chất lượng tùy model. Khi muốn xử lý lại video đã có output sau khi
+đổi model, dùng `--force` (hoặc bật xử lý lại trong desktop).
+
 Pipeline Rust ghép audio theo nhóm tối đa 32 file, đồng thời giới hạn độ dài
 lệnh FFmpeg để xử lý video dài trên Windows. Các nhóm dùng PCM lossless tạm
 thời, giữ nguyên vị trí trên timeline rồi encode MP3 một lần; file PCM được
@@ -97,12 +121,12 @@ tác vụ dừng để có thể chạy lại sau. Lỗi xác thực không đư
 
 ### Natural Voice
 
-Natural Voice là tính năng tùy chọn. Gemini tạo Speech Plan có cấu trúc, sau đó
+Natural Voice là tính năng tùy chọn. Provider AI tạo Speech Plan có cấu trúc, sau đó
 Dubora chỉ render các điều khiển SSML mà giọng Azure đã chọn hỗ trợ. Giọng có
 timing event dùng các đoạn nói hoàn chỉnh theo timeline nguồn. Dragon HD không
 hỗ trợ timing event dùng một lượt tổng hợp REST liên tục cho mỗi khối lời dẫn
 nguồn, không khẳng định đã căn chỉnh semantic anchor. Tính năng này cần
-`GEMINI_API_KEYS` ngay cả khi SRT đầu vào đã là tiếng Việt.
+cấu hình AI ngay cả khi SRT đầu vào đã là tiếng Việt.
 
 ```bash
 # Balanced mặc định: cho phép dịch chuyển khối linh hoạt tối đa 250 ms trong sync island.
@@ -153,7 +177,7 @@ hoặc `cueOnly`. Dragon HD dùng dấu câu, semantic break và điều khiển
 liên tục còn vượt `1.13x` sẽ thành `reviewRequired` nguyên khối, không trộn
 file `utterance_*` với `seg_*`.
 
-Nhánh source-aligned giữ một timeline do Rust quản lý. Gemini chỉ chọn cách
+Nhánh source-aligned giữ một timeline do Rust quản lý. AI chỉ chọn cách
 diễn đạt và thể hiện; Rust quản lý timing nguồn, cửa sổ semantic anchor, phân
 bổ và render SSML. Mỗi lần chạy ghi `source_timeline.json`,
 `render_manifest.json`, `sync_report.json` và `provider_metrics.json` không
@@ -275,7 +299,7 @@ Voice được hỗ trợ: emphasis, prosody, semantic break và style. Bộ l�
 cũng gồm các giọng đa ngôn ngữ hỗ trợ tiếng Việt.
 
 Trong **Thư viện**, bật **Natural Voice** và chọn Sync, Balanced hoặc Natural.
-Natural Voice cần ít nhất một Gemini key trong **Thiết lập → Google AI Studio**.
+Natural Voice cần provider AI được cấu hình trong **Thiết lập → AI dịch và Natural Voice**.
 Desktop cũng có lựa chọn source timing cạnh chế độ Natural Voice;
 Caption timing là mặc định.
 

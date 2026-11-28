@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::azure_voices::AzureVoice;
+use crate::config::GeminiConfig;
 use crate::duration_solver::MAX_TIME_STRETCH_TEMPO;
 use crate::metrics::{
     GeminiRequestKind, record_gemini_cache_hit, record_gemini_request, record_gemini_response,
@@ -22,7 +23,6 @@ use crate::tts_azure::prepare_tts_text;
 use crate::tts_cache::tts_cache_key;
 
 const ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/interactions";
-const MODEL: &str = "gemini-3.5-flash-lite";
 static GEMINI_KEY_CURSOR: AtomicUsize = AtomicUsize::new(0);
 const GEMINI_ATTEMPTS: usize = 3;
 const MAX_RETRY_WAIT_SECONDS: u64 = 30;
@@ -185,19 +185,19 @@ pub struct SpeechPlanRevisionRequest {
     pub maximum_words: usize,
 }
 
-pub async fn translate_srt(keys: &[String], input: &Path, output: &Path) -> Result<()> {
+pub async fn translate_srt(keys: &GeminiConfig, input: &Path, output: &Path) -> Result<()> {
     let source = parse_srt(input)?;
     if source.is_empty() {
         bail!("No subtitle segments were found for translation");
     }
     if keys.is_empty() {
-        bail!("At least one Gemini API key is required");
+        bail!("At least one AI API key is required");
     }
     let client = reqwest::Client::new();
     let mut translated = Vec::with_capacity(source.len());
     let context = tts_cache_key(
         "gemini-translation-batches-v1",
-        MODEL,
+        &keys.cache_identity(),
         TRANSLATION_SYSTEM_INSTRUCTION,
         &fs::read_to_string(input)?,
     );
@@ -231,7 +231,7 @@ pub async fn translate_srt(keys: &[String], input: &Path, output: &Path) -> Resu
                             .await
                             .with_context(|| {
                                 format!(
-                                    "Gemini translation batch failed after large-batch fallback: {batch_error:#}"
+                                    "AI translation batch failed after large-batch fallback: {batch_error:#}"
                                 )
                             })?,
                     );
@@ -251,7 +251,7 @@ pub async fn translate_srt(keys: &[String], input: &Path, output: &Path) -> Resu
 /// only decides how it should be spoken. When it is true, Gemini returns the Vietnamese display
 /// text and the matching spoken text in the same request.
 pub async fn create_speech_plans(
-    keys: &[String],
+    keys: &GeminiConfig,
     input: &Path,
     translate: bool,
     mode: NaturalMode,
@@ -273,7 +273,7 @@ pub async fn create_speech_plans(
 }
 
 pub(crate) async fn create_speech_plans_for_voice(
-    keys: &[String],
+    keys: &GeminiConfig,
     input: &Path,
     translate: bool,
     mode: NaturalMode,
@@ -286,7 +286,7 @@ pub(crate) async fn create_speech_plans_for_voice(
         bail!("No subtitle segments were found for speech planning");
     }
     if keys.is_empty() {
-        bail!("At least one Gemini API key is required");
+        bail!("At least one AI API key is required");
     }
 
     let client = reqwest::Client::new();
@@ -294,7 +294,7 @@ pub(crate) async fn create_speech_plans_for_voice(
     let allowed_styles = &voice.styles;
     let context = tts_cache_key(
         "gemini-plan-batches-v1",
-        &voice.short_name,
+        &format!("{}:{}", keys.cache_identity(), voice.short_name),
         &voice.styles.join("|"),
         &format!(
             "{}\n{}",
@@ -341,7 +341,7 @@ pub(crate) async fn create_speech_plans_for_voice(
 /// Rephrase one already-planned segment after its first TTS result misses timing by more than
 /// the prosody range. The caller keeps the displayed subtitle stable and allows one retry only.
 pub async fn revise_speech_plan(
-    keys: &[String],
+    keys: &GeminiConfig,
     plan: &SpeechPlan,
     actual_duration_ms: u32,
     target_duration_ms: u32,
@@ -349,7 +349,7 @@ pub async fn revise_speech_plan(
     revision_number: u8,
 ) -> Result<Vec<SpeechPlan>> {
     if keys.is_empty() {
-        bail!("At least one Gemini API key is required for speech-plan revision");
+        bail!("At least one AI API key is required for speech-plan revision");
     }
     if actual_duration_ms == 0 || target_duration_ms == 0 {
         bail!("Speech-plan revision requires non-zero audio and target durations");
@@ -362,7 +362,7 @@ pub async fn revise_speech_plan(
         revision_number,
     ))?;
     let body = serde_json::json!({
-        "model": MODEL,
+        "model": keys.model,
         "input": input,
         "system_instruction": SPEECH_REVISION_SYSTEM_INSTRUCTION,
         "store": false,
@@ -410,7 +410,7 @@ pub async fn revise_speech_plan(
 
 /// Revise all overlong fallback segments in one bounded Gemini request.
 pub async fn revise_speech_plans_batch(
-    keys: &[String],
+    keys: &GeminiConfig,
     requests: &[SpeechPlanRevisionRequest],
     revision_number: u8,
 ) -> Result<Vec<SpeechPlan>> {
@@ -418,7 +418,7 @@ pub async fn revise_speech_plans_batch(
         return Ok(Vec::new());
     }
     if keys.is_empty() {
-        bail!("At least one Gemini API key is required for speech-plan revision");
+        bail!("At least one AI API key is required for speech-plan revision");
     }
     let input = serde_json::to_string(&serde_json::json!({
         "task": "reviseSpeechPlans",
@@ -437,7 +437,7 @@ pub async fn revise_speech_plans_batch(
             .collect::<Vec<_>>(),
     }))?;
     let body = serde_json::json!({
-        "model": MODEL,
+        "model": keys.model,
         "input": input,
         "system_instruction": SPEECH_BATCH_REVISION_SYSTEM_INSTRUCTION,
         "store": false,
@@ -935,21 +935,21 @@ fn parse_revised_speech_plans(
         return Ok(Vec::new());
     }
     let mut response: serde_json::Value =
-        serde_json::from_str(text).context("Gemini did not return revised speech plan JSON")?;
+        serde_json::from_str(text).context("AI did not return revised speech plan JSON")?;
     normalize_plan_arrays(&mut response);
     let plans = response["plans"]
         .as_array_mut()
         .filter(|plans| !plans.is_empty() && plans.len() <= 3)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Gemini must return one to three revised speech plans for segment {}",
+                "AI must return one to three revised speech plans for segment {}",
                 plan.index
             )
         })?;
     for revised in plans {
         let revised = revised.as_object_mut().ok_or_else(|| {
             anyhow::anyhow!(
-                "Gemini returned an invalid revised speech plan for segment {}",
+                "AI returned an invalid revised speech plan for segment {}",
                 plan.index
             )
         })?;
@@ -971,7 +971,7 @@ fn parse_revised_speech_plans(
     }
 
     let revised: PlanOutput = serde_json::from_value(response)
-        .context("Gemini did not return a usable revised speech plan")?;
+        .context("AI did not return a usable revised speech plan")?;
     let current_tts_len = prepare_tts_text(&plan.spoken_text).chars().count();
     let maximum_words = revision_word_budget(
         plan,
@@ -1014,12 +1014,12 @@ fn parse_revised_speech_plans_batch(
     text: &str,
 ) -> Result<Vec<SpeechPlan>> {
     let mut response: serde_json::Value =
-        serde_json::from_str(text).context("Gemini did not return revised speech plan JSON")?;
+        serde_json::from_str(text).context("AI did not return revised speech plan JSON")?;
     normalize_plan_arrays(&mut response);
     let plans = response["plans"]
         .as_array()
         .filter(|plans| !plans.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Gemini returned no revised speech plans"))?;
+        .ok_or_else(|| anyhow::anyhow!("AI returned no revised speech plans"))?;
     let requests_by_index = requests
         .iter()
         .map(|request| (request.plan.index, request))
@@ -1092,7 +1092,7 @@ fn parse_revised_speech_plans_batch(
 
 async fn translate_batch(
     client: &reqwest::Client,
-    keys: &[String],
+    keys: &GeminiConfig,
     batch: &[SrtSegment],
     input_path: &Path,
     context: &str,
@@ -1111,7 +1111,7 @@ async fn translate_batch(
         "segments": segments,
     }))?;
     let body = serde_json::json!({
-        "model": MODEL,
+        "model": keys.model,
         "input": input,
         "system_instruction": TRANSLATION_SYSTEM_INSTRUCTION,
         "store": false,
@@ -1142,8 +1142,7 @@ async fn translate_batch(
 }
 
 fn parse_translation_response(batch: &[SrtSegment], text: &str) -> Result<Vec<SrtSegment>> {
-    let output: Output =
-        serde_json::from_str(&text).context("Gemini did not return subtitle JSON")?;
+    let output: Output = serde_json::from_str(&text).context("AI did not return subtitle JSON")?;
     let mut by_index = output
         .segments
         .into_iter()
@@ -1155,7 +1154,7 @@ fn parse_translation_response(batch: &[SrtSegment], text: &str) -> Result<Vec<Sr
             let text = by_index
                 .remove(&segment.index)
                 .filter(|text| !text.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("Gemini omitted subtitle {}", segment.index))?;
+                .ok_or_else(|| anyhow::anyhow!("AI omitted subtitle {}", segment.index))?;
             Ok(SrtSegment {
                 index: segment.index,
                 start: segment.start.clone(),
@@ -1168,7 +1167,7 @@ fn parse_translation_response(batch: &[SrtSegment], text: &str) -> Result<Vec<Sr
 
 async fn plan_batch(
     client: &reqwest::Client,
-    keys: &[String],
+    keys: &GeminiConfig,
     source: &[SrtSegment],
     batch: &[SrtSegment],
     translate: bool,
@@ -1250,7 +1249,7 @@ async fn plan_batch(
         "segments": input,
     }))?;
     let body = serde_json::json!({
-        "model": MODEL,
+        "model": keys.model,
         "input": input,
         "system_instruction": SPEECH_PLAN_SYSTEM_INSTRUCTION,
         "store": false,
@@ -1309,7 +1308,7 @@ fn batch_cache_path(input: &Path, context: &str, body: &serde_json::Value) -> Pa
 
 async fn cached_batch<T>(
     client: &reqwest::Client,
-    keys: &[String],
+    keys: &GeminiConfig,
     body: serde_json::Value,
     kind: GeminiRequestKind,
     path: &Path,
@@ -1325,7 +1324,7 @@ async fn cached_batch<T>(
     let value = parse(&text)?;
     fs::create_dir_all(path.parent().context("Batch cache has no parent")?)?;
     fs::write(path, text)
-        .with_context(|| format!("Failed to checkpoint Gemini batch {}", path.display()))?;
+        .with_context(|| format!("Failed to checkpoint AI batch {}", path.display()))?;
     Ok(value)
 }
 
@@ -1338,17 +1337,17 @@ fn parse_plan_response(
     timeline: Option<&SourceTimeline>,
 ) -> Result<Vec<SpeechPlan>> {
     let mut response: serde_json::Value =
-        serde_json::from_str(text).context("Gemini did not return speech plan JSON")?;
+        serde_json::from_str(text).context("AI did not return speech plan JSON")?;
     normalize_plan_arrays(&mut response);
     let output: PlanOutput =
-        serde_json::from_value(response).context("Gemini did not return speech plan JSON")?;
+        serde_json::from_value(response).context("AI did not return speech plan JSON")?;
     let mut by_index = output
         .plans
         .into_iter()
         .map(|plan| (plan.index, plan))
         .collect::<std::collections::HashMap<_, _>>();
     if by_index.len() != batch.len() {
-        bail!("Gemini returned duplicate or unexpected speech plans");
+        bail!("AI returned duplicate or unexpected speech plans");
     }
 
     batch
@@ -1356,7 +1355,7 @@ fn parse_plan_response(
         .map(|segment| {
             let mut plan = by_index
                 .remove(&segment.index)
-                .ok_or_else(|| anyhow::anyhow!("Gemini omitted speech plan {}", segment.index))?;
+                .ok_or_else(|| anyhow::anyhow!("AI omitted speech plan {}", segment.index))?;
             let source_segment = source
                 .iter()
                 .find(|candidate| candidate.index == segment.index)
@@ -1464,25 +1463,65 @@ fn maximum_tts_characters_at_rate(target_duration_ms: u32, characters_per_second
 
 async fn request_model_output(
     client: &reqwest::Client,
-    keys: &[String],
+    keys: &GeminiConfig,
     body: serde_json::Value,
     kind: GeminiRequestKind,
 ) -> Result<String> {
-    let key = next_gemini_key(keys, &GEMINI_KEY_CURSOR)
-        .context("At least one Gemini API key is required")?;
+    let key = next_gemini_key(&keys.keys, &GEMINI_KEY_CURSOR)
+        .context("At least one AI API key is required")?;
     let request_bytes = serde_json::to_vec(&body)?;
-    record_gemini_request(kind, request_bytes.len());
     #[cfg(test)]
     if let Some(responder) = TEST_GEMINI_RESPONDER
         .get()
         .and_then(|responder| responder.lock().ok())
         .and_then(|responder| responder.as_ref().map(|responder| responder(&body, kind)))
     {
+        record_gemini_request(kind, request_bytes.len());
         let text = responder?;
         record_gemini_response(text.len());
         return Ok(text);
     }
-    let payload = send_model_request(client, key, &request_bytes, ENDPOINT).await?;
+    let (endpoint, request_bytes, openai) = if let Some(base) = &keys.openai_base_url {
+        let schema = &body["response_format"]["schema"];
+        let instruction = format!(
+            "{}\nReturn only a JSON object matching this schema: {}",
+            body["system_instruction"]
+                .as_str()
+                .context("Missing system instruction")?,
+            schema
+        );
+        let request = serde_json::json!({
+            "model": keys.model,
+            "messages": [
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": body["input"]}
+            ],
+            "response_format": {"type": "json_object"}
+        });
+        (
+            format!("{base}/chat/completions"),
+            serde_json::to_vec(&request)?,
+            true,
+        )
+    } else {
+        (ENDPOINT.to_owned(), request_bytes, false)
+    };
+    record_gemini_request(kind, request_bytes.len());
+    let payload = send_model_request(client, key, &request_bytes, &endpoint, openai).await?;
+    if openai {
+        let choice = &payload["choices"][0];
+        if choice["finish_reason"].as_str() != Some("stop") {
+            bail!(
+                "AI completion did not finish normally: {}",
+                choice["finish_reason"]
+            );
+        }
+        let text = choice["message"]["content"]
+            .as_str()
+            .context("AI completion returned no text")?;
+        record_gemini_response(text.len());
+        return Ok(text.to_owned());
+    }
     let text = payload["steps"]
         .as_array()
         .into_iter()
@@ -1513,11 +1552,16 @@ async fn send_model_request(
     key: &str,
     bytes: &[u8],
     endpoint: &str,
+    openai: bool,
 ) -> Result<serde_json::Value> {
     for attempt in 0..GEMINI_ATTEMPTS {
-        let response = client
-            .post(endpoint)
-            .header("x-goog-api-key", key)
+        let request = client.post(endpoint);
+        let request = if openai {
+            request.bearer_auth(key)
+        } else {
+            request.header("x-goog-api-key", key)
+        };
+        let response = request
             .header("content-type", "application/json")
             .body(bytes.to_vec())
             .timeout(Duration::from_secs(90))
@@ -1531,7 +1575,7 @@ async fn send_model_request(
                 tokio::time::sleep(gemini_retry_delay(attempt, None).unwrap()).await;
                 continue;
             }
-            Err(error) => return Err(error).context("Gemini request failed"),
+            Err(error) => return Err(error).context("AI request failed"),
         };
         let status = response.status();
         let retryable_status = matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504);
@@ -1551,10 +1595,10 @@ async fn send_model_request(
                 tokio::time::sleep(delay.unwrap()).await;
                 continue;
             }
-            Err(error) => return Err(error).context("Failed to read Gemini response"),
+            Err(error) => return Err(error).context("Failed to read AI response"),
         };
         if status.is_success() {
-            return serde_json::from_str(&body).context("Invalid Gemini JSON response");
+            return serde_json::from_str(&body).context("Invalid AI JSON response");
         }
         if retryable_status
             && attempt + 1 < GEMINI_ATTEMPTS
@@ -1564,7 +1608,7 @@ async fn send_model_request(
             continue;
         }
         let message = format!(
-            "Gemini request failed with {status}: {}",
+            "AI request failed with {status}: {}",
             body.replace(key, "<redacted>")
         );
         if let Some(error) = http_error {
@@ -1614,6 +1658,158 @@ mod long_job_tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    async fn openai_compatible_runs_all_stages_and_invalidates_model_cache() -> Result<()> {
+        let _lock = TEST_PROVIDER_LOCK.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let base = format!("http://{}/v1", listener.local_addr()?);
+        let worker = std::thread::spawn(move || -> Result<Vec<serde_json::Value>> {
+            let mut received = Vec::new();
+            for _ in 0..6 {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut header = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !header.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte)?;
+                    header.push(byte[0]);
+                }
+                let header = String::from_utf8(header)?;
+                assert!(header.starts_with("POST /v1/chat/completions "));
+                assert!(
+                    header
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer router-key")
+                );
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .context("Missing content length")?;
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body)?;
+                let request: serde_json::Value = serde_json::from_slice(&body)?;
+                assert_eq!(request["response_format"]["type"], "json_object");
+                assert!(
+                    request["messages"][0]["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("schema")
+                );
+                let input: serde_json::Value =
+                    serde_json::from_str(request["messages"][1]["content"].as_str().unwrap())?;
+                let output = match input["task"].as_str().unwrap() {
+                    "translateSubtitles" => {
+                        serde_json::json!({"segments":[{"index":1,"text":"Xin chào các bạn."}]})
+                    }
+                    "createSpeechPlans" => {
+                        serde_json::json!({"plans":[SpeechPlan::plain(1, "Xin chào các bạn.", 4000)]})
+                    }
+                    "reviseSpeechPlan" => {
+                        serde_json::json!({"plans":[{"spokenText":"Xin chào.","delivery":"neutral","emphasis":[],"pauses":[],"style":null,"semanticAnchors":[]}]})
+                    }
+                    "reviseSpeechPlans" => {
+                        serde_json::json!({"plans":[SpeechPlan::plain(1, "Xin chào.", 4000)]})
+                    }
+                    task => panic!("Unexpected task {task}"),
+                };
+                let finish = if request["model"] == "router/truncated" {
+                    "length"
+                } else {
+                    "stop"
+                };
+                let response = serde_json::json!({"choices":[{"finish_reason":finish,"message":{"content":output.to_string()}}]}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )?;
+                received.push(request);
+            }
+            Ok(received)
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "dubora-openai-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir)?;
+        let input = dir.join("input.srt");
+        let output = dir.join("output.srt");
+        fs::write(
+            &input,
+            "1\n00:00:00,000 --> 00:00:04,000\nHello everyone.\n",
+        )?;
+        let first = GeminiConfig::openai_compatible(&base, "router/model-a", "router-key")?;
+        let second = GeminiConfig::openai_compatible(&base, "router/model-b", "router-key")?;
+        translate_srt(&first, &input, &output).await?;
+        translate_srt(&first, &input, &output).await?;
+        translate_srt(&second, &input, &output).await?;
+        let voice = AzureVoice::from_short_name("vi-VN-NamMinhNeural", Vec::new());
+        let plans = create_speech_plans_for_voice(
+            &second,
+            &output,
+            false,
+            NaturalMode::Balanced,
+            &voice,
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(plans.plans[0].spoken_text, "Xin chào các bạn.");
+        let revisions = revise_speech_plan(&second, &plans.plans[0], 6000, 4000, &[], 1).await?;
+        assert_eq!(revisions[0].spoken_text, "Xin chào.");
+        let requests = [SpeechPlanRevisionRequest {
+            plan: plans.plans[0].clone(),
+            actual_duration_ms: 6000,
+            target_duration_ms: 4000,
+            allowed_styles: Vec::new(),
+            maximum_words: 10,
+        }];
+        let revisions = revise_speech_plans_batch(&second, &requests, 1).await?;
+        assert_eq!(revisions[0].spoken_text, "Xin chào.");
+        let truncated = GeminiConfig::openai_compatible(&base, "router/truncated", "router-key")?;
+        let body = serde_json::json!({
+            "model": "router/truncated", "system_instruction": "Return JSON",
+            "input": "{\"task\":\"translateSubtitles\"}",
+            "response_format": {"schema": {"type": "object"}}
+        });
+        assert!(
+            request_model_output(
+                &reqwest::Client::new(),
+                &truncated,
+                body,
+                GeminiRequestKind::Translation
+            )
+            .await
+            .is_err()
+        );
+        let received = worker.join().unwrap()?;
+        assert_eq!(
+            received
+                .iter()
+                .map(|request| request["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "router/model-a",
+                "router/model-b",
+                "router/model-b",
+                "router/model-b",
+                "router/model-b",
+                "router/truncated"
+            ]
+        );
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn planning_resumes_after_a_late_failure_and_invalidates_changed_context() -> Result<()> {
         let _lock = TEST_PROVIDER_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!(
@@ -1658,7 +1854,7 @@ mod long_job_tests {
                 .collect::<Vec<_>>();
             Ok(serde_json::json!({"plans": plans}).to_string())
         }));
-        let keys = vec!["fake-key".to_owned()];
+        let keys = GeminiConfig::new(vec!["fake-key".to_owned()])?;
         let mut voice = AzureVoice::from_short_name("vi-VN-NamMinhNeural", Vec::new());
         assert!(
             create_speech_plans_for_voice(
@@ -1775,7 +1971,7 @@ mod long_job_tests {
                 .collect::<Vec<_>>();
             Ok(serde_json::json!({"segments": segments}).to_string())
         }));
-        let keys = vec!["fake-key".to_owned()];
+        let keys = GeminiConfig::new(vec!["fake-key".to_owned()])?;
         assert!(translate_srt(&keys, &input, &output).await.is_err());
         assert!(
             !output.exists(),
@@ -1855,7 +2051,7 @@ mod long_job_tests {
         let client = reqwest::Client::new();
         let (url, worker) = server(vec![503, 429, 200]);
         assert!(
-            send_model_request(&client, "fake-key", b"", &url)
+            send_model_request(&client, "fake-key", b"", &url, false)
                 .await
                 .is_ok()
         );
@@ -1863,7 +2059,7 @@ mod long_job_tests {
         for statuses in [vec![503, 503, 503], vec![400], vec![401], vec![403]] {
             let expected = statuses.len();
             let (url, worker) = server(statuses);
-            let error = send_model_request(&client, "fake-key", b"", &url)
+            let error = send_model_request(&client, "fake-key", b"", &url, false)
                 .await
                 .unwrap_err();
             assert!(

@@ -442,12 +442,12 @@ fn source_transcription_cache_key(video: &Path, locale: &str, region: &str) -> R
     ))
 }
 
-fn translation_cache_key(input: &Path) -> Result<String> {
+fn translation_cache_key(input: &Path, config: &crate::config::GeminiConfig) -> Result<String> {
     let bytes = fs::read(input)
         .with_context(|| format!("Failed to read subtitle source {}", input.display()))?;
     Ok(tts_cache_key(
         "gemini-translation-v2",
-        "",
+        &config.cache_identity(),
         "",
         &String::from_utf8_lossy(&bytes),
     ))
@@ -739,6 +739,9 @@ async fn create_dub_for_video(
         let gemini = config.gemini.as_ref().context(
             "Missing GEMINI_API_KEYS. Add Gemini API keys before enabling Natural Voice",
         )?;
+        if gemini.openai_base_url.is_some() {
+            metrics::use_openai_compatible();
+        }
         let styles = (!azure.style.is_empty())
             .then(|| azure.style.clone())
             .into_iter()
@@ -778,7 +781,7 @@ async fn create_dub_for_video(
         let plan_input_srt = if options.translate {
             let translated = job_dir.join("translated_source.srt");
             let cache_path = job_dir.join("translated_source.srt.sha256");
-            let cache_key = translation_cache_key(&clean_srt)?;
+            let cache_key = translation_cache_key(&clean_srt, gemini)?;
             let cache_hit = translated.is_file()
                 && fs::read_to_string(&cache_path).is_ok_and(|stored| stored.trim() == cache_key);
             if !cache_hit {
@@ -787,7 +790,7 @@ async fn create_dub_for_video(
                     &label,
                     "Translating indexed subtitle text before Natural Voice planning.".to_owned(),
                 ));
-                translate_srt(&gemini.keys, &clean_srt, &translated).await?;
+                translate_srt(gemini, &clean_srt, &translated).await?;
                 fs::write(&cache_path, cache_key)?;
             }
             translated
@@ -809,7 +812,7 @@ async fn create_dub_for_video(
             // v25 invalidates plans before hedge-prefix compaction and extra-anchor stripping.
             "gemini-speech-plan-v25",
             // Keep this comment adjacent to the version so future prompt/input changes bump it.
-            &format!("{mode:?}:{}", options.translate),
+            &format!("{mode:?}:{}:{}", options.translate, gemini.cache_identity()),
             &format!("{}|{}", voice.short_name, voice.styles.join("|")),
             &String::from_utf8_lossy(&source_for_cache),
         );
@@ -875,7 +878,7 @@ async fn create_dub_for_video(
             plans
         } else {
             let plans_result = create_speech_plans_for_voice(
-                &gemini.keys,
+                gemini,
                 &plan_input_srt,
                 false,
                 mode,
@@ -955,7 +958,7 @@ async fn create_dub_for_video(
                     mode,
                     &source_timeline,
                     &sync_layout,
-                    &gemini.keys,
+                    gemini,
                     &voice,
                     &tts_dir,
                     &render_manifest,
@@ -974,7 +977,7 @@ async fn create_dub_for_video(
                     mode,
                     &source_timeline,
                     &sync_layout,
-                    &gemini.keys,
+                    gemini,
                     &voice,
                     &tts_dir,
                     &render_manifest,
@@ -993,7 +996,7 @@ async fn create_dub_for_video(
                     mode,
                     &source_timeline,
                     &sync_layout,
-                    &gemini.keys,
+                    gemini,
                     &voice,
                     &tts_dir,
                     &render_manifest,
@@ -1110,7 +1113,7 @@ async fn create_dub_for_video(
                 .gemini
                 .as_ref()
                 .context("Missing GEMINI_API_KEYS. Add Gemini API keys before translating")?;
-            translate_srt(&gemini.keys, &clean_srt, &vi_srt).await?;
+            translate_srt(gemini, &clean_srt, &vi_srt).await?;
         } else {
             fs::copy(&clean_srt, &vi_srt)?;
         }
@@ -1680,7 +1683,7 @@ mod tests {
         let voice = AzureVoice::from_short_name("vi-VN-NamMinhNeural".to_owned(), Vec::new());
         assert_eq!(voice.capabilities.timing_events, CapabilityState::Supported);
         let plans = crate::translate_gemini::create_speech_plans(
-            &["fake-gemini".to_owned()],
+            &crate::config::GeminiConfig::new(vec!["fake-gemini".to_owned()])?,
             &input_srt,
             false,
             NaturalMode::Balanced,
@@ -1706,7 +1709,7 @@ mod tests {
                     NaturalMode::Balanced,
                     &source_timeline,
                     &layout,
-                    &["fake-gemini".to_owned()],
+                    &crate::config::GeminiConfig::new(vec!["fake-gemini".to_owned()])?,
                     &voice,
                     &aligned_output_dir,
                     &aligned_manifest,
@@ -1742,7 +1745,7 @@ mod tests {
                     NaturalMode::Balanced,
                     &source_timeline,
                     &layout,
-                    &["fake-gemini".to_owned()],
+                    &crate::config::GeminiConfig::new(vec!["fake-gemini".to_owned()])?,
                     &voice,
                     &rollback_output_dir,
                     &rollback_manifest,
@@ -1785,7 +1788,7 @@ mod tests {
             NaturalMode::Balanced,
             &source_timeline,
             &layout,
-            &["fake-gemini".to_owned()],
+            &crate::config::GeminiConfig::new(vec!["fake-gemini".to_owned()])?,
             &hd_voice,
             &hd_output_dir,
             &hd_manifest,

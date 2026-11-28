@@ -12,6 +12,11 @@ export type AppConfig = {
   /** Optional expressive style supported by the selected Azure voice. */
   azureVoiceStyle: string;
   geminiKeys: string;
+  aiProvider: "gemini" | "openai-compatible";
+  geminiModel: string;
+  aiBaseUrl: string;
+  aiModel: string;
+  aiApiKey: string;
   playlists: Playlist[];
 };
 

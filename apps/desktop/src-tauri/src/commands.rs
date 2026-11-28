@@ -30,6 +30,11 @@ pub struct AppConfig {
     /// Optional expressive style supported by the selected Azure voice.
     pub azure_voice_style: String,
     pub gemini_keys: String,
+    pub ai_provider: String,
+    pub gemini_model: String,
+    pub ai_base_url: String,
+    pub ai_model: String,
+    pub ai_api_key: String,
     pub playlists: Vec<Playlist>,
 }
 
@@ -51,6 +56,11 @@ impl Default for AppConfig {
             azure_voice: AZURE_VOICE.to_owned(),
             azure_voice_style: String::new(),
             gemini_keys: String::new(),
+            ai_provider: "gemini".to_owned(),
+            gemini_model: dubora_core::config::DEFAULT_GEMINI_MODEL.to_owned(),
+            ai_base_url: String::new(),
+            ai_model: String::new(),
+            ai_api_key: String::new(),
             playlists: Vec::new(),
         }
     }
@@ -576,10 +586,17 @@ pub fn start_dub(app: AppHandle, request: StartDubRequest) -> Result<String, Str
         provider: Provider::Azure,
         azure: Some(azure),
         gemini: (request.translate || request.natural_voice)
-            .then(|| {
-                GeminiConfig::new(dubora_core::translate_gemini::parse_keys(
+            .then(|| match saved.ai_provider.as_str() {
+                "gemini" => GeminiConfig::new(dubora_core::translate_gemini::parse_keys(
                     &saved.gemini_keys,
-                ))
+                ))?
+                .with_model(&saved.gemini_model),
+                "openai-compatible" => GeminiConfig::openai_compatible(
+                    &saved.ai_base_url,
+                    &saved.ai_model,
+                    &saved.ai_api_key,
+                ),
+                _ => anyhow::bail!("Unknown AI provider"),
             })
             .transpose()
             .map_err(|error| format!("{error:#}"))?,
@@ -870,6 +887,11 @@ mod tests {
             azure_voice: AZURE_VOICE.to_owned(),
             azure_voice_style: "chat".to_owned(),
             gemini_keys: "key1,key2".to_owned(),
+            ai_provider: "openai-compatible".to_owned(),
+            gemini_model: "another-gemini".to_owned(),
+            ai_base_url: "http://localhost:20128/v1".to_owned(),
+            ai_model: "provider/model".to_owned(),
+            ai_api_key: "router-key".to_owned(),
             playlists: Vec::new(),
         };
         write_config(&path, &config).unwrap();
@@ -882,6 +904,12 @@ mod tests {
         let loaded = read_config(&legacy_path).unwrap();
         assert_eq!(loaded.azure_voice, AZURE_VOICE);
         assert!(loaded.azure_voice_style.is_empty());
+        assert_eq!(loaded.ai_provider, "gemini");
+        assert_eq!(
+            loaded.gemini_model,
+            dubora_core::config::DEFAULT_GEMINI_MODEL
+        );
+        assert!(loaded.ai_api_key.is_empty());
         assert!(loaded.playlists.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
