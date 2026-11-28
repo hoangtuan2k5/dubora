@@ -11,6 +11,19 @@ heading when you want a new GitHub Release; `## [Unreleased]` is ignored.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-28
+
+### Added
+
+- Select a Gemini model or an OpenAI-compatible Chat Completions provider for subtitle translation and Natural Voice.
+- Configure an OpenAI-compatible base URL, model, and API key in desktop settings and the Rust CLI.
+- Support signed Windows application updates.
+
+### Changed
+
+- Invalidate AI translation, speech-plan, and revision caches when the provider or model changes.
+- Update the Rust core AI APIs to accept provider configuration instead of Gemini key lists. This is a breaking change for direct library callers.
+
 ## [0.2.4] - 2026-11-25
 
 ### Changed
